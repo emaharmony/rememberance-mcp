@@ -21,12 +21,11 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 import threading
 
+from remembrance_mcp.api.rest import start_rest_api
 from remembrance_mcp.config import Settings
 from remembrance_mcp.pipeline import MemoryPipeline
-from remembrance_mcp.api.rest import start_rest_api
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +35,18 @@ _shutdown_event = threading.Event()
 
 def main():
     parser = argparse.ArgumentParser(description="Remembrance Memory Service")
-    parser.add_argument("--host", default="127.0.0.1", help="REST API bind address (default: 127.0.0.1)")
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="REST API bind address (default: 127.0.0.1)"
+    )
     parser.add_argument("--port", type=int, default=8788, help="REST API port (default: 8788)")
-    parser.add_argument("--nats", default="nats://localhost:4222", help="NATS server URL (default: nats://localhost:4222)")
-    parser.add_argument("--no-nats", action="store_true", help="Disable NATS subscriber (REST API only)")
+    parser.add_argument(
+        "--nats",
+        default="nats://localhost:4222",
+        help="NATS server URL (default: nats://localhost:4222)",
+    )
+    parser.add_argument(
+        "--no-nats", action="store_true", help="Disable NATS subscriber (REST API only)"
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
@@ -61,6 +68,7 @@ def main():
     if not args.no_nats:
         try:
             from remembrance_mcp.nats_sub import NatsSubscriber
+
             nats_sub = NatsSubscriber(
                 pipeline=pipeline,
                 nats_url=args.nats,

@@ -15,6 +15,7 @@ Pure stdlib — runs under any Python 3. Never blocks a session: any failure
 Env:
   REMEMBRANCE_URL   base URL of the Remembrance service (default 127.0.0.1:18790)
 """
+
 from __future__ import annotations
 
 import json
@@ -66,12 +67,16 @@ def main() -> int:
     if not markdown:
         return 0
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": markdown,
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": markdown,
+                }
+            }
+        )
+    )
     return 0
 
 

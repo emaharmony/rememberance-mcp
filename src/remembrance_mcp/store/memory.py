@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Memory Store V2 Extensions — Compiled Truth, Timeline, FTS5, Dream Log
 
@@ -14,10 +15,9 @@ MIGRATION STRATEGY:
 """
 
 import json
+import logging
 import sqlite3
 import time
-import logging
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,10 @@ class MemoryStoreV2:
             conn.execute("PRAGMA journal_mode=WAL")
             # Add new columns to memories table
             migrations = [
-                ("ALTER TABLE memories ADD COLUMN compiled_truth TEXT DEFAULT ''", "compiled_truth"),
+                (
+                    "ALTER TABLE memories ADD COLUMN compiled_truth TEXT DEFAULT ''",
+                    "compiled_truth",
+                ),
                 ("ALTER TABLE memories ADD COLUMN timeline TEXT DEFAULT ''", "timeline"),
                 ("ALTER TABLE memories ADD COLUMN dream_count INTEGER DEFAULT 0", "dream_count"),
                 ("ALTER TABLE memories ADD COLUMN last_dream_at REAL", "last_dream_at"),
@@ -129,8 +132,13 @@ class MemoryStoreV2:
 
     # ── FTS5 Search ─────────────────────────────────────────────
 
-    def search_fts(self, query: str, category: Optional[str] = None,
-                   tier: Optional[str] = None, limit: int = 10) -> list[dict]:
+    def search_fts(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """
         Search memories using FTS5 full-text search.
 
@@ -183,16 +191,20 @@ class MemoryStoreV2:
         """Rewrite the compiled truth for a memory (REWRITE, not append)."""
         with sqlite3.connect(str(self.db_path)) as conn:
             cursor = conn.execute(
-                "UPDATE memories SET compiled_truth = ? WHERE id = ?",
-                (compiled_truth, mem_id)
+                "UPDATE memories SET compiled_truth = ? WHERE id = ?", (compiled_truth, mem_id)
             )
             # Also update FTS5
             try:
-                rowid = conn.execute("SELECT rowid FROM memories WHERE id = ?", (mem_id,)).fetchone()
+                rowid = conn.execute(
+                    "SELECT rowid FROM memories WHERE id = ?", (mem_id,)
+                ).fetchone()
                 if rowid:
-                    conn.execute("""
+                    conn.execute(
+                        """
                         UPDATE memories_fts SET compiled_truth = ? WHERE rowid = ?
-                    """, (compiled_truth, rowid[0]))
+                    """,
+                        (compiled_truth, rowid[0]),
+                    )
             except Exception:
                 pass
             return cursor.rowcount > 0
@@ -217,10 +229,7 @@ class MemoryStoreV2:
         new_timeline = formatted + "\n" + existing_timeline  # newest first
 
         with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute(
-                "UPDATE memories SET timeline = ? WHERE id = ?",
-                (new_timeline, mem_id)
-            )
+            conn.execute("UPDATE memories SET timeline = ? WHERE id = ?", (new_timeline, mem_id))
         return True
 
     def touch_dream(self, mem_id: str) -> bool:
@@ -229,7 +238,7 @@ class MemoryStoreV2:
         with sqlite3.connect(str(self.db_path)) as conn:
             cursor = conn.execute(
                 "UPDATE memories SET dream_count = dream_count + 1, last_dream_at = ? WHERE id = ?",
-                (now, mem_id)
+                (now, mem_id),
             )
             return cursor.rowcount > 0
 
@@ -240,23 +249,29 @@ class MemoryStoreV2:
         now = time.time()
         log_id = f"dream_{int(now)}"
         with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO dream_log (id, started_at, status, phases_run, totals)
                 VALUES (?, ?, 'running', '[]', '{}')
-            """, (log_id, now))
+            """,
+                (log_id, now),
+            )
         return log_id
 
-    def complete_dream_log(self, log_id: str, status: str,
-                          phases_run: list[str], totals: dict,
-                          error: str = "") -> bool:
+    def complete_dream_log(
+        self, log_id: str, status: str, phases_run: list[str], totals: dict, error: str = ""
+    ) -> bool:
         """Complete a dream cycle log entry."""
         now = time.time()
         with sqlite3.connect(str(self.db_path)) as conn:
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 UPDATE dream_log
                 SET completed_at = ?, status = ?, phases_run = ?, totals = ?, error = ?
                 WHERE id = ?
-            """, (now, status, json.dumps(phases_run), json.dumps(totals), error, log_id))
+            """,
+                (now, status, json.dumps(phases_run), json.dumps(totals), error, log_id),
+            )
             return cursor.rowcount > 0
 
     def get_dream_log(self, log_id: str) -> Optional[dict]:
@@ -276,8 +291,7 @@ class MemoryStoreV2:
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT * FROM dream_log ORDER BY started_at DESC LIMIT ?",
-                (limit,)
+                "SELECT * FROM dream_log ORDER BY started_at DESC LIMIT ?", (limit,)
             ).fetchall()
             results = []
             for r in rows:

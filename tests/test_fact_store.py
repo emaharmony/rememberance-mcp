@@ -6,7 +6,9 @@ import tempfile
 import time
 from contextlib import closing
 from pathlib import Path
+
 import pytest
+
 from remembrance_mcp.store.facts import FactStore
 
 
@@ -16,6 +18,7 @@ def fact_store():
         db_path = Path(tmpdir) / "test_facts.db"
         # Need entities table for FK constraint
         import sqlite3
+
         with closing(sqlite3.connect(str(db_path))) as conn, conn:
             conn.execute("""
                 CREATE TABLE entities (
@@ -28,7 +31,7 @@ def fact_store():
             """)
             conn.execute(
                 "INSERT INTO entities (id, name, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                ("ema", "Ema", "person", time.time(), time.time())
+                ("ema", "Ema", "person", time.time(), time.time()),
             )
         yield FactStore(db_path)
 
@@ -83,14 +86,15 @@ class TestContradictions:
         # Create two conflicting current facts by inserting directly
         now = time.time()
         import sqlite3
+
         with closing(sqlite3.connect(str(fact_store.db_path))) as conn, conn:
             conn.execute(
                 "INSERT INTO facts (id, entity_id, claim_key, claim_value, source, confidence, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("f1", "ema", "role", "developer", "s1", 0.9, now)
+                ("f1", "ema", "role", "developer", "s1", 0.9, now),
             )
             conn.execute(
                 "INSERT INTO facts (id, entity_id, claim_key, claim_value, source, confidence, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("f2", "ema", "role", "AI engineer", "s2", 0.8, now + 1)
+                ("f2", "ema", "role", "AI engineer", "s2", 0.8, now + 1),
             )
 
         contradictions = fact_store.find_contradictions()

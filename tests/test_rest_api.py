@@ -4,18 +4,18 @@ REST API Tests — HTTP handler coverage for the Remembrance REST API
 
 import json
 import tempfile
-import time
-from pathlib import Path
-import pytest
+import urllib.error
+import urllib.request
 from http.server import HTTPServer
+from pathlib import Path
 from threading import Thread
 
-from remembrance_mcp.pipeline import MemoryPipeline
+import pytest
+
+from remembrance_mcp.api.rest import RemembranceHandler, _is_client_disconnect
 from remembrance_mcp.config import Settings
-from remembrance_mcp.api.rest import RemembranceHandler, start_rest_api, _is_client_disconnect
-from remembrance_mcp.gate_backends import HeuristicBackend, GateFallbackChain
-import urllib.request
-import urllib.error
+from remembrance_mcp.gate_backends import GateFallbackChain, HeuristicBackend
+from remembrance_mcp.pipeline import MemoryPipeline
 
 
 class _DisconnectingHandler:
@@ -41,17 +41,19 @@ def api_server():
         pipeline = MemoryPipeline(settings=settings)
         pipeline.gate_chain = GateFallbackChain([HeuristicBackend()])
         from remembrance_mcp.extract import StubExtractor
+
         pipeline.extractor = StubExtractor()
 
         # Find an available port
         import socket
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(('127.0.0.1', 0))
+        sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
         sock.close()
 
         RemembranceHandler.pipeline = pipeline
-        server = HTTPServer(('127.0.0.1', port), RemembranceHandler)
+        server = HTTPServer(("127.0.0.1", port), RemembranceHandler)
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
@@ -105,10 +107,12 @@ class TestStatsEndpoint:
 
 class TestCaptureEndpoint:
     def test_capture_post(self, api_server):
-        body = json.dumps({
-            "text": "Ema decided Prism stays domain-agnostic",
-            "source": "test",
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "text": "Ema decided Prism stays domain-agnostic",
+                "source": "test",
+            }
+        ).encode("utf-8")
 
         req = urllib.request.Request(
             f"{api_server['base_url']}/capture",
@@ -137,7 +141,9 @@ class TestCaptureEndpoint:
 class TestSearchEndpoint:
     def test_search(self, api_server):
         # First capture something
-        body = json.dumps({"text": "Ema decided Prism stays domain-agnostic", "source": "test"}).encode("utf-8")
+        body = json.dumps(
+            {"text": "Ema decided Prism stays domain-agnostic", "source": "test"}
+        ).encode("utf-8")
         req = urllib.request.Request(
             f"{api_server['base_url']}/capture",
             data=body,
@@ -191,7 +197,9 @@ class TestEntityEndpoint:
 class TestContextBuildEndpoint:
     def test_context_build(self, api_server):
         # Capture first
-        body = json.dumps({"text": "Ema decided Prism stays domain-agnostic", "source": "test"}).encode("utf-8")
+        body = json.dumps(
+            {"text": "Ema decided Prism stays domain-agnostic", "source": "test"}
+        ).encode("utf-8")
         req = urllib.request.Request(
             f"{api_server['base_url']}/capture",
             data=body,
@@ -200,7 +208,9 @@ class TestContextBuildEndpoint:
         urllib.request.urlopen(req)
 
         # Build context
-        resp = urllib.request.urlopen(f"{api_server['base_url']}/context/build?task=implement+vector+search")
+        resp = urllib.request.urlopen(
+            f"{api_server['base_url']}/context/build?task=implement+vector+search"
+        )
         data = json.loads(resp.read())
         assert "memories" in data
         assert "entities" in data
@@ -215,10 +225,12 @@ class TestContextBuildEndpoint:
 
 class TestDreamEndpoint:
     def test_dream_post(self, api_server):
-        body = json.dumps({
-            "phases": ["orphan_detect"],
-            "dry_run": False,
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "phases": ["orphan_detect"],
+                "dry_run": False,
+            }
+        ).encode("utf-8")
         req = urllib.request.Request(
             f"{api_server['base_url']}/dream",
             data=body,

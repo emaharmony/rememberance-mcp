@@ -2,13 +2,14 @@
 Tests for EntityStore — Entity Registry + Typed Edges + Graph Traversal
 """
 
-import json
 import sqlite3
 import tempfile
 import time
 from pathlib import Path
+
 import pytest
-from remembrance_mcp.store.edges import EntityStore, Entity, Edge, ENTITY_TYPES, EDGE_TYPES
+
+from remembrance_mcp.store.edges import EntityStore
 
 
 @pytest.fixture
@@ -226,7 +227,7 @@ class TestMemoryEntityLinks:
             """)
             conn.execute(
                 "INSERT INTO memories (id, content, created_at, accessed_at) VALUES (?, ?, ?, ?)",
-                ("mem_123", "Ema decided Prism stays domain-agnostic", time.time(), time.time())
+                ("mem_123", "Ema decided Prism stays domain-agnostic", time.time(), time.time()),
             )
 
         store.create_entity("Ema", "person")

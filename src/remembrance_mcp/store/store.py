@@ -34,12 +34,12 @@ EMBEDDINGS:
 """
 
 import json
-import sqlite3
-import uuid
-import time
 import logging
-from pathlib import Path
+import sqlite3
+import time
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Memory:
     """A single memory entry."""
+
     id: str
     content: str
     summary: str
@@ -75,11 +76,13 @@ class MemoryStore:
     - accessed_at: for LRU-style promotion during consolidation
     """
 
-    def __init__(self, db_path: Path, cold_ttl: int = 86400, active_ttl: int = 2592000, persist_ttl: int = -1):
+    def __init__(
+        self, db_path: Path, cold_ttl: int = 86400, active_ttl: int = 2592000, persist_ttl: int = -1
+    ):
         self.db_path = db_path
         self.ttl_config = {
-            "cold": cold_ttl,       # 1 day
-            "active": active_ttl,   # 30 days
+            "cold": cold_ttl,  # 1 day
+            "active": active_ttl,  # 30 days
             "persist": persist_ttl,  # -1 = forever
         }
         self._init_db()
@@ -128,8 +131,16 @@ class MemoryStore:
 
             logger.info(f"Memory store initialized at {self.db_path}")
 
-    def store(self, content: str, summary: str, category: str, tier: str,
-              key_topics: list[str], source: str = "", embedding: Optional[bytes] = None) -> str:
+    def store(
+        self,
+        content: str,
+        summary: str,
+        category: str,
+        tier: str,
+        key_topics: list[str],
+        source: str = "",
+        embedding: Optional[bytes] = None,
+    ) -> str:
         """
         Save a memory and return its ID.
 
@@ -147,21 +158,37 @@ class MemoryStore:
         expires_at = None if ttl == -1 else now + ttl
 
         with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO memories (id, content, summary, category, tier, key_topics,
                                       source, embedding, created_at, accessed_at, expires_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                mem_id, content, summary, category, tier,
-                json.dumps(key_topics), source, embedding,
-                now, now, expires_at
-            ))
+            """,
+                (
+                    mem_id,
+                    content,
+                    summary,
+                    category,
+                    tier,
+                    json.dumps(key_topics),
+                    source,
+                    embedding,
+                    now,
+                    now,
+                    expires_at,
+                ),
+            )
 
         logger.info(f"Stored memory {mem_id} (tier={tier}, category={category})")
         return mem_id
 
-    def search(self, query: str, category: Optional[str] = None,
-               tier: Optional[str] = None, limit: int = 10) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """
         Search memories by text match and metadata filters.
 
@@ -204,8 +231,9 @@ class MemoryStore:
             row = conn.execute("SELECT * FROM memories WHERE id = ?", (mem_id,)).fetchone()
             if row:
                 # Touch: update accessed_at for LRU during consolidation
-                conn.execute("UPDATE memories SET accessed_at = ? WHERE id = ?",
-                             (time.time(), mem_id))
+                conn.execute(
+                    "UPDATE memories SET accessed_at = ? WHERE id = ?", (time.time(), mem_id)
+                )
                 return dict(row)
         return None
 
@@ -236,14 +264,15 @@ class MemoryStore:
             # 1. Delete expired cold memories
             cursor = conn.execute(
                 "DELETE FROM memories WHERE tier = 'cold' AND expires_at IS NOT NULL AND expires_at < ?",
-                (now,)
+                (now,),
             )
             results["expired_deleted"] = cursor.rowcount
 
             # 2. Promote active → persist if accessed 5+ times in last 7 days
             #    (heuristic: if you keep coming back to a memory, it's important)
             seven_days_ago = now - (7 * 86400)
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 UPDATE memories SET tier = 'persist', expires_at = NULL
                 WHERE tier = 'active'
                 AND accessed_at > ?
@@ -252,20 +281,26 @@ class MemoryStore:
                     SELECT id FROM memories WHERE tier = 'active'
                     GROUP BY id HAVING COUNT(*) >= 1
                 )
-            """, (seven_days_ago, now))
+            """,
+                (seven_days_ago, now),
+            )
             results["promoted"] = cursor.rowcount
 
             # 3. Demote persist → active if not accessed in 90 days
             #    (if you haven't touched it in 3 months, it's not "persist" important)
             ninety_days_ago = now - (90 * 86400)
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 UPDATE memories SET tier = 'active', expires_at = ?
                 WHERE tier = 'persist' AND accessed_at < ?
-            """, (now + self.ttl_config["active"], ninety_days_ago))
+            """,
+                (now + self.ttl_config["active"], ninety_days_ago),
+            )
             results["demoted"] = cursor.rowcount
 
         logger.info(f"Consolidation: {results}")
         return results
+
     def count(self) -> int:
         """Return total number of memories (including expired)."""
         with sqlite3.connect(str(self.db_path)) as conn:

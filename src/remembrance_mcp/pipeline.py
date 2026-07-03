@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Memory Pipeline — Orchestrates Gate → Extract → Store
 
@@ -26,23 +27,23 @@ WHY PIPELINE?
 """
 
 import logging
-from pathlib import Path
 from typing import Optional
+
 from remembrance_mcp.config import Settings
+from remembrance_mcp.dream.cycle import DreamCycle
+from remembrance_mcp.extract import BaseExtractor, OllamaExtractor, StubExtractor
 from remembrance_mcp.gate import GateDecision
+from remembrance_mcp.gate_backends import GateMetrics
+from remembrance_mcp.graph.edges import GraphWiring
+from remembrance_mcp.graph.entity import EntityDetector
+from remembrance_mcp.graph.traversal import GraphTraversal
 from remembrance_mcp.registry import build_gate_chain
-from remembrance_mcp.extract import OllamaExtractor, StubExtractor, BaseExtractor
+from remembrance_mcp.search.hybrid import HybridSearch
 from remembrance_mcp.store import MemoryStore
 from remembrance_mcp.store.edges import EntityStore
-from remembrance_mcp.store.memory import MemoryStoreV2
 from remembrance_mcp.store.facts import FactStore
 from remembrance_mcp.store.markdown import MarkdownSync
-from remembrance_mcp.graph.entity import EntityDetector
-from remembrance_mcp.graph.edges import GraphWiring
-from remembrance_mcp.graph.traversal import GraphTraversal
-from remembrance_mcp.search.hybrid import HybridSearch
-from remembrance_mcp.dream.cycle import DreamCycle
-from remembrance_mcp.gate_backends import GateMetrics
+from remembrance_mcp.store.memory import MemoryStoreV2
 
 logger = logging.getLogger(__name__)
 
@@ -102,17 +103,13 @@ class MemoryPipeline:
         # the entity graph against the `memories` table in a single connection.
         # Previously split into a separate entities.db, which broke
         # entity_sweep/backlink_audit/purge ("no such table: memories").
-        self.entity_store = EntityStore(
-            db_path=self.settings.DB_PATH
-        )
+        self.entity_store = EntityStore(db_path=self.settings.DB_PATH)
 
         # ── V2: Memory Store V2 Extensions ────────────────────
         self.store_v2 = MemoryStoreV2(v1_store=self.store)
 
         # ── V2: Fact Store ────────────────────────────────────
-        self.fact_store = FactStore(
-            db_path=self.settings.DB_PATH
-        )
+        self.fact_store = FactStore(db_path=self.settings.DB_PATH)
 
         # ── V2: Graph Wiring + Entity Detection ──────────────
         self.graph_wiring = GraphWiring(self.entity_store)
@@ -137,8 +134,13 @@ class MemoryPipeline:
         # ── V2: Markdown Sync ────────────────────────────────
         self.markdown_sync = MarkdownSync(self.entity_store)
 
-    def capture(self, text: str, source: str = "cli",
-                category: Optional[str] = None, tier: Optional[str] = None) -> dict:
+    def capture(
+        self,
+        text: str,
+        source: str = "cli",
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+    ) -> dict:
         """
         Run the full pipeline on a piece of text.
 
@@ -151,7 +153,9 @@ class MemoryPipeline:
         gate_result, backend_used, fallback_used = self.gate_chain.classify(text)
 
         if gate_result.decision == GateDecision.SKIP:
-            logger.debug(f"Gate: SKIP (confidence: {gate_result.confidence:.3f}, backend: {backend_used})")
+            logger.debug(
+                f"Gate: SKIP (confidence: {gate_result.confidence:.3f}, backend: {backend_used})"
+            )
             return {
                 "id": None,
                 "decision": "SKIP",
@@ -206,8 +210,13 @@ class MemoryPipeline:
             "edges_created": len(wiring_result.get("edges", [])) if wiring_result else 0,
         }
 
-    def search(self, query: str, category: Optional[str] = None,
-               tier: Optional[str] = None, limit: int = 10) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """Search stored memories by text and metadata filters."""
         return self.store.search(query, category=category, tier=tier, limit=limit)
 
@@ -237,8 +246,9 @@ class MemoryPipeline:
 
     # ── V2 Methods ──────────────────────────────────────────────
 
-    def build_context(self, task: str, project: Optional[str] = None,
-                      agent: Optional[str] = None, limit: int = 10) -> dict:
+    def build_context(
+        self, task: str, project: Optional[str] = None, agent: Optional[str] = None, limit: int = 10
+    ) -> dict:
         """
         Build context for a task using hybrid search + graph traversal.
 
@@ -249,8 +259,9 @@ class MemoryPipeline:
             query=task, project=project, agent=agent, limit=limit
         )
 
-    def graph_query(self, entity_name: str, depth: int = 1,
-                    edge_types: Optional[list[str]] = None) -> dict:
+    def graph_query(
+        self, entity_name: str, depth: int = 1, edge_types: Optional[list[str]] = None
+    ) -> dict:
         """
         Traverse the knowledge graph from an entity.
         """
@@ -265,8 +276,7 @@ class MemoryPipeline:
         """
         return self.entity_store.find_entity(name)
 
-    def dream(self, phases: Optional[list[str]] = None,
-              dry_run: bool = False) -> dict:
+    def dream(self, phases: Optional[list[str]] = None, dry_run: bool = False) -> dict:
         """
         Run the dream cycle.
         """

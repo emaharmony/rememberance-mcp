@@ -5,15 +5,14 @@ These tests exercise the full pipeline: gate → extract → graph → search �
 They're the "system tests" that unit tests can't replace.
 """
 
-import json
-import sqlite3
 import tempfile
 import time
 from pathlib import Path
+
 import pytest
-from remembrance_mcp.pipeline import MemoryPipeline
+
 from remembrance_mcp.config import Settings
-from remembrance_mcp.gate import MemoryGate
+from remembrance_mcp.pipeline import MemoryPipeline
 
 
 @pytest.fixture
@@ -28,8 +27,9 @@ def pipeline():
         )
         pipe = MemoryPipeline(settings=settings)
         # Override gate to heuristic-only for fast tests (no Ollama/DilBERT calls)
-        from remembrance_mcp.gate_backends import HeuristicBackend, GateFallbackChain
         from remembrance_mcp.extract import StubExtractor
+        from remembrance_mcp.gate_backends import GateFallbackChain, HeuristicBackend
+
         pipe.gate_chain = GateFallbackChain([HeuristicBackend()])
         pipe.extractor = StubExtractor()
         yield pipe
@@ -64,7 +64,9 @@ class TestCaptureIntegration:
         assert stored >= 2  # At least 2 should be stored
 
     def test_capture_with_category_override(self, pipeline):
-        result = pipeline.capture("Project update about the architecture decision", source="test", category="general")
+        result = pipeline.capture(
+            "Project update about the architecture decision", source="test", category="general"
+        )
         # Gate/extraction may override category but should still store
         if result.get("id"):
             assert "category" in result
@@ -75,7 +77,9 @@ class TestSearchIntegration:
 
     def test_search_finds_memory(self, pipeline):
         pipeline.capture("Ema decided Prism stays domain-agnostic", source="test", tier="persist")
-        pipeline.capture("DilBERT gate classifies memories at 0.929 confidence", source="test", tier="persist")
+        pipeline.capture(
+            "DilBERT gate classifies memories at 0.929 confidence", source="test", tier="persist"
+        )
 
         results = pipeline.hybrid_search.search("Prism", mode="keyword", limit=5)
         # May or may not find results depending on FTS5 availability
@@ -89,14 +93,18 @@ class TestSearchIntegration:
         assert isinstance(results, list)
 
     def test_search_no_results(self, pipeline):
-        results = pipeline.hybrid_search.search("xylophone banana quantum", mode="balanced", limit=5)
+        results = pipeline.hybrid_search.search(
+            "xylophone banana quantum", mode="balanced", limit=5
+        )
         assert len(results) == 0
 
     def test_search_category_filter(self, pipeline):
         pipeline.capture("Project update about Prism", source="test", category="project")
         pipeline.capture("Weather is nice today", source="test", category="general")
 
-        results = pipeline.hybrid_search.search("Prism", mode="keyword", category="project", limit=5)
+        results = pipeline.hybrid_search.search(
+            "Prism", mode="keyword", category="project", limit=5
+        )
         assert isinstance(results, list)  # May be empty in test env
 
     def test_context_build(self, pipeline):
@@ -153,7 +161,7 @@ class TestGraphIntegration:
 
 class TestDreamCycleIntegration:
     """Test dream cycle end-to-end.
-    
+
     NOTE: These tests use the entity_sweep/orphan_detect phases which
     don't require Ollama. The truth_rewrite phase is skipped because it
     needs Ollama which may not be available in test environments.

@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Dream Cycle — Automated Brain Maintenance
 
@@ -31,16 +32,14 @@ Each phase is independently testable and independently runnable.
 """
 
 import json
+import logging
 import sqlite3
 import time
-import logging
-from pathlib import Path
-from typing import Optional
 
+from remembrance_mcp.graph.edges import GraphWiring
+from remembrance_mcp.graph.entity import EntityDetector
 from remembrance_mcp.store.edges import EntityStore
 from remembrance_mcp.store.memory import MemoryStoreV2
-from remembrance_mcp.graph.entity import EntityDetector
-from remembrance_mcp.graph.edges import GraphWiring
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +68,19 @@ class DreamCycle:
         report = dream.run(phases=["entity_sweep", "orphan_detect"])  # specific phases
     """
 
-    def __init__(self, entity_store: EntityStore, memory_v2: MemoryStoreV2,
-                 ollama_base_url: str = "http://localhost:11434"):
+    def __init__(
+        self,
+        entity_store: EntityStore,
+        memory_v2: MemoryStoreV2,
+        ollama_base_url: str = "http://localhost:11434",
+    ):
         self.entity_store = entity_store
         self.memory_v2 = memory_v2
         self.ollama_base_url = ollama_base_url
         self.wiring = GraphWiring(entity_store)
         self.detector = EntityDetector(entity_store=entity_store)
 
-    def run(self, phases: list[str] | None = None,
-            dry_run: bool = False) -> dict:
+    def run(self, phases: list[str] | None = None, dry_run: bool = False) -> dict:
         """
         Run the dream cycle.
 
@@ -118,12 +120,14 @@ class DreamCycle:
                 result = self._run_phase(phase, dry_run=dry_run)
                 phase_duration = time.time() - phase_start
 
-                phase_results.append({
-                    "phase": phase,
-                    "status": result.get("status", "ok"),
-                    "duration_ms": int(phase_duration * 1000),
-                    "details": result,
-                })
+                phase_results.append(
+                    {
+                        "phase": phase,
+                        "status": result.get("status", "ok"),
+                        "duration_ms": int(phase_duration * 1000),
+                        "details": result,
+                    }
+                )
 
                 # Accumulate totals
                 for key in totals:
@@ -132,18 +136,21 @@ class DreamCycle:
 
             except Exception as e:
                 logger.error(f"Dream phase {phase} failed: {e}")
-                phase_results.append({
-                    "phase": phase,
-                    "status": "fail",
-                    "duration_ms": 0,
-                    "details": {"error": str(e)},
-                })
+                phase_results.append(
+                    {
+                        "phase": phase,
+                        "status": "fail",
+                        "duration_ms": 0,
+                        "details": {"error": str(e)},
+                    }
+                )
                 status = "partial"
 
         # Complete the dream log
         total_duration = time.time() - started_at
         self.memory_v2.complete_dream_log(
-            log_id, status=status,
+            log_id,
+            status=status,
             phases_run=phases,
             totals=totals,
         )
@@ -211,7 +218,9 @@ class DreamCycle:
             entities_created += len(wiring_result.get("new_entities", []))
             links_created += wiring_result.get("links", 0)
 
-        logger.info(f"Entity sweep: {len(rows)} memories scanned, {entities_created} new entities, {links_created} links")
+        logger.info(
+            f"Entity sweep: {len(rows)} memories scanned, {entities_created} new entities, {links_created} links"
+        )
 
         return {
             "status": "ok",
@@ -382,8 +391,7 @@ class DreamCycle:
         with sqlite3.connect(str(db_path)) as conn:
             # Delete expired memories past recovery window
             cursor = conn.execute(
-                "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?",
-                (cutoff,)
+                "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?", (cutoff,)
             )
             purged += cursor.rowcount
 
@@ -401,8 +409,8 @@ class DreamCycle:
         Falls back to simple timeline truncation if Ollama is unavailable.
         """
         try:
-            import urllib.request
             import urllib.error
+            import urllib.request
 
             prompt = f"""Synthesize a concise compiled truth summary for {entity_name} from these timeline entries.
 Output ONLY the summary paragraph, no bullet points, no headers.
@@ -410,11 +418,13 @@ Output ONLY the summary paragraph, no bullet points, no headers.
 Timeline:
 {timeline[:2000]}"""
 
-            payload = json.dumps({
-                "model": "nemotron-3-nano:4b",
-                "prompt": prompt,
-                "stream": False,
-            }).encode("utf-8")
+            payload = json.dumps(
+                {
+                    "model": "nemotron-3-nano:4b",
+                    "prompt": prompt,
+                    "stream": False,
+                }
+            ).encode("utf-8")
 
             req = urllib.request.Request(
                 f"{self.ollama_base_url}/api/generate",

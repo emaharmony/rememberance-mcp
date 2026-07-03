@@ -33,50 +33,81 @@ DESIGN DECISIONS:
   Runs locally via Ollama, no API key needed.
 """
 
+from remembrance_mcp.api.rest import start_rest_api
 from remembrance_mcp.config import Settings
-from remembrance_mcp.gate import MemoryGate, GateDecision, GateResult
+from remembrance_mcp.dream.cycle import ALL_PHASES, DreamCycle
+from remembrance_mcp.extract import BaseExtractor, ExtractionResult, OllamaExtractor, StubExtractor
+from remembrance_mcp.gate import GateDecision, GateResult, MemoryGate
+from remembrance_mcp.gate.ollama import OllamaGateBackend
 from remembrance_mcp.gate_backends import (
-    BaseGateBackend, DilBERTBackend, HeuristicBackend, OpenAIBackend,
-    GateFallbackChain, GateMetrics, GateMetric,
+    BaseGateBackend,
+    DilBERTBackend,
+    GateFallbackChain,
+    GateMetric,
+    GateMetrics,
+    HeuristicBackend,
+    OpenAIBackend,
 )
-from remembrance_mcp.extract import BaseExtractor, OllamaExtractor, StubExtractor, ExtractionResult
-
-from remembrance_mcp.store import MemoryStore, Memory
+from remembrance_mcp.graph.edges import GraphWiring
+from remembrance_mcp.graph.entity import DetectedEntity, EntityDetector
+from remembrance_mcp.graph.traversal import GraphTraversal
 from remembrance_mcp.pipeline import MemoryPipeline
-from remembrance_mcp.server import create_server
 from remembrance_mcp.registry import (
-    register_gate_backend, get_registered_backends, build_gate_chain,
+    build_gate_chain,
+    get_registered_backends,
+    register_gate_backend,
 )
+from remembrance_mcp.search.hybrid import HybridSearch, SearchResult
+from remembrance_mcp.server import create_server
+from remembrance_mcp.store import Memory, MemoryStore
 
 # V2 exports
-from remembrance_mcp.store.edges import EntityStore, Entity, Edge
+from remembrance_mcp.store.edges import Edge, Entity, EntityStore
 from remembrance_mcp.store.facts import FactStore
-from remembrance_mcp.store.memory import MemoryStoreV2
 from remembrance_mcp.store.markdown import MarkdownSync
-from remembrance_mcp.graph.entity import EntityDetector, DetectedEntity
-from remembrance_mcp.graph.edges import GraphWiring
-from remembrance_mcp.graph.traversal import GraphTraversal
-from remembrance_mcp.search.hybrid import HybridSearch, SearchResult
-from remembrance_mcp.dream.cycle import DreamCycle, ALL_PHASES
-from remembrance_mcp.gate.ollama import OllamaGateBackend
-from remembrance_mcp.api.rest import start_rest_api
+from remembrance_mcp.store.memory import MemoryStoreV2
 
 __all__ = [
     "Settings",
-    "MemoryGate", "GateDecision", "GateResult",
-    "BaseGateBackend", "DilBERTBackend", "HeuristicBackend", "OpenAIBackend",
-    "GateFallbackChain", "GateMetrics", "GateMetric",
-    "register_gate_backend", "get_registered_backends", "build_gate_chain",
-    "BaseExtractor", "OllamaExtractor", "StubExtractor", "ExtractionResult",
-    "MemoryStore", "Memory",
+    "MemoryGate",
+    "GateDecision",
+    "GateResult",
+    "BaseGateBackend",
+    "DilBERTBackend",
+    "HeuristicBackend",
+    "OpenAIBackend",
+    "GateFallbackChain",
+    "GateMetrics",
+    "GateMetric",
+    "register_gate_backend",
+    "get_registered_backends",
+    "build_gate_chain",
+    "BaseExtractor",
+    "OllamaExtractor",
+    "StubExtractor",
+    "ExtractionResult",
+    "MemoryStore",
+    "Memory",
     "MemoryPipeline",
     "create_server",
     "main",
     # V2
-    "EntityStore", "Entity", "Edge", "FactStore", "MemoryStoreV2", "MarkdownSync",
-    "EntityDetector", "DetectedEntity", "GraphWiring", "GraphTraversal",
-    "HybridSearch", "SearchResult", "DreamCycle", "ALL_PHASES",
-    "OllamaGateBackend", "start_rest_api",
+    "EntityStore",
+    "Entity",
+    "Edge",
+    "FactStore",
+    "MemoryStoreV2",
+    "MarkdownSync",
+    "EntityDetector",
+    "DetectedEntity",
+    "GraphWiring",
+    "GraphTraversal",
+    "HybridSearch",
+    "SearchResult",
+    "DreamCycle",
+    "ALL_PHASES",
+    "OllamaGateBackend",
+    "start_rest_api",
 ]
 
 
@@ -93,6 +124,7 @@ def main():
         import mcp.server.stdio
         from mcp.server import NotificationOptions
         from mcp.server.models import InitializationOptions
+
         from remembrance_mcp.config import Settings
 
         settings = Settings.get()

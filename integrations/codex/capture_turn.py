@@ -19,6 +19,7 @@ Env:
   REMEMBRANCE_URL      base URL of the service (default 127.0.0.1:18790)
   REMEMBRANCE_TIMEOUT  HTTP timeout seconds (default 30)
 """
+
 from __future__ import annotations
 
 import json
@@ -123,11 +124,13 @@ def main() -> int:
         return 0
 
     project = _project_from_cwd(event.get("cwd", ""))
-    payload = json.dumps({
-        "text": text,
-        "source": f"codex:{project}",
-        "category": project,
-    })
+    payload = json.dumps(
+        {
+            "text": text,
+            "source": f"codex:{project}",
+            "category": project,
+        }
+    )
 
     OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
     fd, payload_path = tempfile.mkstemp(suffix=".json", dir=str(OUTBOX_DIR))

@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Fact Store — Structured Claims with Provenance
 
@@ -29,9 +30,9 @@ INSPIRED BY gbrain's four database primitives:
 - Relationship graph → our edges table
 """
 
+import logging
 import sqlite3
 import time
-import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -97,8 +98,9 @@ class FactStore:
             """)
             logger.info(f"Fact store initialized at {self.db_path}")
 
-    def assert_fact(self, entity_id: str, claim_key: str, claim_value: str,
-                    source: str, confidence: float = 1.0) -> str:
+    def assert_fact(
+        self, entity_id: str, claim_key: str, claim_value: str, source: str, confidence: float = 1.0
+    ) -> str:
         """
         Assert a new fact about an entity.
 
@@ -109,7 +111,7 @@ class FactStore:
         Returns the fact ID.
         """
         now = time.time()
-        fact_id = f"fact_{int(now*1000)}_{entity_id}_{claim_key}"
+        fact_id = f"fact_{int(now * 1000)}_{entity_id}_{claim_key}"
 
         # Check for existing current fact
         current = self.get_current_fact(entity_id, claim_key)
@@ -118,22 +120,29 @@ class FactStore:
             if current and current["claim_value"] != claim_value:
                 # New value contradicts old → supersede the old one
                 conn.execute(
-                    "UPDATE facts SET superseded_at = ? WHERE id = ?",
-                    (now, current["id"])
+                    "UPDATE facts SET superseded_at = ? WHERE id = ?", (now, current["id"])
                 )
-                logger.info(f"Fact superseded: {entity_id}.{claim_key} = {current['claim_value']} → {claim_value}")
+                logger.info(
+                    f"Fact superseded: {entity_id}.{claim_key} = {current['claim_value']} → {claim_value}"
+                )
 
             try:
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO facts (id, entity_id, claim_key, claim_value, source, confidence, observed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (fact_id, entity_id, claim_key, claim_value, source, confidence, now))
+                """,
+                    (fact_id, entity_id, claim_key, claim_value, source, confidence, now),
+                )
             except sqlite3.IntegrityError:
                 # Same observed_at — update in place
-                conn.execute("""
+                conn.execute(
+                    """
                     UPDATE facts SET claim_value = ?, source = ?, confidence = ?
                     WHERE entity_id = ? AND claim_key = ? AND observed_at = ?
-                """, (claim_value, source, confidence, entity_id, claim_key, now))
+                """,
+                    (claim_value, source, confidence, entity_id, claim_key, now),
+                )
 
         return fact_id
 
@@ -141,11 +150,14 @@ class FactStore:
         """Get the current (unsuperseded) fact for an entity + key."""
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute("""
+            row = conn.execute(
+                """
                 SELECT * FROM facts
                 WHERE entity_id = ? AND claim_key = ? AND superseded_at IS NULL
                 ORDER BY observed_at DESC LIMIT 1
-            """, (entity_id, claim_key)).fetchone()
+            """,
+                (entity_id, claim_key),
+            ).fetchone()
             return dict(row) if row else None
 
     def get_entity_facts(self, entity_id: str, current_only: bool = True) -> list[dict]:
@@ -163,11 +175,14 @@ class FactStore:
         """Get the full history of a claim (including superseded)."""
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT * FROM facts
                 WHERE entity_id = ? AND claim_key = ?
                 ORDER BY observed_at DESC
-            """, (entity_id, claim_key)).fetchall()
+            """,
+                (entity_id, claim_key),
+            ).fetchall()
             return [dict(r) for r in rows]
 
     def find_contradictions(self) -> list[dict]:
@@ -189,16 +204,21 @@ class FactStore:
             """).fetchall()
             contradictions = []
             for r in rows:
-                facts = conn.execute("""
+                facts = conn.execute(
+                    """
                     SELECT * FROM facts
                     WHERE entity_id = ? AND claim_key = ? AND superseded_at IS NULL
                     ORDER BY confidence DESC, observed_at DESC
-                """, (r["entity_id"], r["claim_key"])).fetchall()
-                contradictions.append({
-                    "entity_id": r["entity_id"],
-                    "claim_key": r["claim_key"],
-                    "conflicting_values": [dict(f) for f in facts],
-                })
+                """,
+                    (r["entity_id"], r["claim_key"]),
+                ).fetchall()
+                contradictions.append(
+                    {
+                        "entity_id": r["entity_id"],
+                        "claim_key": r["claim_key"],
+                        "conflicting_values": [dict(f) for f in facts],
+                    }
+                )
             return contradictions
 
     def stats(self) -> dict:

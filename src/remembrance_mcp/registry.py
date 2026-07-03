@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Gate Backends Registry — Extensible Backend System
 
@@ -49,10 +50,10 @@ or a custom rule engine without forking the repo.
 from remembrance_mcp.gate_backends import (
     BaseGateBackend,
     DilBERTBackend,
-    HeuristicBackend,
-    OpenAIBackend,
     GateFallbackChain,
     GateMetrics,
+    HeuristicBackend,
+    OpenAIBackend,
 )
 
 # ── Backend Registry ────────────────────────────────────────────────────────
@@ -87,6 +88,7 @@ register_gate_backend("openai", OpenAIBackend)
 
 # ── Backend Builder ─────────────────────────────────────────────────────────
 
+
 def build_gate_chain(
     backend_names: list[str] | None = None,
     settings=None,
@@ -114,10 +116,10 @@ def build_gate_chain(
         chain = build_gate_chain()  # reads env var
     """
     import os
-    from pathlib import Path
 
     if settings is None:
         from remembrance_mcp.config import Settings
+
         settings = Settings()
 
     # Determine backend list
@@ -136,6 +138,7 @@ def build_gate_chain(
 
         if name_lower not in registered:
             import logging
+
             logging.getLogger(__name__).warning(
                 f"Unknown gate backend '{name_lower}', skipping. "
                 f"Available: {list(registered.keys())}"
@@ -147,12 +150,15 @@ def build_gate_chain(
         # Build with appropriate kwargs based on backend type
         if name_lower == "dilbert":
             try:
-                backends.append(backend_class(
-                    model_path=settings.GATE_MODEL_PATH,
-                    skip_threshold=settings.SKIP_THRESHOLD,
-                ))
+                backends.append(
+                    backend_class(
+                        model_path=settings.GATE_MODEL_PATH,
+                        skip_threshold=settings.SKIP_THRESHOLD,
+                    )
+                )
             except Exception as e:
                 import logging
+
                 logging.getLogger(__name__).warning(f"DilBERT backend unavailable: {e}")
 
         elif name_lower == "openai":
@@ -161,6 +167,7 @@ def build_gate_chain(
                 backends.append(backend_class(api_key=api_key))
             else:
                 import logging
+
                 logging.getLogger(__name__).warning("OpenAI backend skipped: no OPENAI_API_KEY")
 
         elif name_lower == "heuristic":

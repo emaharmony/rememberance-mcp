@@ -5,9 +5,9 @@ from __future__ import annotations
 import argparse
 import logging
 
+from remembrance_mcp.api.rest import start_rest_api
 from remembrance_mcp.config import Settings
 from remembrance_mcp.pipeline import MemoryPipeline
-from remembrance_mcp.api.rest import start_rest_api
 
 
 def main() -> None:

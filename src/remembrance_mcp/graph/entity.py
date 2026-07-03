@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Entity Detection — Extract Entities from Text (Zero-LLM)
 
@@ -30,9 +31,8 @@ Context patterns determine edge types:
 - "Prism stays domain-agnostic" → (prism, related_to, domain-agnostic)
 """
 
-import re
 import logging
-from typing import Optional
+import re
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -41,11 +41,12 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DetectedEntity:
     """An entity detected in text."""
-    name: str               # the name as it appears in text
-    entity_type: str         # person, project, concept, tool, decision
-    confidence: float        # 0.0 to 1.0
-    edge_type: str           # mentions, decided_about, works_on, related_to, depends_on
-    context: str             # surrounding text snippet for evidence
+
+    name: str  # the name as it appears in text
+    entity_type: str  # person, project, concept, tool, decision
+    confidence: float  # 0.0 to 1.0
+    edge_type: str  # mentions, decided_about, works_on, related_to, depends_on
+    context: str  # surrounding text snippet for evidence
 
 
 # ── Known Entity Patterns ──────────────────────────────────────
@@ -59,14 +60,12 @@ KNOWN_ENTITIES = {
     "kirbii": {"type": "person", "aliases": []},
     "navii": {"type": "person", "aliases": []},
     "lumi": {"type": "person", "aliases": []},
-
     # Projects
     "prism": {"type": "project", "aliases": ["ai-hedge-prism"]},
     "remembrance": {"type": "project", "aliases": ["remembrance-mcp", "memory-mcp"]},
     "eggventura": {"type": "project", "aliases": ["pet tycoon"]},
     "bassbook": {"type": "project", "aliases": []},
     "openclaw": {"type": "project", "aliases": []},
-
     # Concepts
     "dilbert": {"type": "concept", "aliases": ["distilbert", "dilbert-gate"]},
     "nemotron": {"type": "concept", "aliases": ["nemotron-3-nano"]},
@@ -77,14 +76,14 @@ KNOWN_ENTITIES = {
 
 # Decision patterns → edge type inference
 DECISION_PATTERNS = [
-    (r'\b(decided|decides|chose|confirmed|ruling)\b', 'decided_about'),
-    (r'\b(works?\s+on|implementing|building|shipping)\b', 'works_on'),
-    (r'\b(depends?\s+on|requires?|needs?|uses?)\b', 'depends_on'),
-    (r'\b(related\s+to|connected\s+to|linked\s+to)\b', 'related_to'),
+    (r"\b(decided|decides|chose|confirmed|ruling)\b", "decided_about"),
+    (r"\b(works?\s+on|implementing|building|shipping)\b", "works_on"),
+    (r"\b(depends?\s+on|requires?|needs?|uses?)\b", "depends_on"),
+    (r"\b(related\s+to|connected\s+to|linked\s+to)\b", "related_to"),
 ]
 
 # Sentence boundary for context extraction
-SENTENCE_RE = re.compile(r'[^.!?]+[.!?]+')
+SENTENCE_RE = re.compile(r"[^.!?]+[.!?]+")
 
 
 class EntityDetector:
@@ -126,13 +125,15 @@ class EntityDetector:
                 seen.add(name)
                 edge_type = self._infer_edge_type(text, name)
                 context = self._extract_context(text, name)
-                detected.append(DetectedEntity(
-                    name=name,
-                    entity_type=info["type"],
-                    confidence=0.9,
-                    edge_type=edge_type,
-                    context=context,
-                ))
+                detected.append(
+                    DetectedEntity(
+                        name=name,
+                        entity_type=info["type"],
+                        confidence=0.9,
+                        edge_type=edge_type,
+                        context=context,
+                    )
+                )
 
             # Check aliases
             for alias in info.get("aliases", []):
@@ -140,13 +141,15 @@ class EntityDetector:
                     seen.add(name)
                     edge_type = self._infer_edge_type(text, alias)
                     context = self._extract_context(text, alias)
-                    detected.append(DetectedEntity(
-                        name=name,  # canonical name, not alias
-                        entity_type=info["type"],
-                        confidence=0.85,
-                        edge_type=edge_type,
-                        context=context,
-                    ))
+                    detected.append(
+                        DetectedEntity(
+                            name=name,  # canonical name, not alias
+                            entity_type=info["type"],
+                            confidence=0.85,
+                            edge_type=edge_type,
+                            context=context,
+                        )
+                    )
 
         # Step 2: Check entity registry (if available)
         if self.entity_store:
@@ -162,13 +165,15 @@ class EntityDetector:
                     seen.add(entity_id)
                     edge_type = self._infer_edge_type(text, entity_name)
                     context = self._extract_context(text, entity_name)
-                    detected.append(DetectedEntity(
-                        name=entity_name,
-                        entity_type=entity["type"],
-                        confidence=0.85,
-                        edge_type=edge_type,
-                        context=context,
-                    ))
+                    detected.append(
+                        DetectedEntity(
+                            name=entity_name,
+                            entity_type=entity["type"],
+                            confidence=0.85,
+                            edge_type=edge_type,
+                            context=context,
+                        )
+                    )
 
                 # Check aliases from registry
                 for alias in entity.get("aliases", []):
@@ -178,13 +183,15 @@ class EntityDetector:
                         seen.add(entity_id)
                         edge_type = self._infer_edge_type(text, alias)
                         context = self._extract_context(text, alias)
-                        detected.append(DetectedEntity(
-                            name=entity_name,
-                            entity_type=entity["type"],
-                            confidence=0.8,
-                            edge_type=edge_type,
-                            context=context,
-                        ))
+                        detected.append(
+                            DetectedEntity(
+                                name=entity_name,
+                                entity_type=entity["type"],
+                                confidence=0.8,
+                                edge_type=edge_type,
+                                context=context,
+                            )
+                        )
 
         # Step 3: Regex-based proper noun detection (lower confidence)
         # Capitalized words that aren't sentence starters
@@ -200,19 +207,21 @@ class EntityDetector:
             seen.add(noun_lower)
             edge_type = self._infer_edge_type(text, noun)
             context = self._extract_context(text, noun)
-            detected.append(DetectedEntity(
-                name=noun_lower,
-                entity_type=self._classify_unknown(noun, text),
-                confidence=0.5,
-                edge_type=edge_type,
-                context=context,
-            ))
+            detected.append(
+                DetectedEntity(
+                    name=noun_lower,
+                    entity_type=self._classify_unknown(noun, text),
+                    confidence=0.5,
+                    edge_type=edge_type,
+                    context=context,
+                )
+            )
 
         return detected
 
     def _text_mentions(self, text: str, name: str) -> bool:
         """Check if text mentions a name (case-insensitive, word boundary)."""
-        pattern = r'\b' + re.escape(name) + r'\b'
+        pattern = r"\b" + re.escape(name) + r"\b"
         return bool(re.search(pattern, text, re.IGNORECASE))
 
     def _infer_edge_type(self, text: str, entity_name: str) -> str:
@@ -243,7 +252,7 @@ class EntityDetector:
 
     def _extract_context(self, text: str, entity_name: str) -> str:
         """Extract a short context snippet around the entity mention."""
-        match = re.search(r'\b' + re.escape(entity_name) + r'\b', text, re.IGNORECASE)
+        match = re.search(r"\b" + re.escape(entity_name) + r"\b", text, re.IGNORECASE)
         if not match:
             return text[:200]
 
@@ -264,7 +273,7 @@ class EntityDetector:
         the first word of a sentence is likely a proper noun.
         """
         # Split into sentences
-        sentences = re.split(r'(?<=[.!?])\s+', text)
+        sentences = re.split(r"(?<=[.!?])\s+", text)
         nouns = []
 
         for sentence in sentences:
@@ -274,9 +283,18 @@ class EntityDetector:
                 if i == 0:
                     continue
                 # Check if word starts with uppercase
-                clean = word.strip('.,;:!?"\')')
+                clean = word.strip(".,;:!?\"')")
                 if clean and clean[0].isupper() and len(clean) > 2:
-                    if clean.lower() not in {"the", "and", "but", "for", "this", "that", "with", "from"}:
+                    if clean.lower() not in {
+                        "the",
+                        "and",
+                        "but",
+                        "for",
+                        "this",
+                        "that",
+                        "with",
+                        "from",
+                    }:
                         nouns.append(clean)
 
         return nouns

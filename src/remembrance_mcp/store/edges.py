@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Entity Store — Entity Registry + Typed Edges
 
@@ -33,13 +34,12 @@ WHY ENTITIES SEPARATE FROM MEMORIES?
 """
 
 import json
-import sqlite3
-import uuid
-import time
-import re
 import logging
+import re
+import sqlite3
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -54,13 +54,14 @@ EDGE_TYPES = {"mentions", "decided_about", "works_on", "related_to", "depends_on
 @dataclass
 class Entity:
     """A node in the knowledge graph."""
-    id: str                    # canonical slug: "ema", "prism"
-    name: str                  # display name: "Ema", "Prism"
-    type: str                  # person, project, concept, tool, decision, preference
-    aliases: list[str]         # other names: ["Emmanuel", "rhem"]
-    compiled_truth: str        # always-current synthesis
-    timeline: str              # append-only evidence log
-    tier: str                  # cold, active, persist
+
+    id: str  # canonical slug: "ema", "prism"
+    name: str  # display name: "Ema", "Prism"
+    type: str  # person, project, concept, tool, decision, preference
+    aliases: list[str]  # other names: ["Emmanuel", "rhem"]
+    compiled_truth: str  # always-current synthesis
+    timeline: str  # append-only evidence log
+    tier: str  # cold, active, persist
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -68,9 +69,10 @@ class Entity:
 @dataclass
 class Edge:
     """A typed relationship between two entities."""
+
     source_id: str
     target_id: str
-    edge_type: str             # mentions, decided_about, works_on, related_to, depends_on
+    edge_type: str  # mentions, decided_about, works_on, related_to, depends_on
     since_date: float
     confidence: float = 1.0
     evidence: str = ""
@@ -139,8 +141,12 @@ class EntityStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(edge_type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_entities_memory ON memory_entities(memory_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_entities_memory ON memory_entities(memory_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id)"
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_tier ON entities(tier)")
 
@@ -152,16 +158,22 @@ class EntityStore:
                     UNIQUE(alias, entity_id)
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_aliases_alias ON entity_aliases(alias)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_aliases_alias ON entity_aliases(alias)"
+            )
             logger.info(f"Entity store initialized at {self.db_path}")
 
     # ── Entity CRUD ───────────────────────────────────────────
 
-    def create_entity(self, name: str, entity_type: str,
-                      aliases: list[str] | None = None,
-                      compiled_truth: str = "",
-                      timeline: str = "",
-                      tier: str = "active") -> str:
+    def create_entity(
+        self,
+        name: str,
+        entity_type: str,
+        aliases: list[str] | None = None,
+        compiled_truth: str = "",
+        timeline: str = "",
+        tier: str = "active",
+    ) -> str:
         """
         Create a new entity and return its canonical slug.
 
@@ -185,25 +197,34 @@ class EntityStore:
 
         now = time.time()
         with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO entities (id, name, type, aliases, compiled_truth, timeline, tier, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                slug, name, entity_type,
-                json.dumps(aliases or []), compiled_truth, timeline, tier,
-                now, now
-            ))
+            """,
+                (
+                    slug,
+                    name,
+                    entity_type,
+                    json.dumps(aliases or []),
+                    compiled_truth,
+                    timeline,
+                    tier,
+                    now,
+                    now,
+                ),
+            )
 
             # Insert into alias lookup table for O(1) resolution
             name_lower = name.lower()
             conn.execute(
                 "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
-                (name_lower, slug)
+                (name_lower, slug),
             )
-            for alias in (aliases or []):
+            for alias in aliases or []:
                 conn.execute(
                     "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
-                    (alias.lower(), slug)
+                    (alias.lower(), slug),
                 )
 
         logger.info(f"Created entity: {slug} (type={entity_type}, tier={tier})")
@@ -240,21 +261,19 @@ class EntityStore:
         values = list(updates.values()) + [entity_id]
 
         with sqlite3.connect(str(self.db_path)) as conn:
-            cursor = conn.execute(
-                f"UPDATE entities SET {set_clause} WHERE id = ?", values
-            )
+            cursor = conn.execute(f"UPDATE entities SET {set_clause} WHERE id = ?", values)
             # Keep alias table in sync if aliases were updated
             if new_aliases is not None:
                 conn.execute("DELETE FROM entity_aliases WHERE entity_id = ?", (entity_id,))
                 # Re-add name as alias
                 conn.execute(
                     "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
-                    (entity_id, entity_id)  # slug is the ID
+                    (entity_id, entity_id),  # slug is the ID
                 )
                 for alias in new_aliases:
                     conn.execute(
                         "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
-                        (alias.lower(), entity_id)
+                        (alias.lower(), entity_id),
                     )
             return cursor.rowcount > 0
 
@@ -312,8 +331,7 @@ class EntityStore:
 
             # 3. Alias match — O(1) lookup via normalized alias table
             row = conn.execute(
-                "SELECT entity_id FROM entity_aliases WHERE alias = ?",
-                (name_lower,)
+                "SELECT entity_id FROM entity_aliases WHERE alias = ?", (name_lower,)
             ).fetchone()
             if row:
                 return self.get_entity(row[0])
@@ -326,14 +344,15 @@ class EntityStore:
                     # Backfill the alias table
                     conn.execute(
                         "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
-                        (name_lower, r["id"])
+                        (name_lower, r["id"]),
                     )
                     return self.get_entity(r["id"])
 
         return None
 
-    def search_entities(self, query: str, entity_type: Optional[str] = None,
-                        limit: int = 10) -> list[dict]:
+    def search_entities(
+        self, query: str, entity_type: Optional[str] = None, limit: int = 10
+    ) -> list[dict]:
         """Search entities by name/alias (keyword match)."""
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
@@ -359,23 +378,30 @@ class EntityStore:
                 results.append(d)
             return results
 
-    def list_entities(self, entity_type: Optional[str] = None,
-                      limit: int = 50) -> list[dict]:
+    def list_entities(self, entity_type: Optional[str] = None, limit: int = 50) -> list[dict]:
         """List all entities, optionally filtered by type."""
         return self.search_entities("", entity_type=entity_type, limit=limit)
 
     def delete_entity(self, entity_id: str) -> bool:
         """Delete an entity and all its edges."""
         with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("DELETE FROM edges WHERE source_id = ? OR target_id = ?", (entity_id, entity_id))
+            conn.execute(
+                "DELETE FROM edges WHERE source_id = ? OR target_id = ?", (entity_id, entity_id)
+            )
             conn.execute("DELETE FROM memory_entities WHERE entity_id = ?", (entity_id,))
             cursor = conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
             return cursor.rowcount > 0
 
     # ── Edge CRUD ──────────────────────────────────────────────
 
-    def add_edge(self, source_id: str, target_id: str, edge_type: str,
-                 confidence: float = 1.0, evidence: str = "") -> bool:
+    def add_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        edge_type: str,
+        confidence: float = 1.0,
+        evidence: str = "",
+    ) -> bool:
         """
         Create a typed edge between two entities.
 
@@ -388,18 +414,22 @@ class EntityStore:
         now = time.time()
         with sqlite3.connect(str(self.db_path)) as conn:
             try:
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO edges (source_id, target_id, edge_type, since_date, confidence, evidence)
                     VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(source_id, target_id, edge_type) DO NOTHING
-                """, (source_id, target_id, edge_type, now, confidence, evidence))
+                """,
+                    (source_id, target_id, edge_type, now, confidence, evidence),
+                )
                 return True
             except sqlite3.IntegrityError as e:
                 logger.debug(f"Edge already exists or FK violation: {e}")
                 return False
 
-    def get_edges(self, entity_id: str, direction: str = "both",
-                  edge_type: Optional[str] = None) -> list[dict]:
+    def get_edges(
+        self, entity_id: str, direction: str = "both", edge_type: Optional[str] = None
+    ) -> list[dict]:
         """
         Get edges for an entity.
 
@@ -432,8 +462,9 @@ class EntityStore:
             rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
 
-    def get_neighbors(self, entity_id: str, depth: int = 1,
-                      edge_types: Optional[list[str]] = None) -> dict:
+    def get_neighbors(
+        self, entity_id: str, depth: int = 1, edge_types: Optional[list[str]] = None
+    ) -> dict:
         """
         N-hop graph traversal from a seed entity.
 
@@ -494,22 +525,24 @@ class EntityStore:
         with sqlite3.connect(str(self.db_path)) as conn:
             cursor = conn.execute(
                 "DELETE FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
-                (source_id, target_id, edge_type)
+                (source_id, target_id, edge_type),
             )
             return cursor.rowcount > 0
 
     # ── Memory-Entity Links ────────────────────────────────────
 
-    def link_memory_entity(self, memory_id: str, entity_id: str,
-                          confidence: float = 1.0) -> bool:
+    def link_memory_entity(self, memory_id: str, entity_id: str, confidence: float = 1.0) -> bool:
         """Link a memory to an entity it mentions."""
         with sqlite3.connect(str(self.db_path)) as conn:
             try:
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO memory_entities (memory_id, entity_id, confidence)
                     VALUES (?, ?, ?)
                     ON CONFLICT(memory_id, entity_id) DO NOTHING
-                """, (memory_id, entity_id, confidence))
+                """,
+                    (memory_id, entity_id, confidence),
+                )
                 return True
             except sqlite3.IntegrityError:
                 return False
@@ -518,12 +551,15 @@ class EntityStore:
         """Get all entities linked to a memory."""
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT e.*, me.confidence as link_confidence
                 FROM memory_entities me
                 JOIN entities e ON me.entity_id = e.id
                 WHERE me.memory_id = ?
-            """, (memory_id,)).fetchall()
+            """,
+                (memory_id,),
+            ).fetchall()
             results = []
             for r in rows:
                 d = dict(r)
@@ -535,14 +571,17 @@ class EntityStore:
         """Get all memories linked to an entity."""
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT m.*
                 FROM memory_entities me
                 JOIN memories m ON me.memory_id = m.id
                 WHERE me.entity_id = ?
                 ORDER BY m.created_at DESC
                 LIMIT ?
-            """, (entity_id, limit)).fetchall()
+            """,
+                (entity_id, limit),
+            ).fetchall()
             return [dict(r) for r in rows]
 
     # ── Orphan Detection ───────────────────────────────────────
@@ -551,13 +590,16 @@ class EntityStore:
         """Find entities with zero edges (disconnected from the graph)."""
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT e.* FROM entities e
                 LEFT JOIN edges es ON e.id = es.source_id
                 LEFT JOIN edges et ON e.id = et.target_id
                 WHERE es.source_id IS NULL AND et.target_id IS NULL
                 LIMIT ?
-            """, (limit,)).fetchall()
+            """,
+                (limit,),
+            ).fetchall()
             return [dict(r) for r in rows]
 
     # ── Utilities ───────────────────────────────────────────────
@@ -579,9 +621,9 @@ class EntityStore:
             "DilBERT Gate" → "dilbert-gate"
         """
         slug = name.lower().strip()
-        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
-        slug = re.sub(r'[\s_]+', '-', slug)
-        slug = slug.strip('-')
+        slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+        slug = re.sub(r"[\s_]+", "-", slug)
+        slug = slug.strip("-")
         return slug[:60]
 
     def stats(self) -> dict:

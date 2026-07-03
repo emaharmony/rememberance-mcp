@@ -8,6 +8,7 @@ The test launches the real module over stdio, completes the MCP handshake, and
 asserts the expected memory tools are advertised. Skipped if the optional `mcp`
 package isn't installed.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,14 +20,15 @@ import tempfile
 import pytest
 
 mcp_client = pytest.importorskip("mcp.client.stdio")
-from mcp.client.stdio import stdio_client, StdioServerParameters  # noqa: E402
 from mcp.client.session import ClientSession  # noqa: E402
+from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: E402
 
 EXPECTED_TOOLS = {"memory_capture", "memory_search", "memory_context_build", "memory_dream"}
 
 
 def test_mcp_server_starts_and_lists_tools():
     home = tempfile.mkdtemp(prefix="remembrance-mcp-test-")
+
     async def _run():
         env = dict(os.environ)
         # Isolate state and force the fast heuristic gate so the server boots
@@ -34,7 +36,9 @@ def test_mcp_server_starts_and_lists_tools():
         env["REMEMBRANCE_HOME"] = home
         env["REMEMBRANCE_GATE_BACKENDS"] = "heuristic"
         params = StdioServerParameters(
-            command=sys.executable, args=["-m", "remembrance_mcp"], env=env,
+            command=sys.executable,
+            args=["-m", "remembrance_mcp"],
+            env=env,
         )
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:

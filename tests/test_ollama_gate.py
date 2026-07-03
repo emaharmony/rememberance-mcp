@@ -2,10 +2,12 @@
 Tests for OllamaGateBackend — LLM-based classification fallback
 """
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from remembrance_mcp.gate.ollama import OllamaGateBackend, GATE_PROMPT
+
 from remembrance_mcp.gate.gate import GateDecision
+from remembrance_mcp.gate.ollama import OllamaGateBackend
 
 
 @pytest.fixture

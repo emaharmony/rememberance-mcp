@@ -5,7 +5,9 @@ Tests for MarkdownSync — SQLite ↔ Brain Repo
 import tempfile
 import time
 from pathlib import Path
+
 import pytest
+
 from remembrance_mcp.store.edges import EntityStore
 from remembrance_mcp.store.markdown import MarkdownSync
 
@@ -30,8 +32,12 @@ class TestExportEntity:
         sync = sync_env["sync"]
         brain_dir = sync_env["brain_dir"]
 
-        store.create_entity("Ema", "person", aliases=["Emmanuel"],
-                           compiled_truth="Senior dev transitioning to AI engineering")
+        store.create_entity(
+            "Ema",
+            "person",
+            aliases=["Emmanuel"],
+            compiled_truth="Senior dev transitioning to AI engineering",
+        )
 
         path = sync.export_entity("ema")
         assert path is not None
@@ -44,8 +50,7 @@ class TestExportEntity:
         sync = sync_env["sync"]
         brain_dir = sync_env["brain_dir"]
 
-        store.create_entity("Prism", "project",
-                           compiled_truth="Event-driven AI framework")
+        store.create_entity("Prism", "project", compiled_truth="Event-driven AI framework")
 
         path = sync.export_entity("prism")
         assert path is not None
@@ -55,9 +60,13 @@ class TestExportEntity:
         store = sync_env["entity_store"]
         sync = sync_env["sync"]
 
-        store.create_entity("Ema", "person", aliases=["Emmanuel"],
-                           compiled_truth="Senior dev transitioning to AI engineering",
-                           tier="persist")
+        store.create_entity(
+            "Ema",
+            "person",
+            aliases=["Emmanuel"],
+            compiled_truth="Senior dev transitioning to AI engineering",
+            tier="persist",
+        )
 
         path = sync.export_entity("ema")
         content = path.read_text()
@@ -117,6 +126,7 @@ class TestImportEdits:
 
         # Touch the file to update mtime
         import os
+
         os.utime(str(page_path), (time.time() + 100, time.time() + 100))
 
         result = sync.import_edits()

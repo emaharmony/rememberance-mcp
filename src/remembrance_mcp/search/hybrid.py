@@ -22,16 +22,15 @@ V2 ARCHITECTURE:
 5. Graph augment: expand results by following entity edges
 """
 
-import json
+import logging
 import math
 import sqlite3
 import struct
 import time
-import logging
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass
 
 from remembrance_mcp.store.edges import EntityStore
 
@@ -66,6 +65,7 @@ RRF_K = 60
 @dataclass
 class SearchResult:
     """A single search result with score and metadata."""
+
     id: str
     content: str
     compiled_truth: str
@@ -90,9 +90,14 @@ class HybridSearch:
         self.db_path = db_path
         self.entity_store = entity_store
 
-    def search(self, query: str, mode: str = "balanced",
-               category: Optional[str] = None, tier: Optional[str] = None,
-               limit: int = 10) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        mode: str = "balanced",
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """
         Search memories using hybrid retrieval.
 
@@ -116,15 +121,20 @@ class HybridSearch:
         else:
             return self._search_balanced(query, category, tier, limit)
 
-    def _search_keyword(self, query: str, category: Optional[str] = None,
-                       tier: Optional[str] = None, limit: int = 10) -> list[dict]:
+    def _search_keyword(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """FTS5 full-text search only."""
         results = []
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             try:
                 # Escape FTS5 special chars: hyphens become spaces, quotes escaped
-                safe_query = query.replace('-', ' ').replace('"', '""')
+                safe_query = query.replace("-", " ").replace('"', '""')
                 sql = """
                     SELECT m.*, fts.rank as fts_rank
                     FROM memories m
@@ -150,7 +160,9 @@ class HybridSearch:
                 rows = conn.execute(sql, params).fetchall()
                 for r in rows:
                     d = dict(r)
-                    d["score"] = 1.0 / (1.0 + abs(d.pop("fts_rank", 0)))  # FTS rank is negative (lower = better)
+                    d["score"] = 1.0 / (
+                        1.0 + abs(d.pop("fts_rank", 0))
+                    )  # FTS rank is negative (lower = better)
                     d["sources"] = ["fts5"]
                     results.append(d)
             except Exception as e:
@@ -189,8 +201,7 @@ class HybridSearch:
 
         return results
 
-    def _search_vector(self, query: str, category: Optional[str],
-                       limit: int) -> list[dict]:
+    def _search_vector(self, query: str, category: Optional[str], limit: int) -> list[dict]:
         """
         Vector similarity search using cosine similarity on embedding BLOBs.
 
@@ -203,9 +214,9 @@ class HybridSearch:
         # which requires Ollama API call. For now, fall back to keyword.
         return self._search_keyword(query, category, limit)
 
-    def search_with_embedding(self, query_embedding: bytes,
-                               category: Optional[str] = None,
-                               limit: int = 10) -> list[dict]:
+    def search_with_embedding(
+        self, query_embedding: bytes, category: Optional[str] = None, limit: int = 10
+    ) -> list[dict]:
         """
         Search using a pre-computed embedding vector.
 
@@ -226,14 +237,17 @@ class HybridSearch:
             conn.row_factory = sqlite3.Row
             now = time.time()
 
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT id, content, compiled_truth, summary, category, tier,
                        embedding, key_topics, source
                 FROM memories
                 WHERE embedding IS NOT NULL
                 AND (expires_at IS NULL OR expires_at > ?)
                 ORDER BY accessed_at DESC LIMIT 500
-            """, (now,)).fetchall()
+            """,
+                (now,),
+            ).fetchall()
 
             for r in rows:
                 if not r["embedding"]:
@@ -246,22 +260,29 @@ class HybridSearch:
                 tier_boost = TIER_BOOST.get(r["tier"], 1.0)
                 boosted_score = similarity * tier_boost
 
-                candidates.append({
-                    "id": r["id"],
-                    "content": r["content"],
-                    "compiled_truth": r["compiled_truth"] or "",
-                    "summary": r["summary"] or "",
-                    "category": r["category"],
-                    "tier": r["tier"],
-                    "score": boosted_score,
-                    "sources": ["vector"],
-                })
+                candidates.append(
+                    {
+                        "id": r["id"],
+                        "content": r["content"],
+                        "compiled_truth": r["compiled_truth"] or "",
+                        "summary": r["summary"] or "",
+                        "category": r["category"],
+                        "tier": r["tier"],
+                        "score": boosted_score,
+                        "sources": ["vector"],
+                    }
+                )
 
         candidates.sort(key=lambda x: x["score"], reverse=True)
         return candidates[:limit]
 
-    def _search_balanced(self, query: str, category: Optional[str] = None,
-                         tier: Optional[str] = None, limit: int = 10) -> list[dict]:
+    def _search_balanced(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """
         Balanced hybrid search: FTS5 + vector + tier boost + graph + RRF.
 
@@ -346,8 +367,7 @@ class HybridSearch:
         fused.sort(key=lambda x: x["score"], reverse=True)
         return fused
 
-    def _graph_augment(self, query: str, base_results: list[dict],
-                       limit: int = 5) -> list[dict]:
+    def _graph_augment(self, query: str, base_results: list[dict], limit: int = 5) -> list[dict]:
         """
         Augment search results by following entity edges.
 
@@ -412,7 +432,7 @@ class HybridSearch:
                 placeholders = ",".join("?" for _ in memory_ids)
                 rows = conn.execute(
                     f"SELECT memory_id, entity_id FROM memory_entities WHERE memory_id IN ({placeholders})",
-                    memory_ids
+                    memory_ids,
                 ).fetchall()
                 for mem_id, entity_id in rows:
                     result.setdefault(mem_id, []).append(entity_id)
@@ -457,8 +477,13 @@ class HybridSearch:
 
         return dot / (norm_a * norm_b)
 
-    def build_context(self, query: str, project: Optional[str] = None,
-                      agent: Optional[str] = None, limit: int = 10) -> dict:
+    def build_context(
+        self,
+        query: str,
+        project: Optional[str] = None,
+        agent: Optional[str] = None,
+        limit: int = 10,
+    ) -> dict:
         """
         Build a context response for a task query.
 
@@ -477,22 +502,26 @@ class HybridSearch:
         for eid in all_entity_ids:
             entity = self.entity_store.get_entity(eid)
             if entity:
-                entity_context.append({
-                    "id": eid,
-                    "name": entity["name"],
-                    "type": entity["type"],
-                    "compiled_truth": entity.get("compiled_truth", ""),
-                })
+                entity_context.append(
+                    {
+                        "id": eid,
+                        "name": entity["name"],
+                        "type": entity["type"],
+                        "compiled_truth": entity.get("compiled_truth", ""),
+                    }
+                )
 
         # Gather open threads from top entities
         open_threads = []
         for entity in entity_context[:5]:
             timeline = entity.get("compiled_truth", "")
             if timeline:
-                open_threads.append({
-                    "entity": entity["name"],
-                    "context": timeline[:200],
-                })
+                open_threads.append(
+                    {
+                        "entity": entity["name"],
+                        "context": timeline[:200],
+                    }
+                )
 
         return {
             "query": query,

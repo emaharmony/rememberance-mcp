@@ -18,6 +18,7 @@ calls, results, and thinking are ignored.
 Env:
   REMEMBRANCE_URL   base URL of the Remembrance service (default 127.0.0.1:18790)
 """
+
 from __future__ import annotations
 
 import json
@@ -188,11 +189,13 @@ def main() -> int:
     if len(blob) < MIN_CHARS:
         return 0
 
-    payload = json.dumps({
-        "text": blob,
-        "source": f"claude-code:{project}",
-        "category": project,
-    })
+    payload = json.dumps(
+        {
+            "text": blob,
+            "source": f"claude-code:{project}",
+            "category": project,
+        }
+    )
 
     OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
     fd, payload_path = tempfile.mkstemp(suffix=".json", dir=str(OUTBOX_DIR))

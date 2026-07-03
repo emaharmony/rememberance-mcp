@@ -32,9 +32,11 @@ class Settings:
     """All configuration in one place. Override via MEMORY_MCP_* env vars."""
 
     # ── Paths ──────────────────────────────────────────────
-    BASE_DIR: Path = field(default_factory=lambda: Path(
-        os.environ.get("REMEMBRANCE_HOME", str(Path.home() / ".remembrance"))
-    ))
+    BASE_DIR: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get("REMEMBRANCE_HOME", str(Path.home() / ".remembrance"))
+        )
+    )
     DB_PATH: Path = field(default=None)
     GATE_MODEL_PATH: Path = field(default=None)
 
@@ -45,9 +47,9 @@ class Settings:
     PERSIST_THRESHOLD: float = 0.7
 
     # ── Tier TTLs (seconds) ───────────────────────────────
-    COLD_TTL: int = 86400           # 1 day
-    ACTIVE_TTL: int = 30 * 86400   # 30 days
-    PERSIST_TTL: int = -1           # -1 = never expires
+    COLD_TTL: int = 86400  # 1 day
+    ACTIVE_TTL: int = 30 * 86400  # 30 days
+    PERSIST_TTL: int = -1  # -1 = never expires
 
     # ── Extraction ─────────────────────────────────────────
     EXTRACT_MODEL: str = "nemotron-3-nano:4b"

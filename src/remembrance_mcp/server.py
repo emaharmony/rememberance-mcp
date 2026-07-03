@@ -37,7 +37,6 @@ WHY NOT REST API?
 
 import json
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,8 @@ def create_server():
     Returns an MCP Server instance ready to run.
     """
     from mcp.server import Server
-    from mcp.types import Tool, TextContent
+    from mcp.types import TextContent, Tool
+
     from remembrance_mcp.config import Settings
     from remembrance_mcp.pipeline import MemoryPipeline
 
@@ -92,7 +92,15 @@ def create_server():
                         },
                         "category": {
                             "type": "string",
-                            "enum": ["project", "person", "preference", "decision", "task", "strategy", "session"],
+                            "enum": [
+                                "project",
+                                "person",
+                                "preference",
+                                "decision",
+                                "task",
+                                "strategy",
+                                "session",
+                            ],
                             "description": "Override auto-detected category (optional)",
                         },
                         "tier": {
@@ -341,11 +349,15 @@ def create_server():
                     tier=arguments.get("tier"),
                 )
                 if result["decision"] == "SKIP":
-                    return [TextContent(type="text", text="Skipped — not important enough to store.")]
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(result, indent=2),
-                )]
+                    return [
+                        TextContent(type="text", text="Skipped — not important enough to store.")
+                    ]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2),
+                    )
+                ]
 
             elif name == "memory_search":
                 results = pipeline.search(
@@ -356,26 +368,32 @@ def create_server():
                 )
                 if not results:
                     return [TextContent(type="text", text="No memories found matching that query.")]
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(results, indent=2, default=str),
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(results, indent=2, default=str),
+                    )
+                ]
 
             elif name == "memory_consolidate":
                 result = pipeline.consolidate()
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(result, indent=2),
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2),
+                    )
+                ]
 
             elif name == "memory_get":
                 result = pipeline.get(arguments["id"])
                 if not result:
                     return [TextContent(type="text", text=f"Memory {arguments['id']} not found.")]
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(result, indent=2, default=str),
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2, default=str),
+                    )
+                ]
 
             elif name == "memory_delete":
                 deleted = pipeline.delete(arguments["id"])
@@ -385,10 +403,12 @@ def create_server():
 
             elif name == "memory_metrics":
                 metrics = pipeline.metrics_summary(hours=arguments.get("hours", 24))
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(metrics, indent=2),
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(metrics, indent=2),
+                    )
+                ]
 
             # ── V2 Tool Handlers ──────────────────────────────────────────
             elif name == "memory_graph_query":
@@ -403,20 +423,24 @@ def create_server():
                 result = pipeline.entity_store.get_neighbors(
                     entity["id"], depth=depth, edge_types=edge_types
                 )
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(result, indent=2, default=str),
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2, default=str),
+                    )
+                ]
 
             elif name == "memory_entity_get":
                 entity_name = arguments["name"]
                 entity = pipeline.entity_store.find_entity(entity_name)
                 if not entity:
                     return [TextContent(type="text", text=f"Entity '{entity_name}' not found.")]
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(entity, indent=2, default=str),
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(entity, indent=2, default=str),
+                    )
+                ]
 
             elif name == "memory_entity_search":
                 results = pipeline.entity_store.search_entities(
@@ -426,19 +450,23 @@ def create_server():
                 )
                 if not results:
                     return [TextContent(type="text", text="No entities found.")]
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(results, indent=2, default=str),
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(results, indent=2, default=str),
+                    )
+                ]
 
             elif name == "memory_dream":
                 phases = arguments.get("phases")
                 dry_run = arguments.get("dry_run", False)
                 result = pipeline.dream_cycle.run(phases=phases, dry_run=dry_run)
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(result, indent=2, default=str),
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2, default=str),
+                    )
+                ]
 
             elif name == "memory_context_build":
                 result = pipeline.build_context(
@@ -447,10 +475,12 @@ def create_server():
                     agent=arguments.get("agent"),
                     limit=arguments.get("limit", 10),
                 )
-                return [TextContent(
-                    type="text",
-                    text=json.dumps(result, indent=2, default=str),
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2, default=str),
+                    )
+                ]
 
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]

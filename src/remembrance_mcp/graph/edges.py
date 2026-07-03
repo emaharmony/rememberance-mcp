@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Graph Wiring — Connect Entities to Memories and Each Other
 
@@ -20,8 +21,8 @@ separate task.
 """
 
 import logging
-from typing import Optional
-from remembrance_mcp.graph.entity import EntityDetector, DetectedEntity
+
+from remembrance_mcp.graph.entity import EntityDetector
 from remembrance_mcp.store.edges import EntityStore
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ class GraphWiring:
                 # Add timeline entry about this mention
                 timeline_entry = f"Mentioned in memory {memory_id}"
                 if de.context:
-                    timeline_entry += f": \"{de.context}\""
+                    timeline_entry += f': "{de.context}"'
                 self.entity_store.add_timeline_entry(entity_id, timeline_entry, source=source)
             else:
                 # Create new entity
@@ -89,7 +90,7 @@ class GraphWiring:
                 # Add initial timeline entry
                 self.entity_store.add_timeline_entry(
                     entity_id,
-                    f"Entity created from memory {memory_id}: \"{de.context}\"",
+                    f'Entity created from memory {memory_id}: "{de.context}"',
                     source=source,
                 )
 
@@ -114,11 +115,13 @@ class GraphWiring:
                     evidence=de.context,
                 )
                 if created:
-                    edges_created.append({
-                        "source": entity_id,
-                        "target": other_id,
-                        "type": de.edge_type,
-                    })
+                    edges_created.append(
+                        {
+                            "source": entity_id,
+                            "target": other_id,
+                            "type": de.edge_type,
+                        }
+                    )
 
         # Step 4: Link memory to entities
         links = 0
@@ -130,8 +133,12 @@ class GraphWiring:
         # This creates the base connectivity even without decision patterns
         # Scale limit: cap at 10 detected entities to avoid O(n²) explosion
         mention_limit = 10
-        for i, (de, entity_id) in enumerate(zip(detected[:mention_limit], entity_ids[:mention_limit])):
-            for j, (other_de, other_id) in enumerate(zip(detected[:mention_limit], entity_ids[:mention_limit])):
+        for i, (de, entity_id) in enumerate(
+            zip(detected[:mention_limit], entity_ids[:mention_limit])
+        ):
+            for j, (other_de, other_id) in enumerate(
+                zip(detected[:mention_limit], entity_ids[:mention_limit])
+            ):
                 if i >= j:
                     continue  # avoid duplicates
                 created = self.entity_store.add_edge(
@@ -142,11 +149,13 @@ class GraphWiring:
                     evidence=f"Co-mentioned in memory {memory_id}",
                 )
                 if created:
-                    edges_created.append({
-                        "source": entity_id,
-                        "target": other_id,
-                        "type": "mentions",
-                    })
+                    edges_created.append(
+                        {
+                            "source": entity_id,
+                            "target": other_id,
+                            "type": "mentions",
+                        }
+                    )
                 # Also create reverse mention
                 self.entity_store.add_edge(
                     source_id=other_id,

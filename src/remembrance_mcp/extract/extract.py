@@ -34,9 +34,8 @@ DESIGN PATTERN: Strategy Pattern
 
 import json
 import logging
-from dataclasses import dataclass
-from typing import Optional
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +43,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExtractionResult:
     """Structured output from the extractor."""
+
     summary: str
     category: str  # project, person, preference, decision, task, strategy, session
-    tier: str      # cold, active, persist
+    tier: str  # cold, active, persist
     key_topics: list[str]
 
 
@@ -109,20 +109,22 @@ Output JSON:
 }}"""
 
         try:
-            import urllib.request
             import urllib.error
+            import urllib.request
 
-            payload = json.dumps({
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json",
-                # Reasoning models (e.g. nemotron-3-nano) otherwise emit their
-                # output in a separate `thinking` field and leave `response`
-                # empty, which fails JSON parsing. Disabling thinking makes the
-                # JSON land in `response`. Ignored by non-reasoning models.
-                "think": False,
-            }).encode("utf-8")
+            payload = json.dumps(
+                {
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    # Reasoning models (e.g. nemotron-3-nano) otherwise emit their
+                    # output in a separate `thinking` field and leave `response`
+                    # empty, which fails JSON parsing. Disabling thinking makes the
+                    # JSON land in `response`. Ignored by non-reasoning models.
+                    "think": False,
+                }
+            ).encode("utf-8")
 
             req = urllib.request.Request(
                 f"{self.base_url}/api/generate",
@@ -162,7 +164,9 @@ Output JSON:
             return ExtractionResult(
                 summary=text[:200],
                 category="project",
-                tier=gate_decision.lower() if gate_decision in ("COLD", "ACTIVE", "PERSIST") else "active",
+                tier=gate_decision.lower()
+                if gate_decision in ("COLD", "ACTIVE", "PERSIST")
+                else "active",
                 key_topics=[],
             )
 
@@ -192,6 +196,8 @@ class StubExtractor(BaseExtractor):
         return ExtractionResult(
             summary=text[:200],
             category="project",
-            tier=gate_decision.lower() if gate_decision in ("COLD", "ACTIVE", "PERSIST") else "active",
+            tier=gate_decision.lower()
+            if gate_decision in ("COLD", "ACTIVE", "PERSIST")
+            else "active",
             key_topics=[],
         )

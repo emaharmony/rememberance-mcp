@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Graph Traversal — N-Hop Queries on the Knowledge Graph
 
@@ -19,6 +20,7 @@ connections that embeddings can't see.
 """
 
 import logging
+
 from remembrance_mcp.store.edges import EntityStore
 
 logger = logging.getLogger(__name__)
@@ -37,8 +39,7 @@ class GraphTraversal:
     def __init__(self, entity_store: EntityStore):
         self.entity_store = entity_store
 
-    def query(self, entity_id: str, depth: int = 1,
-              edge_types: list[str] | None = None) -> dict:
+    def query(self, entity_id: str, depth: int = 1, edge_types: list[str] | None = None) -> dict:
         """
         N-hop graph traversal from a seed entity.
 
@@ -55,12 +56,9 @@ class GraphTraversal:
                 "depth_reached": actual depth reached
             }
         """
-        return self.entity_store.get_neighbors(
-            entity_id, depth=depth, edge_types=edge_types
-        )
+        return self.entity_store.get_neighbors(entity_id, depth=depth, edge_types=edge_types)
 
-    def find_path(self, from_id: str, to_id: str,
-                  max_depth: int = 4) -> list[dict] | None:
+    def find_path(self, from_id: str, to_id: str, max_depth: int = 4) -> list[dict] | None:
         """
         Find a path between two entities (BFS shortest path).
 
@@ -79,7 +77,9 @@ class GraphTraversal:
             for current, path in queue:
                 edges = self.entity_store.get_edges(current)
                 for edge in edges:
-                    neighbor = edge["target_id"] if edge["source_id"] == current else edge["source_id"]
+                    neighbor = (
+                        edge["target_id"] if edge["source_id"] == current else edge["source_id"]
+                    )
                     if neighbor in visited:
                         continue
                     visited.add(neighbor)
@@ -113,12 +113,12 @@ class GraphTraversal:
 
         return "\n".join(lines)
 
-    def _describe_relationship(self, from_id: str, to_id: str,
-                               edges: list[dict]) -> str:
+    def _describe_relationship(self, from_id: str, to_id: str, edges: list[dict]) -> str:
         """Describe the relationship between two entities from edge data."""
         for edge in edges:
-            if (edge["source_id"] == from_id and edge["target_id"] == to_id) or \
-               (edge["source_id"] == to_id and edge["target_id"] == from_id):
+            if (edge["source_id"] == from_id and edge["target_id"] == to_id) or (
+                edge["source_id"] == to_id and edge["target_id"] == from_id
+            ):
                 edge_type = edge["edge_type"].replace("_", " ")
                 direction = "→" if edge["source_id"] == from_id else "←"
                 return f"[{direction} {edge_type}]"

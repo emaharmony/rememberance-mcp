@@ -6,16 +6,16 @@ update this file. Only Phases 0–4 are in scope for the loop.
 
 ## Status line
 - **Current phase:** Phase 0 — Safety net
-- **Current task:** (0.2b) mechanical `ruff format` + `ruff check --fix` pass
+- **Current task:** (0.3) `pytest-cov` with a fail-under gate — LAST Phase 0 task
 - **Baseline:** 141 passed, 1 skipped (green).
-- **Last session:** 2026-07-02 — completed (0.2a): added ruff config to
-  `pyproject.toml` (line-length 100, lint select E/F/W/I, isort first-party
-  `remembrance_mcp`) + `.pre-commit-config.yaml` (ruff + ruff-format, pinned
-  v0.15.20) + `ruff>=0.15.0` in the dev/all extras. Config-only, no code
-  reformatted. ruff 0.15.20 installed in `.venv`. Suite green.
-  **Preview for 0.2b:** `ruff check .` → 285 findings (150 autofixable);
-  `ruff format` → 45 of 47 files would reformat. That is the intended large
-  mechanical diff — keep it format/autofix ONLY, its own commit, no logic edits.
+- **Last session:** 2026-07-02 — completed (0.2b): mechanical `ruff check --fix`
+  (144 safe autofixes, mostly isort/W292) + `ruff format` (34 files). 47 files
+  changed, +1142/−716. Verified NON-behavioral: suite green, both console-script
+  entry points still resolve, `__init__.py` changes are pure import reordering
+  (no re-exports removed). **90 non-autofixable lint findings remain** (E501,
+  unused vars, etc.) — NOT wired to CI, parked for a future lint-cleanup task
+  (outside the Phase 0.x roadmap scope; needs a human to greenlight).
+  After (0.3), Phase 0 is COMPLETE → write PHASE_COMPLETE.md and stop.
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -32,7 +32,7 @@ update this file. Only Phases 0–4 are in scope for the loop.
 ## Phase 0 — Safety net *(active)*
 - [x] (0.1) CI: GitHub Actions matrix (Py 3.10–3.12, minimal + `[all]` extras) running the suite — `.github/workflows/ci.yml` (2026-07-02)
 - [x] (0.2a) `ruff` config in `pyproject.toml` + `.pre-commit-config.yaml` (2026-07-02)
-- [ ] (0.2b) mechanical `ruff format` + `ruff check --fix` pass (its own commit; no logic edits)
+- [x] (0.2b) mechanical `ruff format` + `ruff check --fix` pass (2026-07-02; 47 files, suite green)
 - [ ] (0.3) `pytest-cov` with a fail-under gate
 
 ## Phase 1 — Embedder module (isolated, no wiring)
