@@ -143,6 +143,69 @@ class MemoryStoreV2:
             """)
             logger.info("V2 migration: dream_log table ready")
 
+            # Phase 4: per-chunk embeddings (semantic-retrieval.md §5.4). A long
+            # memory becomes several overlapping chunks; a short one, a single
+            # chunk. owner_id/scope mirror memories for §6 multi-user forward-compat.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    memory_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding BLOB,
+                    embedding_dim INTEGER,
+                    embedding_model TEXT DEFAULT '',
+                    owner_id TEXT,
+                    scope TEXT DEFAULT 'private',
+                    created_at REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_memory ON memory_chunks(memory_id)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_model ON memory_chunks(embedding_model)"
+            )
+            logger.info("V2 migration: memory_chunks table ready")
+
+    # ── Chunk storage ───────────────────────────────────────────
+
+    def store_chunks(self, memory_id: str, chunks: list[dict]) -> int:
+        """Replace the stored chunks for a memory.
+
+        ``chunks`` is an ordered list of dicts with keys ``content`` (required)
+        and optionally ``embedding`` (bytes), ``embedding_dim`` (int),
+        ``embedding_model`` (str). Existing chunks for ``memory_id`` are deleted
+        first, so this is idempotent and safe to re-run (e.g. dream backfill).
+        Returns the number of chunk rows written.
+        """
+        now = time.time()
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("DELETE FROM memory_chunks WHERE memory_id = ?", (memory_id,))
+            written = 0
+            for idx, ch in enumerate(chunks):
+                content = ch.get("content")
+                if not content:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO memory_chunks
+                        (chunk_id, memory_id, chunk_index, content,
+                         embedding, embedding_dim, embedding_model, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"{memory_id}::chunk::{idx}",
+                        memory_id,
+                        idx,
+                        content,
+                        ch.get("embedding"),
+                        ch.get("embedding_dim"),
+                        ch.get("embedding_model", ""),
+                        now,
+                    ),
+                )
+                written += 1
+        return written
+
     # ── FTS5 Search ─────────────────────────────────────────────
 
     def search_fts(

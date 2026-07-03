@@ -29,6 +29,7 @@ WHY PIPELINE?
 import logging
 from typing import Optional
 
+from remembrance_mcp.chunk.chunk import chunk_text
 from remembrance_mcp.config import Settings
 from remembrance_mcp.dream.cycle import DreamCycle
 from remembrance_mcp.embed.embed import build_embed_chain
@@ -209,6 +210,35 @@ class MemoryPipeline:
             embedding_dim=embedding_dim,
             embedding_model=embedding_model,
         )
+
+        # Stage 3.5: Chunk-on-write (non-blocking, §5.4). Long content → several
+        # overlapping chunks; short content → one chunk (uniform path). Each chunk
+        # is embedded and stored in memory_chunks for chunk-level search (Phase 4.2).
+        # Reuse the whole-content embedding when there's a single chunk equal to
+        # the embedded text, to avoid a redundant embed on the common short case.
+        try:
+            chunk_contents = chunk_text(text)
+            chunk_rows = []
+            for c in chunk_contents:
+                if len(chunk_contents) == 1 and c == text and embedding_bytes is not None:
+                    c_emb, c_dim, c_model = embedding_bytes, embedding_dim, embedding_model
+                else:
+                    c_emb, c_dim, c_model = None, None, ""
+                    try:
+                        c_emb, c_dim, c_model = self.embed_chain.embed_text(c)
+                    except Exception as e:
+                        logger.warning(f"Chunk embed failed (stored without vector): {e}")
+                chunk_rows.append(
+                    {
+                        "content": c,
+                        "embedding": c_emb,
+                        "embedding_dim": c_dim,
+                        "embedding_model": c_model,
+                    }
+                )
+            self.store_v2.store_chunks(mem_id, chunk_rows)
+        except Exception as e:
+            logger.warning(f"Chunk-on-write failed (non-blocking): {e}")
 
         # Stage 4: Graph Wiring (V2)
         # Detect entities and wire them into the knowledge graph
