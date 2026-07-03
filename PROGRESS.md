@@ -12,24 +12,16 @@ holds: one task per session, tests are the arbiter, `BLOCKED.md` halts on a
 deferred product decision or 3 failed approaches. User reviews all work later.
 
 ## Status line
-- **Current phase:** Phase 4 — Chunking (all context sizes)
-- **Current task:** (4.3) Backfill chunks for existing memories in the dream cycle — LAST TASK
-- **Baseline:** 207 passed, 1 skipped (green).
-- **Last session:** 2026-07-03 — completed (4.2) chunk-level search → parent
-  resolution. New `HybridSearch.search_chunks_with_embedding`: cosine-ranks
-  `memory_chunks` of the matching model, dedups to the BEST chunk per memory_id,
-  resolves to parent rows (content/tier/etc.), drops expired parents, applies tier
-  boost. Rewired `_search_vector` + the balanced vector leg to use it (kept
-  memory-level `search_with_embedding` for its direct-call tests). 5 tests
-  `tests/test_search_chunks.py`; updated `test_search_balanced.py` to seed chunks.
-  NOTE for 4.3 (FINAL task): the dream `_phase_embed_stale` only refreshes
-  memories.embedding. Add chunk backfill — for memories with NO chunks (legacy)
-  or wrong-model chunks, run chunk_text(content), embed, store_chunks. Either
-  extend embed_stale or add a phase. After 4.3 green → write PHASE_COMPLETE.md
-  summarizing ALL phases 0–4 and STOP (per RUN MODE).
-- **Known flake tripped this session:** `test_v1_context_build_returns_markdown`
-  failed once in the full run, passed 5/5 isolated + on full re-run. NOT a
-  regression from 4.2 (see "Known flakes").
+- **Current phase:** ALL PHASES 0–4 COMPLETE (2026-07-03) — see PHASE_COMPLETE.md
+- **Current task:** DONE — loop finished. Awaiting human review.
+- **Baseline:** 212 passed, 1 skipped (green).
+- **Last session:** 2026-07-03 — completed (4.3) dream chunk backfill + **Phase 4
+  DONE + ALL PHASES DONE**. Added `chunk_backfill` phase to the dream cycle
+  (`_phase_chunk_backfill`): finds memories lacking a current-model embedded
+  chunk (legacy/no-chunks or post-model-swap), re-runs chunk_text → embed →
+  store_chunks, bounded per run, returns memories_chunked/chunks_written + dry-run.
+  5 tests `tests/test_dream_chunk_backfill.py`. Wrote PHASE_COMPLETE.md and stopped
+  per RUN MODE.
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -70,11 +62,11 @@ vector fusion into `_search_balanced`, dream backfill with true count. Semantic
 search is live end-to-end. Details in git history + `tests/test_embed_on_write`,
 `test_search_vector`, `test_search_balanced`, `test_dream_backfill`.
 
-## Phase 4 — Chunking (all context sizes)
+## Phase 4 — Chunking (all context sizes) *(COMPLETE 2026-07-03)*
 - [x] (4.1a) chunking primitive `chunk/chunk.py` `chunk_text()` (env-configurable) — 2026-07-03
 - [x] (4.1b) `memory_chunks` table + chunk-on-write wiring — 2026-07-03
 - [x] (4.2) Search at chunk level → resolve to parent memories (dedup, best chunk wins) — 2026-07-03
-- [ ] (4.3) Backfill chunks for existing memories in the dream cycle
+- [x] (4.3) Backfill chunks for existing memories in the dream cycle — 2026-07-03
 
 ---
 

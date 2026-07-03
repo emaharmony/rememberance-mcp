@@ -36,6 +36,7 @@ import logging
 import sqlite3
 import time
 
+from remembrance_mcp.chunk.chunk import chunk_text
 from remembrance_mcp.graph.edges import GraphWiring
 from remembrance_mcp.graph.entity import EntityDetector
 from remembrance_mcp.store.edges import EntityStore
@@ -53,6 +54,7 @@ ALL_PHASES = [
     "pattern_detect",
     "orphan_detect",
     "embed_stale",
+    "chunk_backfill",
     "purge",
 ]
 
@@ -193,6 +195,8 @@ class DreamCycle:
             return self._phase_orphan_detect(dry_run)
         elif phase == "embed_stale":
             return self._phase_embed_stale(dry_run)
+        elif phase == "chunk_backfill":
+            return self._phase_chunk_backfill(dry_run)
         elif phase == "purge":
             return self._phase_purge(dry_run)
         else:
@@ -437,6 +441,92 @@ class DreamCycle:
         return {
             "status": "ok",
             "embeddings_refreshed": refreshed,
+            "stale_found": stale_found,
+            "model": current_model,
+        }
+
+    def _phase_chunk_backfill(self, dry_run: bool = False) -> dict:
+        """
+        Phase: backfill chunks for existing memories (semantic-retrieval.md §5.4/§5.5).
+
+        Chunk-level search only finds memories that have current-model chunks.
+        Legacy memories captured before chunking existed — or memories left with
+        old-model chunks after a model swap — have none, so they're invisible to
+        vector search until re-chunked. This finds memories lacking any current-
+        model embedded chunk, re-runs chunk_text → embed → store_chunks (which
+        replaces stale chunks), bounded per run. Returns true counts.
+        """
+        db_path = self.entity_store.db_path
+        chain = self._get_embed_chain()
+
+        try:
+            _, _, current_model = chain.embed_text("probe")
+        except Exception as e:
+            logger.warning(f"chunk_backfill: no embedder available ({e}); skipping")
+            return {
+                "status": "ok",
+                "memories_chunked": 0,
+                "chunks_written": 0,
+                "note": "no embedder",
+            }
+
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, content FROM memories
+                WHERE content IS NOT NULL AND content != ''
+                AND NOT EXISTS (
+                    SELECT 1 FROM memory_chunks c
+                    WHERE c.memory_id = memories.id
+                    AND c.embedding_model = ? AND c.embedding IS NOT NULL
+                )
+                LIMIT ?
+                """,
+                (current_model, EMBED_BACKFILL_BATCH),
+            ).fetchall()
+
+        stale_found = len(rows)
+        if dry_run:
+            return {
+                "status": "ok",
+                "memories_chunked": 0,
+                "chunks_written": 0,
+                "stale_found": stale_found,
+                "note": f"{stale_found} memory(ies) would be re-chunked with {current_model}",
+            }
+
+        memories_chunked = 0
+        chunks_written = 0
+        for r in rows:
+            try:
+                contents = chunk_text(r["content"])
+                chunk_rows = []
+                for c in contents:
+                    emb, dim, model = None, None, ""
+                    try:
+                        emb, dim, model = chain.embed_text(c)
+                    except Exception as e:
+                        logger.warning(f"chunk_backfill: embed failed for {r['id']} chunk: {e}")
+                    chunk_rows.append(
+                        {
+                            "content": c,
+                            "embedding": emb,
+                            "embedding_dim": dim,
+                            "embedding_model": model,
+                        }
+                    )
+                chunks_written += self.memory_v2.store_chunks(r["id"], chunk_rows)
+                memories_chunked += 1
+            except Exception as e:
+                # Non-blocking: skip this memory, keep draining the rest.
+                logger.warning(f"chunk_backfill: failed for {r['id']}: {e}")
+                continue
+
+        return {
+            "status": "ok",
+            "memories_chunked": memories_chunked,
+            "chunks_written": chunks_written,
             "stale_found": stale_found,
             "model": current_model,
         }
