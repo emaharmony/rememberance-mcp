@@ -47,5 +47,6 @@ jobs:
         if: matrix.extras == 'all'
         run: pip install -e ".[all]"
 
-      - name: Run test suite
-        run: python -m pytest -q
+      # Coverage + fail-under gate (floor in [tool.coverage.report] fail_under).
+      - name: Run test suite (with coverage gate)
+        run: python -m pytest -q --cov=remembrance_mcp --cov-report=term-missing

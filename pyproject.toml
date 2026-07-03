@@ -19,6 +19,7 @@ gate = [
 ]
 dev = [
     "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
     "ruff>=0.15.0",
 ]
 all = [
@@ -27,6 +28,7 @@ all = [
     "torch>=2.0.0",
     "transformers>=4.0.0",
     "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
     "ruff>=0.15.0",
 ]
 
@@ -37,6 +39,21 @@ remembrance-service = "remembrance_mcp.serve:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# NOTE: --cov is intentionally NOT in addopts so plain/subset `pytest` runs
+# behave normally. Coverage + the fail-under gate are invoked explicitly in CI
+# (see .github/workflows/ci.yml).
+
+[tool.coverage.run]
+source = ["remembrance_mcp"]
+# statement coverage only (no branch) so the number matches the fail_under floor
+
+[tool.coverage.report]
+show_missing = true
+# Phase 0 safety net (deferred-hardening Concern C item 3). Ratchet FLOOR, not
+# the target: current coverage is ~64%; roadmap target is ~80%. Raise this as
+# suites expand — never lower it. 60 leaves headroom for the minimal-vs-all
+# matrix leg difference (minimal skips the mcp test) and flake variance.
+fail_under = 60
 
 [tool.ruff]
 # Phase 0 safety net (deferred-hardening Concern C item 2). Config only here;

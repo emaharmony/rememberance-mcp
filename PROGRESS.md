@@ -5,17 +5,18 @@ Each session: read this + git, do exactly one task, keep tests green, commit,
 update this file. Only Phases 0–4 are in scope for the loop.
 
 ## Status line
-- **Current phase:** Phase 0 — Safety net
-- **Current task:** (0.3) `pytest-cov` with a fail-under gate — LAST Phase 0 task
-- **Baseline:** 141 passed, 1 skipped (green).
-- **Last session:** 2026-07-02 — completed (0.2b): mechanical `ruff check --fix`
-  (144 safe autofixes, mostly isort/W292) + `ruff format` (34 files). 47 files
-  changed, +1142/−716. Verified NON-behavioral: suite green, both console-script
-  entry points still resolve, `__init__.py` changes are pure import reordering
-  (no re-exports removed). **90 non-autofixable lint findings remain** (E501,
-  unused vars, etc.) — NOT wired to CI, parked for a future lint-cleanup task
-  (outside the Phase 0.x roadmap scope; needs a human to greenlight).
-  After (0.3), Phase 0 is COMPLETE → write PHASE_COMPLETE.md and stop.
+- **Current phase:** Phase 0 — Safety net → **COMPLETE** (see PHASE_COMPLETE.md)
+- **Current task:** PHASE GATE — awaiting human review. Next phase = Phase 1
+  (Embedder module), task (1.1). Do NOT start Phase 1 until PHASE_COMPLETE.md
+  is deleted.
+- **Baseline:** 141 passed, 1 skipped (green); coverage 63.74% (floor 60%).
+- **Last session:** 2026-07-02 — completed (0.3): added `pytest-cov` (dev/all
+  extras) + coverage config in `pyproject.toml` (`[tool.coverage.report]
+  fail_under = 60`, statement coverage). Coverage is invoked explicitly in CI
+  (`--cov=remembrance_mcp --cov-report=term-missing`), deliberately NOT in
+  pytest addopts, so plain/subset runs (incl. the loop's baseline + flake repro)
+  don't trip the gate. Verified: CI-style run reports 63.74% ≥ 60 (exit 0);
+  plain & subset runs unaffected. This completed Phase 0 → phase gate triggered.
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -29,11 +30,11 @@ update this file. Only Phases 0–4 are in scope for the loop.
 
 ---
 
-## Phase 0 — Safety net *(active)*
-- [x] (0.1) CI: GitHub Actions matrix (Py 3.10–3.12, minimal + `[all]` extras) running the suite — `.github/workflows/ci.yml` (2026-07-02)
-- [x] (0.2a) `ruff` config in `pyproject.toml` + `.pre-commit-config.yaml` (2026-07-02)
-- [x] (0.2b) mechanical `ruff format` + `ruff check --fix` pass (2026-07-02; 47 files, suite green)
-- [ ] (0.3) `pytest-cov` with a fail-under gate
+## Phase 0 — Safety net *(COMPLETE 2026-07-02 — pending human review)*
+- [x] (0.1) CI: GitHub Actions matrix (Py 3.10–3.12, minimal + `[all]` extras) running the suite — `.github/workflows/ci.yml`
+- [x] (0.2a) `ruff` config in `pyproject.toml` + `.pre-commit-config.yaml`
+- [x] (0.2b) mechanical `ruff format` + `ruff check --fix` pass (47 files, suite green)
+- [x] (0.3) `pytest-cov` fail-under gate (floor 60%, current 63.74%) wired into CI
 
 ## Phase 1 — Embedder module (isolated, no wiring)
 - [ ] (1.1) `embed/embed.py`: `BaseEmbedBackend`, `OllamaEmbedBackend`, `OpenAIEmbedBackend`, `HashEmbedBackend`, `EmbedFallbackChain`
