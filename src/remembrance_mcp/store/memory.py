@@ -59,6 +59,19 @@ class MemoryStoreV2:
                 ("ALTER TABLE memories ADD COLUMN timeline TEXT DEFAULT ''", "timeline"),
                 ("ALTER TABLE memories ADD COLUMN dream_count INTEGER DEFAULT 0", "dream_count"),
                 ("ALTER TABLE memories ADD COLUMN last_dream_at REAL", "last_dream_at"),
+                # Phase 2: provider-agnostic embedding metadata (semantic-retrieval.md §5.1).
+                # dim + model stored per row so search only compares within one model;
+                # both NULL/'' until a row is embedded (Phase 3 write path).
+                ("ALTER TABLE memories ADD COLUMN embedding_dim INTEGER", "embedding_dim"),
+                (
+                    "ALTER TABLE memories ADD COLUMN embedding_model TEXT DEFAULT ''",
+                    "embedding_model",
+                ),
+                # Phase 2: multi-user forward-compat (semantic-retrieval.md §6). Unused in
+                # single-user v1 — structurally present so the Postgres cutover is an adapter
+                # swap, not a redesign. owner_id nullable; scope defaults to 'private'.
+                ("ALTER TABLE memories ADD COLUMN owner_id TEXT", "owner_id"),
+                ("ALTER TABLE memories ADD COLUMN scope TEXT DEFAULT 'private'", "scope"),
             ]
             for sql, col_name in migrations:
                 try:

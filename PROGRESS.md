@@ -12,17 +12,19 @@ holds: one task per session, tests are the arbiter, `BLOCKED.md` halts on a
 deferred product decision or 3 failed approaches. User reviews all work later.
 
 ## Status line
-- **Current phase:** Phase 2 — Provider-agnostic schema
-- **Current task:** (2.1) Add `embedding_dim`, `embedding_model` to memories
-- **Baseline:** 163 passed, 1 skipped (green).
-- **Last session:** 2026-07-02 — completed Phase 1 (embedder module) in one
-  cohesive session: `embed/embed.py` (`BaseEmbedBackend`, `HashEmbedBackend`,
-  `OllamaEmbedBackend`, `OpenAIEmbedBackend`, `EmbedFallbackChain` + builder +
-  `embed_text()->(bytes,dim,model_id)`), `embed/__init__.py`, and 21 offline
-  tests (`tests/test_embed.py`, hash backend). Vectors use the SAME struct
-  float32 format as `search/hybrid.py` (Phase-3-ready). Isolated: nothing else
-  imports it yet. Env: `REMEMBRANCE_EMBED_BACKENDS` (default `hash`),
-  `REMEMBRANCE_EMBED_MODEL`, `REMEMBRANCE_EMBED_HOST`, `OPENAI_API_KEY`.
+- **Current phase:** Phase 3 — Wire semantic retrieval (single-user)
+- **Current task:** (3.1) Embed on write in `capture()` (non-blocking)
+- **Baseline:** 169 passed, 1 skipped (green).
+- **Last session:** 2026-07-03 — completed Phase 2 (provider-agnostic schema).
+  Extended the additive `_migrate_v2` in `store/memory.py` with 4 columns on
+  `memories`: `embedding_dim INTEGER`, `embedding_model TEXT DEFAULT ''` (§5.1),
+  `owner_id TEXT` (nullable), `scope TEXT DEFAULT 'private'` (§6 multi-user
+  forward-compat, unused in v1). Migration is additive + idempotent (ALTER ADD
+  COLUMN guarded by OperationalError). 6 tests in `tests/test_schema_migration.py`
+  prove columns present, correct defaults, existing rows survive, no data loss,
+  idempotent. NOTE for Phase 3: the write path (`store.store()`) does NOT yet set
+  these columns — 3.1 must populate `embedding`/`embedding_dim`/`embedding_model`
+  on write (store() needs new optional params or a follow-up UPDATE).
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -52,10 +54,10 @@ format pass, pytest-cov fail-under gate (floor 60%). Details in git history.
 `embed_text()`), `embed/__init__.py`, `tests/test_embed.py` (21 offline tests).
 Isolated — wired in nowhere yet (that is Phase 3). Details in git history.
 
-## Phase 2 — Provider-agnostic schema
-- [ ] (2.1) Add `embedding_dim`, `embedding_model` to memories
-- [ ] (2.2) Add `owner_id` (nullable), `scope` (default `private`) — unused in v1, structurally present
-- [ ] (2.3) Additive-only migration (no data loss on existing stores)
+## Phase 2 — Provider-agnostic schema *(COMPLETE 2026-07-03)*
+`embedding_dim`, `embedding_model`, `owner_id`, `scope` added to `memories` via
+the additive idempotent `_migrate_v2`; `tests/test_schema_migration.py`. Details
+in git history.
 
 ## Phase 3 — Wire semantic retrieval (single-user)
 - [ ] (3.1) Embed on write in `capture()` (non-blocking)
