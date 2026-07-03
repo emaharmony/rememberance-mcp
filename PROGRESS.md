@@ -6,13 +6,16 @@ update this file. Only Phases 0–4 are in scope for the loop.
 
 ## Status line
 - **Current phase:** Phase 0 — Safety net
-- **Current task:** (0.2) `ruff` lint+format config + pre-commit
+- **Current task:** (0.2b) mechanical `ruff format` + `ruff check --fix` pass
 - **Baseline:** 141 passed, 1 skipped (green).
-- **Last session:** 2026-07-02 — completed (0.1): added `.github/workflows/ci.yml`.
-  Matrix = Python 3.10/3.11/3.12 × {minimal (`.[dev]`), all (`.[all]`)} = 6 jobs
-  on ubuntu-latest, each running `python -m pytest -q`. YAML validated; suite
-  green. NOTE: CI has not actually run on GitHub yet (needs push + Actions
-  enabled) — first real run will also reveal the flake's true rate. Next: (0.2).
+- **Last session:** 2026-07-02 — completed (0.2a): added ruff config to
+  `pyproject.toml` (line-length 100, lint select E/F/W/I, isort first-party
+  `remembrance_mcp`) + `.pre-commit-config.yaml` (ruff + ruff-format, pinned
+  v0.15.20) + `ruff>=0.15.0` in the dev/all extras. Config-only, no code
+  reformatted. ruff 0.15.20 installed in `.venv`. Suite green.
+  **Preview for 0.2b:** `ruff check .` → 285 findings (150 autofixable);
+  `ruff format` → 45 of 47 files would reformat. That is the intended large
+  mechanical diff — keep it format/autofix ONLY, its own commit, no logic edits.
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -28,7 +31,8 @@ update this file. Only Phases 0–4 are in scope for the loop.
 
 ## Phase 0 — Safety net *(active)*
 - [x] (0.1) CI: GitHub Actions matrix (Py 3.10–3.12, minimal + `[all]` extras) running the suite — `.github/workflows/ci.yml` (2026-07-02)
-- [ ] (0.2) `ruff` lint+format config + pre-commit; one mechanical formatting-only PR
+- [x] (0.2a) `ruff` config in `pyproject.toml` + `.pre-commit-config.yaml` (2026-07-02)
+- [ ] (0.2b) mechanical `ruff format` + `ruff check --fix` pass (its own commit; no logic edits)
 - [ ] (0.3) `pytest-cov` with a fail-under gate
 
 ## Phase 1 — Embedder module (isolated, no wiring)

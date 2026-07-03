@@ -19,6 +19,7 @@ gate = [
 ]
 dev = [
     "pytest>=8.0.0",
+    "ruff>=0.15.0",
 ]
 all = [
     "mcp>=1.0.0",
@@ -26,6 +27,7 @@ all = [
     "torch>=2.0.0",
     "transformers>=4.0.0",
     "pytest>=8.0.0",
+    "ruff>=0.15.0",
 ]
 
 [project.scripts]
@@ -35,3 +37,18 @@ remembrance-service = "remembrance_mcp.serve:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+# Phase 0 safety net (deferred-hardening Concern C item 2). Config only here;
+# the mechanical `ruff format` / `--fix` pass lands as its own commit (task 0.2b).
+line-length = 100  # p99 of the codebase is 99 cols; only ~0.9% of lines exceed 100
+target-version = "py310"  # matches requires-python = ">=3.10"
+src = ["src"]
+extend-exclude = ["*.egg-info", "build", "dist"]
+
+[tool.ruff.lint]
+# Start lenient (Concern B); tighten (UP/B/etc.) in a later dedicated pass.
+select = ["E", "F", "W", "I"]  # pycodestyle, pyflakes, isort
+
+[tool.ruff.lint.isort]
+known-first-party = ["remembrance_mcp"]

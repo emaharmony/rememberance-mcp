@@ -1,0 +1,13 @@
+# Phase 0 safety net (deferred-hardening Concern C item 2).
+# Install once with:  pre-commit install
+# Run on all files:   pre-commit run --all-files
+# ruff config (line-length, lint select, isort) lives in pyproject.toml.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      # Linter (with autofix); import sorting comes from the isort ("I") rules.
+      - id: ruff
+        args: [--fix]
+      # Formatter (black-compatible).
+      - id: ruff-format
