@@ -13,20 +13,23 @@ deferred product decision or 3 failed approaches. User reviews all work later.
 
 ## Status line
 - **Current phase:** Phase 4 — Chunking (all context sizes)
-- **Current task:** (4.2) Search at chunk level → resolve to parent memories
-- **Baseline:** 202 passed, 1 skipped (green).
-- **Last session:** 2026-07-03 — completed (4.1b) chunk table + chunk-on-write.
-  `_migrate_v2` now creates `memory_chunks` (chunk_id, memory_id, chunk_index,
-  content, embedding, embedding_dim, embedding_model, owner_id, scope, created_at)
-  + indexes on memory_id and embedding_model. `MemoryStoreV2.store_chunks(memory_id,
-  chunks)` deletes-then-inserts (idempotent). `capture()` Stage 3.5: chunk_text(text)
-  → embed each chunk (reusing the whole-content embedding for the single-chunk
-  short case) → store_chunks; non-blocking. 5 tests in `tests/test_chunk_on_write.py`.
-  NOTE for 4.2: search currently matches at the MEMORY level (search_with_embedding
-  on memories.embedding). Rewire vector search to match at the CHUNK level
-  (memory_chunks, same-model filter, cosine), then resolve to parent memories —
-  dedup keeping the BEST-scoring chunk per memory_id, join back to the memories
-  row for content/tier/etc. Feeds `_search_vector` + the balanced vector leg.
+- **Current task:** (4.3) Backfill chunks for existing memories in the dream cycle — LAST TASK
+- **Baseline:** 207 passed, 1 skipped (green).
+- **Last session:** 2026-07-03 — completed (4.2) chunk-level search → parent
+  resolution. New `HybridSearch.search_chunks_with_embedding`: cosine-ranks
+  `memory_chunks` of the matching model, dedups to the BEST chunk per memory_id,
+  resolves to parent rows (content/tier/etc.), drops expired parents, applies tier
+  boost. Rewired `_search_vector` + the balanced vector leg to use it (kept
+  memory-level `search_with_embedding` for its direct-call tests). 5 tests
+  `tests/test_search_chunks.py`; updated `test_search_balanced.py` to seed chunks.
+  NOTE for 4.3 (FINAL task): the dream `_phase_embed_stale` only refreshes
+  memories.embedding. Add chunk backfill — for memories with NO chunks (legacy)
+  or wrong-model chunks, run chunk_text(content), embed, store_chunks. Either
+  extend embed_stale or add a phase. After 4.3 green → write PHASE_COMPLETE.md
+  summarizing ALL phases 0–4 and STOP (per RUN MODE).
+- **Known flake tripped this session:** `test_v1_context_build_returns_markdown`
+  failed once in the full run, passed 5/5 isolated + on full re-run. NOT a
+  regression from 4.2 (see "Known flakes").
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -70,7 +73,7 @@ search is live end-to-end. Details in git history + `tests/test_embed_on_write`,
 ## Phase 4 — Chunking (all context sizes)
 - [x] (4.1a) chunking primitive `chunk/chunk.py` `chunk_text()` (env-configurable) — 2026-07-03
 - [x] (4.1b) `memory_chunks` table + chunk-on-write wiring — 2026-07-03
-- [ ] (4.2) Search at chunk level → resolve to parent memories (dedup, best chunk wins)
+- [x] (4.2) Search at chunk level → resolve to parent memories (dedup, best chunk wins) — 2026-07-03
 - [ ] (4.3) Backfill chunks for existing memories in the dream cycle
 
 ---

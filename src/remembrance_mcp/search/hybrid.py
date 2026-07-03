@@ -226,12 +226,13 @@ class HybridSearch:
             logger.warning(f"Query embedding failed, using keyword search: {e}")
             return self._search_keyword(query, category=category, limit=limit)
 
-        results = self.search_with_embedding(
+        results = self.search_chunks_with_embedding(
             query_bytes, category=category, limit=limit, model=model_id
         )
         if not results:
-            # No rows embedded with this model yet (e.g. fresh store, or a model
-            # swap pending dream-cycle backfill) — keyword keeps search working.
+            # No chunks embedded with this model yet (fresh store, un-chunked
+            # legacy rows pending backfill, or a model swap) — keyword keeps
+            # search working.
             return self._search_keyword(query, category=category, limit=limit)
         return results
 
@@ -316,6 +317,79 @@ class HybridSearch:
         candidates.sort(key=lambda x: x["score"], reverse=True)
         return candidates[:limit]
 
+    def search_chunks_with_embedding(
+        self,
+        query_embedding: bytes,
+        category: Optional[str] = None,
+        limit: int = 10,
+        model: Optional[str] = None,
+    ) -> list[dict]:
+        """Chunk-level vector search resolved to parent memories (§5.4/§5.5).
+
+        Cosine-ranks the query against ``memory_chunks`` of the matching model,
+        then resolves to parent memories keeping the BEST-scoring chunk per
+        ``memory_id`` (dedup). Parents are joined back for content/tier/etc.,
+        expired parents are dropped, and the tier boost is applied to the best
+        chunk score. This is the query path once memories are chunked on write.
+        """
+        query_vec = self._bytes_to_vector(query_embedding)
+        if not query_vec:
+            return []
+
+        now = time.time()
+        best_by_memory: dict[str, float] = {}
+        with _connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            sql = "SELECT memory_id, embedding FROM memory_chunks WHERE embedding IS NOT NULL"
+            params: list = []
+            if model is not None:
+                sql += " AND embedding_model = ?"
+                params.append(model)
+            for r in conn.execute(sql, params).fetchall():
+                cvec = self._bytes_to_vector(r["embedding"])
+                if not cvec:
+                    continue
+                sim = self._cosine_similarity(query_vec, cvec)
+                mid = r["memory_id"]
+                # Keep the best-scoring chunk per parent memory (dedup).
+                if mid not in best_by_memory or sim > best_by_memory[mid]:
+                    best_by_memory[mid] = sim
+
+            if not best_by_memory:
+                return []
+
+            placeholders = ",".join("?" for _ in best_by_memory)
+            msql = f"""
+                SELECT id, content, compiled_truth, summary, category, tier
+                FROM memories
+                WHERE id IN ({placeholders})
+                AND (expires_at IS NULL OR expires_at > ?)
+            """
+            mparams: list = [*best_by_memory.keys(), now]
+            if category is not None:
+                msql += " AND category = ?"
+                mparams.append(category)
+            memory_rows = conn.execute(msql, mparams).fetchall()
+
+        results = []
+        for r in memory_rows:
+            sim = best_by_memory[r["id"]]
+            tier_boost = TIER_BOOST.get(r["tier"], 1.0)
+            results.append(
+                {
+                    "id": r["id"],
+                    "content": r["content"],
+                    "compiled_truth": r["compiled_truth"] or "",
+                    "summary": r["summary"] or "",
+                    "category": r["category"],
+                    "tier": r["tier"],
+                    "score": sim * tier_boost,
+                    "sources": ["vector"],
+                }
+            )
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:limit]
+
     def _search_balanced(
         self,
         query: str,
@@ -337,15 +411,15 @@ class HybridSearch:
         # Step 1: FTS5 search
         fts_results = self._search_keyword(query, category, tier, limit=30)
 
-        # Step 2: Vector search — embed the query and match same-model rows.
-        # Call search_with_embedding DIRECTLY (not _search_vector, whose keyword
+        # Step 2: Vector search at the CHUNK level, resolved to parents. Call
+        # search_chunks_with_embedding DIRECTLY (not _search_vector, whose keyword
         # fallback would re-add the FTS results and double-count them in fusion).
         # Any failure or no matching vectors → empty list → fusion is FTS-only,
         # preserving the previous keyword-only behavior.
         vec_results: list[dict] = []
         try:
             query_bytes, _dim, model_id = self._get_embed_chain().embed_text(query)
-            vec_results = self.search_with_embedding(
+            vec_results = self.search_chunks_with_embedding(
                 query_bytes, category=category, limit=30, model=model_id
             )
         except Exception as e:
