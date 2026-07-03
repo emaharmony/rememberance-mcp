@@ -6,14 +6,13 @@ update this file. Only Phases 0–4 are in scope for the loop.
 
 ## Status line
 - **Current phase:** Phase 0 — Safety net
-- **Current task:** (0.1) CI GitHub Actions matrix
-- **Baseline:** 141 passed, 1 skipped (green — confirmed on 3 consecutive full runs).
-- **Last session:** 2026-07-02 — a full-suite run showed 1 failure
-  (`test_prism_compat.py::test_v1_context_build_returns_markdown`). Diagnosed as
-  a PRE-EXISTING flake, NOT a regression (previous session added no code; test
-  passes 5/5 in isolation and the full suite is green on re-run). No code
-  changed. Task 0.1 NOT advanced (Step 2 diverts the session to the failure).
-  See "Known flakes" below. Next session: 0.1 (CI matrix) is still the task.
+- **Current task:** (0.2) `ruff` lint+format config + pre-commit
+- **Baseline:** 141 passed, 1 skipped (green).
+- **Last session:** 2026-07-02 — completed (0.1): added `.github/workflows/ci.yml`.
+  Matrix = Python 3.10/3.11/3.12 × {minimal (`.[dev]`), all (`.[all]`)} = 6 jobs
+  on ubuntu-latest, each running `python -m pytest -q`. YAML validated; suite
+  green. NOTE: CI has not actually run on GitHub yet (needs push + Actions
+  enabled) — first real run will also reveal the flake's true rate. Next: (0.2).
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -28,7 +27,7 @@ update this file. Only Phases 0–4 are in scope for the loop.
 ---
 
 ## Phase 0 — Safety net *(active)*
-- [ ] (0.1) CI: GitHub Actions matrix (Py 3.10–3.12, minimal + `[all]` extras) running the suite
+- [x] (0.1) CI: GitHub Actions matrix (Py 3.10–3.12, minimal + `[all]` extras) running the suite — `.github/workflows/ci.yml` (2026-07-02)
 - [ ] (0.2) `ruff` lint+format config + pre-commit; one mechanical formatting-only PR
 - [ ] (0.3) `pytest-cov` with a fail-under gate
 
