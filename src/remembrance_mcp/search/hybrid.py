@@ -337,11 +337,21 @@ class HybridSearch:
         # Step 1: FTS5 search
         fts_results = self._search_keyword(query, category, tier, limit=30)
 
-        # Step 2: Vector search (placeholder — needs embedding generation)
-        # For V2.3, vector results come from search_with_embedding if caller has embedding
-        vec_results = []  # Will be populated when embedding generation is wired
+        # Step 2: Vector search — embed the query and match same-model rows.
+        # Call search_with_embedding DIRECTLY (not _search_vector, whose keyword
+        # fallback would re-add the FTS results and double-count them in fusion).
+        # Any failure or no matching vectors → empty list → fusion is FTS-only,
+        # preserving the previous keyword-only behavior.
+        vec_results: list[dict] = []
+        try:
+            query_bytes, _dim, model_id = self._get_embed_chain().embed_text(query)
+            vec_results = self.search_with_embedding(
+                query_bytes, category=category, limit=30, model=model_id
+            )
+        except Exception as e:
+            logger.warning(f"Vector leg of balanced search failed (FTS-only): {e}")
 
-        # Step 3+4: RRF fusion
+        # Step 3+4: RRF fusion (variadic — vector is just another ranked list, §5.6)
         fused = self._rrf_fuse(fts_results, vec_results)
 
         # Step 5: Graph augmentation

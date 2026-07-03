@@ -13,19 +13,19 @@ deferred product decision or 3 failed approaches. User reviews all work later.
 
 ## Status line
 - **Current phase:** Phase 3 — Wire semantic retrieval (single-user)
-- **Current task:** (3.4) Fuse vector into `_search_balanced`
-- **Baseline:** 178 passed, 1 skipped (green).
-- **Last session:** 2026-07-03 — completed (3.3) LIMIT 500 fix. Removed
-  `ORDER BY accessed_at DESC LIMIT 500` from `search_with_embedding`; now scans
-  ALL non-expired model-matching embedded rows and ranks by cosine (top-`limit`
-  after scoring). Added a no-cap regression test (`test_search_vector.py`): a
-  target with the OLDEST accessed_at, buried under 600 fillers, is still
-  retrieved (would fail under the old cap). NOTE for 3.4: `_search_balanced`
-  (hybrid.py) currently sets `vec_results = []` (placeholder) then RRF-fuses
-  fts+empty. Replace with real vector results from `_search_vector`/embedding,
-  add as an extra list to the existing variadic `_rrf_fuse` (§5.6 — no fusion
-  algorithm change). Mind: `_search_vector` falls back to keyword, so for balanced
-  call `search_with_embedding` directly (avoid double keyword) — see 3.4 notes.
+- **Current task:** (3.5) Dream-cycle backfill with true count — LAST Phase 3 task
+- **Baseline:** 181 passed, 1 skipped (green).
+- **Last session:** 2026-07-03 — completed (3.4) vector fusion into
+  `_search_balanced`. Replaced the `vec_results = []` placeholder: embed the
+  query, call `search_with_embedding(model=...)` DIRECTLY (not `_search_vector`,
+  whose keyword fallback would double-count FTS), feed the list into the existing
+  variadic `_rrf_fuse` (no algorithm change, §5.6). Failure/no-vectors → FTS-only.
+  3 tests in `tests/test_search_balanced.py` (vector-only memory surfaces,
+  sources merge when both legs hit, FTS-only path safe). NOTE for 3.5: dream
+  backfill is a stub returning `embeddings_refreshed: 0` (dream/cycle.py ~L357).
+  Implement: find rows with NULL embedding OR `embedding_model` != current model,
+  embed in bounded batches via the chain, UPDATE embedding+dim+model, return a
+  TRUE refreshed count.
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -64,7 +64,7 @@ in git history.
 - [x] (3.1) Embed on write in `capture()` (non-blocking) — 2026-07-03
 - [x] (3.2) Implement `_search_vector()` (model-matched) — 2026-07-03
 - [x] (3.3) Fix the `LIMIT 500` candidate cap — 2026-07-03
-- [ ] (3.4) Fuse vector into `_search_balanced`
+- [x] (3.4) Fuse vector into `_search_balanced` — 2026-07-03
 - [ ] (3.5) Dream-cycle backfill with true count
 
 ## Phase 4 — Chunking (all context sizes)
