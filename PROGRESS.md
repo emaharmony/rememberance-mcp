@@ -13,19 +13,20 @@ deferred product decision or 3 failed approaches. User reviews all work later.
 
 ## Status line
 - **Current phase:** Phase 3 — Wire semantic retrieval (single-user)
-- **Current task:** (3.2) Implement `_search_vector()` (model-matched)
-- **Baseline:** 173 passed, 1 skipped (green).
-- **Last session:** 2026-07-03 — completed (3.1) embed-on-write. `pipeline.py`
-  now builds `self.embed_chain = build_embed_chain()` and `capture()` embeds the
-  content (Stage 2.5) BEFORE store, non-blocking (embed failure logs + stores a
-  null vector; memory never lost). `store.store()` gained `embedding_dim` +
-  `embedding_model` params and writes them; the two embedding-metadata columns
-  are now ALSO in the base `CREATE TABLE` (store.py) so store() works with or
-  without the V2 migration. 4 tests in `tests/test_embed_on_write.py` (vector
-  persisted w/ dim+model, non-blocking on failure, SKIP stores nothing,
-  deterministic). Default backend = hash (256-dim). NOTE for 3.2: `_search_vector`
-  (hybrid.py L192) is a stub → keyword; must embed the QUERY via the same chain,
-  match only rows with the SAME `embedding_model`, cosine-rank, resolve to memories.
+- **Current task:** (3.3) Fix the `LIMIT 500` candidate cap
+- **Baseline:** 177 passed, 1 skipped (green).
+- **Last session:** 2026-07-03 — completed (3.2) `_search_vector`. Now embeds the
+  query via a lazy `HybridSearch._get_embed_chain()` (pipeline passes the SAME
+  chain as write), cosine-ranks via `search_with_embedding(model=...)` filtering
+  to rows with the matching `embedding_model` (cross-model cosine is meaningless
+  + dim-safe), and falls back to keyword when there is no embedder or no matching
+  vectors. Also fixed a LATENT bug: the keyword-fallback call passed `limit`
+  positionally into the `tier` param (`_search_keyword(query, category, limit)`)
+  → bogus `tier=` filter; now uses keyword args. `search_with_embedding` also
+  now honors its `category` arg (was accepted-but-ignored). 4 tests in
+  `tests/test_search_vector.py`. NOTE for 3.3: `search_with_embedding` still has
+  `ORDER BY accessed_at DESC LIMIT 500` (hybrid.py) — drop/replace it so the best
+  semantic match isn't cut before scoring (§7).
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -62,7 +63,7 @@ in git history.
 
 ## Phase 3 — Wire semantic retrieval (single-user)
 - [x] (3.1) Embed on write in `capture()` (non-blocking) — 2026-07-03
-- [ ] (3.2) Implement `_search_vector()` (model-matched)
+- [x] (3.2) Implement `_search_vector()` (model-matched) — 2026-07-03
 - [ ] (3.3) Fix the `LIMIT 500` candidate cap
 - [ ] (3.4) Fuse vector into `_search_balanced`
 - [ ] (3.5) Dream-cycle backfill with true count

@@ -129,6 +129,7 @@ class MemoryPipeline:
         self.hybrid_search = HybridSearch(
             db_path=self.settings.DB_PATH,
             entity_store=self.entity_store,
+            embed_chain=self.embed_chain,  # same model for query as for write
         )
 
         # ── V2: Dream Cycle ──────────────────────────────────

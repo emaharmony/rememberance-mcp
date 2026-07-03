@@ -86,9 +86,19 @@ class HybridSearch:
         results = search.search("What did we decide about Prism?")
     """
 
-    def __init__(self, db_path: Path, entity_store: EntityStore):
+    def __init__(self, db_path: Path, entity_store: EntityStore, embed_chain=None):
         self.db_path = db_path
         self.entity_store = entity_store
+        # Embedder for query-time vectors. Lazy so keyword-only use pays nothing;
+        # defaults to the env-configured chain (same one capture() writes with).
+        self._embed_chain = embed_chain
+
+    def _get_embed_chain(self):
+        if self._embed_chain is None:
+            from remembrance_mcp.embed.embed import build_embed_chain
+
+            self._embed_chain = build_embed_chain()
+        return self._embed_chain
 
     def search(
         self,
@@ -203,19 +213,34 @@ class HybridSearch:
 
     def _search_vector(self, query: str, category: Optional[str], limit: int) -> list[dict]:
         """
-        Vector similarity search using cosine similarity on embedding BLOBs.
+        Vector similarity search (semantic-retrieval.md §5.5 "Query").
 
-        NOTE: This requires the query to already be embedded. For V2,
-        the caller is responsible for generating the query embedding
-        (via Ollama's embedding API). If no query embedding is provided,
-        this falls back to keyword search.
+        Embeds the query with the configured chain, then cosine-ranks against
+        rows embedded by the SAME model (cross-model cosine is meaningless).
+        Falls back to keyword search when there is no embedder or no matching
+        vectors yet — so search is always useful, never empty for lack of vectors.
         """
-        # V2.3 placeholder — vector search needs embedding generation
-        # which requires Ollama API call. For now, fall back to keyword.
-        return self._search_keyword(query, category, limit)
+        try:
+            query_bytes, _dim, model_id = self._get_embed_chain().embed_text(query)
+        except Exception as e:
+            logger.warning(f"Query embedding failed, using keyword search: {e}")
+            return self._search_keyword(query, category=category, limit=limit)
+
+        results = self.search_with_embedding(
+            query_bytes, category=category, limit=limit, model=model_id
+        )
+        if not results:
+            # No rows embedded with this model yet (e.g. fresh store, or a model
+            # swap pending dream-cycle backfill) — keyword keeps search working.
+            return self._search_keyword(query, category=category, limit=limit)
+        return results
 
     def search_with_embedding(
-        self, query_embedding: bytes, category: Optional[str] = None, limit: int = 10
+        self,
+        query_embedding: bytes,
+        category: Optional[str] = None,
+        limit: int = 10,
+        model: Optional[str] = None,
     ) -> list[dict]:
         """
         Search using a pre-computed embedding vector.
@@ -224,6 +249,10 @@ class HybridSearch:
             query_embedding: The query vector as bytes (float32 array)
             category: Optional category filter
             limit: Maximum results
+            model: Optional embedding-model filter. Only rows produced by this
+                   model are compared — different models live in incompatible
+                   vector spaces (and may differ in dimension), so cosine across
+                   them is meaningless.
 
         Returns:
             List of results sorted by cosine similarity
@@ -237,17 +266,23 @@ class HybridSearch:
             conn.row_factory = sqlite3.Row
             now = time.time()
 
-            rows = conn.execute(
-                """
+            sql = """
                 SELECT id, content, compiled_truth, summary, category, tier,
                        embedding, key_topics, source
                 FROM memories
                 WHERE embedding IS NOT NULL
                 AND (expires_at IS NULL OR expires_at > ?)
-                ORDER BY accessed_at DESC LIMIT 500
-            """,
-                (now,),
-            ).fetchall()
+            """
+            params: list = [now]
+            if model is not None:
+                sql += " AND embedding_model = ?"
+                params.append(model)
+            if category is not None:
+                sql += " AND category = ?"
+                params.append(category)
+            sql += " ORDER BY accessed_at DESC LIMIT 500"
+
+            rows = conn.execute(sql, params).fetchall()
 
             for r in rows:
                 if not r["embedding"]:
