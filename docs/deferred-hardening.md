@@ -17,7 +17,7 @@
 - `pipeline.py` — L88, L191 (capture path; L191 graph-wiring is intentionally non-blocking but should still log specifics).
 
 **Tier 2 — service/IO boundaries (fix second).** Broad catch is more defensible (external systems fail unpredictably) but should still log and narrow:
-- `gate/ollama.py` L111, L209; `gate_backends.py` L345, L470; `api/rest.py` L241, L315, L336, L385; `nats_sub.py` (6 blocks); `store/markdown.py` L103; `registry.py` L154.
+- `gate/ollama.py` L111, L209; `gate/backends.py` L345, L470; `api/rest.py` L241, L315, L336, L385; `server/nats_sub.py` (6 blocks); `store/markdown.py` L103; `gate/registry.py` L154.
 
 **Tier 3 — startup/shutdown.** Lowest risk:
 - `server.py` L458; `serve.py` L71; `dream/cycle.py` L133, L430.
@@ -36,8 +36,8 @@ One PR per tier, Tier 1 first. Add a regression test per data-integrity block pr
 ## Concern B: Type-hint coverage + type checker
 
 20 of 32 files have return hints. Real targets (excluding empty `__init__.py` files, which have nothing to type):
-- `src/remembrance_mcp/server.py`
-- `src/remembrance_mcp/serve.py`
+- `src/remembrance_mcp/server/mcp.py`
+- `src/remembrance_mcp/server/serve.py`
 - `src/remembrance_mcp/__main__.py`
 
 ### Plan

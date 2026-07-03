@@ -33,11 +33,11 @@ from remembrance_mcp.config import Settings
 from remembrance_mcp.dream.cycle import DreamCycle
 from remembrance_mcp.extract import BaseExtractor, OllamaExtractor, StubExtractor
 from remembrance_mcp.gate import GateDecision
-from remembrance_mcp.gate_backends import GateMetrics
+from remembrance_mcp.gate.backends import GateMetrics
+from remembrance_mcp.gate.registry import build_gate_chain
 from remembrance_mcp.graph.edges import GraphWiring
 from remembrance_mcp.graph.entity import EntityDetector
 from remembrance_mcp.graph.traversal import GraphTraversal
-from remembrance_mcp.registry import build_gate_chain
 from remembrance_mcp.search.hybrid import HybridSearch
 from remembrance_mcp.store import MemoryStore
 from remembrance_mcp.store.edges import EntityStore

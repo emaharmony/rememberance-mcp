@@ -28,8 +28,8 @@ import logging
 import urllib.error
 import urllib.request
 
+from remembrance_mcp.gate.backends import BaseGateBackend
 from remembrance_mcp.gate.gate import GateDecision, GateResult
-from remembrance_mcp.gate_backends import BaseGateBackend
 
 logger = logging.getLogger(__name__)
 

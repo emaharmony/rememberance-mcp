@@ -38,8 +38,7 @@ from remembrance_mcp.config import Settings
 from remembrance_mcp.dream.cycle import ALL_PHASES, DreamCycle
 from remembrance_mcp.extract import BaseExtractor, ExtractionResult, OllamaExtractor, StubExtractor
 from remembrance_mcp.gate import GateDecision, GateResult, MemoryGate
-from remembrance_mcp.gate.ollama import OllamaGateBackend
-from remembrance_mcp.gate_backends import (
+from remembrance_mcp.gate.backends import (
     BaseGateBackend,
     DilBERTBackend,
     GateFallbackChain,
@@ -48,17 +47,18 @@ from remembrance_mcp.gate_backends import (
     HeuristicBackend,
     OpenAIBackend,
 )
-from remembrance_mcp.graph.edges import GraphWiring
-from remembrance_mcp.graph.entity import DetectedEntity, EntityDetector
-from remembrance_mcp.graph.traversal import GraphTraversal
-from remembrance_mcp.pipeline import MemoryPipeline
-from remembrance_mcp.registry import (
+from remembrance_mcp.gate.ollama import OllamaGateBackend
+from remembrance_mcp.gate.registry import (
     build_gate_chain,
     get_registered_backends,
     register_gate_backend,
 )
+from remembrance_mcp.graph.edges import GraphWiring
+from remembrance_mcp.graph.entity import DetectedEntity, EntityDetector
+from remembrance_mcp.graph.traversal import GraphTraversal
+from remembrance_mcp.pipeline import MemoryPipeline
 from remembrance_mcp.search.hybrid import HybridSearch, SearchResult
-from remembrance_mcp.server import create_server
+from remembrance_mcp.server.mcp import create_server
 from remembrance_mcp.store import Memory, MemoryStore
 
 # V2 exports

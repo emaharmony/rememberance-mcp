@@ -22,6 +22,13 @@ update this file. Only Phases 0–4 are in scope for the loop.
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
   Bare `python` on this machine is Python 3.14 core with NO pytest installed.
 - Repo work happens on the `autonomous-loop` branch.
+- **Package layout (reorganized 2026-07-02):** gate backends live in
+  `gate/backends.py` + `gate/registry.py`; runtime entry points live in
+  `server/` (`server/mcp.py` = MCP server, `server/serve.py` = REST launcher,
+  `server/nats_sub.py`). `config.py`/`pipeline.py` stay at the package root.
+  `python -m remembrance_mcp` (MCP stdio) still works; REST is now
+  `python -m remembrance_mcp.server.serve`. Top-level `remembrance_mcp` re-exports
+  are unchanged (public API stable).
 
 ## Design docs
 - `docs/roadmap.md` — phase sequence + dependency graph

@@ -12,9 +12,9 @@ The service is designed to run alongside Prism. Prism publishes
 agent output events to NATS; Remembrance subscribes and auto-captures.
 
 Usage:
-    python -m remembrance_mcp.serve
-    python -m remembrance_mcp.serve --port 8788 --nats nats://localhost:4222
-    python -m remembrance_mcp.serve --no-nats  # REST API only
+    python -m remembrance_mcp.server.serve
+    python -m remembrance_mcp.server.serve --port 8788 --nats nats://localhost:4222
+    python -m remembrance_mcp.server.serve --no-nats  # REST API only
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def main():
     nats_sub = None
     if not args.no_nats:
         try:
-            from remembrance_mcp.nats_sub import NatsSubscriber
+            from remembrance_mcp.server.nats_sub import NatsSubscriber
 
             nats_sub = NatsSubscriber(
                 pipeline=pipeline,

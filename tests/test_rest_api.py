@@ -14,7 +14,7 @@ import pytest
 
 from remembrance_mcp.api.rest import RemembranceHandler, _is_client_disconnect
 from remembrance_mcp.config import Settings
-from remembrance_mcp.gate_backends import GateFallbackChain, HeuristicBackend
+from remembrance_mcp.gate.backends import GateFallbackChain, HeuristicBackend
 from remembrance_mcp.pipeline import MemoryPipeline
 
 

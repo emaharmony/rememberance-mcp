@@ -17,7 +17,7 @@ if (-not (Test-Path $logDir)) {
 
 Start-Process `
     -FilePath $python `
-    -ArgumentList @("-m", "remembrance_mcp.serve", "--host", "127.0.0.1", "--port", "18790", "--no-nats") `
+    -ArgumentList @("-m", "remembrance_mcp.server.serve", "--host", "127.0.0.1", "--port", "18790", "--no-nats") `
     -WorkingDirectory $repo `
     -WindowStyle Hidden `
     -RedirectStandardOutput $stdout `

@@ -34,7 +34,7 @@ all = [
 
 [project.scripts]
 remembrance-mcp = "remembrance_mcp:main"
-remembrance-service = "remembrance_mcp.serve:main"
+remembrance-service = "remembrance_mcp.server.serve:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
