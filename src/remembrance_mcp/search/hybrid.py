@@ -280,7 +280,12 @@ class HybridSearch:
             if category is not None:
                 sql += " AND category = ?"
                 params.append(category)
-            sql += " ORDER BY accessed_at DESC LIMIT 500"
+            # No candidate cap (§7): the old `ORDER BY accessed_at DESC LIMIT 500`
+            # dropped the best semantic match whenever it wasn't recently accessed.
+            # We now scan ALL non-expired, model-matching embedded rows and rank by
+            # cosine below (top-`limit` taken after scoring). This is fine at
+            # personal scale (low tens of thousands); the linear scan dissolves
+            # under pgvector's ANN index in the multi-user phase (§6).
 
             rows = conn.execute(sql, params).fetchall()
 

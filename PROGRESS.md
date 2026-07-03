@@ -13,20 +13,19 @@ deferred product decision or 3 failed approaches. User reviews all work later.
 
 ## Status line
 - **Current phase:** Phase 3 — Wire semantic retrieval (single-user)
-- **Current task:** (3.3) Fix the `LIMIT 500` candidate cap
-- **Baseline:** 177 passed, 1 skipped (green).
-- **Last session:** 2026-07-03 — completed (3.2) `_search_vector`. Now embeds the
-  query via a lazy `HybridSearch._get_embed_chain()` (pipeline passes the SAME
-  chain as write), cosine-ranks via `search_with_embedding(model=...)` filtering
-  to rows with the matching `embedding_model` (cross-model cosine is meaningless
-  + dim-safe), and falls back to keyword when there is no embedder or no matching
-  vectors. Also fixed a LATENT bug: the keyword-fallback call passed `limit`
-  positionally into the `tier` param (`_search_keyword(query, category, limit)`)
-  → bogus `tier=` filter; now uses keyword args. `search_with_embedding` also
-  now honors its `category` arg (was accepted-but-ignored). 4 tests in
-  `tests/test_search_vector.py`. NOTE for 3.3: `search_with_embedding` still has
-  `ORDER BY accessed_at DESC LIMIT 500` (hybrid.py) — drop/replace it so the best
-  semantic match isn't cut before scoring (§7).
+- **Current task:** (3.4) Fuse vector into `_search_balanced`
+- **Baseline:** 178 passed, 1 skipped (green).
+- **Last session:** 2026-07-03 — completed (3.3) LIMIT 500 fix. Removed
+  `ORDER BY accessed_at DESC LIMIT 500` from `search_with_embedding`; now scans
+  ALL non-expired model-matching embedded rows and ranks by cosine (top-`limit`
+  after scoring). Added a no-cap regression test (`test_search_vector.py`): a
+  target with the OLDEST accessed_at, buried under 600 fillers, is still
+  retrieved (would fail under the old cap). NOTE for 3.4: `_search_balanced`
+  (hybrid.py) currently sets `vec_results = []` (placeholder) then RRF-fuses
+  fts+empty. Replace with real vector results from `_search_vector`/embedding,
+  add as an extra list to the existing variadic `_rrf_fuse` (§5.6 — no fusion
+  algorithm change). Mind: `_search_vector` falls back to keyword, so for balanced
+  call `search_with_embedding` directly (avoid double keyword) — see 3.4 notes.
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -64,7 +63,7 @@ in git history.
 ## Phase 3 — Wire semantic retrieval (single-user)
 - [x] (3.1) Embed on write in `capture()` (non-blocking) — 2026-07-03
 - [x] (3.2) Implement `_search_vector()` (model-matched) — 2026-07-03
-- [ ] (3.3) Fix the `LIMIT 500` candidate cap
+- [x] (3.3) Fix the `LIMIT 500` candidate cap — 2026-07-03
 - [ ] (3.4) Fuse vector into `_search_balanced`
 - [ ] (3.5) Dream-cycle backfill with true count
 

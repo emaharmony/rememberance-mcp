@@ -5,7 +5,9 @@ so "closest seeded memory" == exact-text match. Also covers the provider-
 agnostic rule (only compare within one embedding model) and keyword fallback.
 """
 
+import sqlite3
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -107,3 +109,75 @@ def test_vector_search_empty_store_is_safe(pipeline):
     # No memories yet → no crash, keyword fallback returns nothing.
     results = pipeline.hybrid_search.search("anything at all", mode="vector", limit=5)
     assert results == []
+
+
+_INSERT = (
+    "INSERT INTO memories (id, content, summary, category, tier, key_topics, source, "
+    "embedding, embedding_dim, embedding_model, created_at, accessed_at, expires_at) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+
+
+def test_no_cap_regression_target_accessed_last():
+    # §7/§8.7: with the old `ORDER BY accessed_at DESC LIMIT 500`, a best-match
+    # memory that was accessed long ago is cut before scoring. After the fix it
+    # is still retrieved. Target = exact-text (cosine 1.0) but OLDEST accessed_at,
+    # buried under 600 more-recently-accessed fillers.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db, _store = _fresh_store(tmpdir)
+        hb = HashEmbedBackend()
+        target_text = "zzz_unique_target_needle_phrase"
+        target_vec = hb.embed(target_text)
+        now = time.time()
+
+        # NOTE: `with sqlite3.connect()` commits but does NOT close — on Windows
+        # the open handle would block tempdir cleanup. Close explicitly.
+        conn = sqlite3.connect(str(db))
+        try:
+            # Target: oldest accessed_at, never-expiring.
+            conn.execute(
+                _INSERT,
+                (
+                    "mem_target",
+                    target_text,
+                    "s",
+                    "misc",
+                    "active",
+                    "[]",
+                    "test",
+                    target_vec,
+                    256,
+                    "hash-256",
+                    now,
+                    now - 100_000,
+                    None,
+                ),
+            )
+            fillers = [
+                (
+                    f"mem_f{i}",
+                    f"filler content number {i}",
+                    "s",
+                    "misc",
+                    "active",
+                    "[]",
+                    "test",
+                    hb.embed(f"filler content number {i}"),
+                    256,
+                    "hash-256",
+                    now,
+                    now,
+                    None,
+                )
+                for i in range(600)
+            ]
+            conn.executemany(_INSERT, fillers)
+            conn.commit()
+        finally:
+            conn.close()
+
+        search = HybridSearch(db_path=db, entity_store=None)
+        results = search.search_with_embedding(target_vec, model="hash-256", limit=5)
+        ids = [r["id"] for r in results]
+        assert "mem_target" in ids, "best match dropped by a candidate cap"
+        assert results[0]["id"] == "mem_target"  # exact match ranks first
