@@ -11,8 +11,8 @@ Your ONLY shared memory is the files listed below. Follow this protocol exactly.
 
 1. READ STATE FIRST
    - Read `PROGRESS.md` (current phase, current task, last session's outcome).
-   - Read `docs/design/roadmap.md`, then the design doc for the current phase
-     (`docs/design/semantic-retrieval.md` or `docs/design/deferred-hardening.md`).
+   - Read `docs/roadmap.md`, then the design doc for the current phase
+     (`docs/semantic-retrieval.md` or `docs/deferred-hardening.md`).
    - Run `git log --oneline -10` and `git status` to see actual repo state.
    - If `BLOCKED.md` exists: STOP immediately. Output its contents and exit.
      Do not attempt to work around a block.
