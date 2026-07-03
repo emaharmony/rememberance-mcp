@@ -4,19 +4,25 @@ Shared state for the autonomous loop (see `docs/autonomous-loop.md`).
 Each session: read this + git, do exactly one task, keep tests green, commit,
 update this file. Only Phases 0–4 are in scope for the loop.
 
+## RUN MODE (user override, 2026-07-02)
+Run **all** phases (0–4) end to end WITHOUT stopping at per-phase gates. Do NOT
+write `PHASE_COMPLETE.md` at each phase boundary — only write it ONCE, after the
+LAST task of Phase 4 is done and green. Everything else in the protocol still
+holds: one task per session, tests are the arbiter, `BLOCKED.md` halts on a
+deferred product decision or 3 failed approaches. User reviews all work later.
+
 ## Status line
-- **Current phase:** Phase 0 — Safety net → **COMPLETE** (see PHASE_COMPLETE.md)
-- **Current task:** PHASE GATE — awaiting human review. Next phase = Phase 1
-  (Embedder module), task (1.1). Do NOT start Phase 1 until PHASE_COMPLETE.md
-  is deleted.
-- **Baseline:** 141 passed, 1 skipped (green); coverage 63.74% (floor 60%).
-- **Last session:** 2026-07-02 — completed (0.3): added `pytest-cov` (dev/all
-  extras) + coverage config in `pyproject.toml` (`[tool.coverage.report]
-  fail_under = 60`, statement coverage). Coverage is invoked explicitly in CI
-  (`--cov=remembrance_mcp --cov-report=term-missing`), deliberately NOT in
-  pytest addopts, so plain/subset runs (incl. the loop's baseline + flake repro)
-  don't trip the gate. Verified: CI-style run reports 63.74% ≥ 60 (exit 0);
-  plain & subset runs unaffected. This completed Phase 0 → phase gate triggered.
+- **Current phase:** Phase 2 — Provider-agnostic schema
+- **Current task:** (2.1) Add `embedding_dim`, `embedding_model` to memories
+- **Baseline:** 163 passed, 1 skipped (green).
+- **Last session:** 2026-07-02 — completed Phase 1 (embedder module) in one
+  cohesive session: `embed/embed.py` (`BaseEmbedBackend`, `HashEmbedBackend`,
+  `OllamaEmbedBackend`, `OpenAIEmbedBackend`, `EmbedFallbackChain` + builder +
+  `embed_text()->(bytes,dim,model_id)`), `embed/__init__.py`, and 21 offline
+  tests (`tests/test_embed.py`, hash backend). Vectors use the SAME struct
+  float32 format as `search/hybrid.py` (Phase-3-ready). Isolated: nothing else
+  imports it yet. Env: `REMEMBRANCE_EMBED_BACKENDS` (default `hash`),
+  `REMEMBRANCE_EMBED_MODEL`, `REMEMBRANCE_EMBED_HOST`, `OPENAI_API_KEY`.
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -37,16 +43,14 @@ update this file. Only Phases 0–4 are in scope for the loop.
 
 ---
 
-## Phase 0 — Safety net *(COMPLETE 2026-07-02 — pending human review)*
-- [x] (0.1) CI: GitHub Actions matrix (Py 3.10–3.12, minimal + `[all]` extras) running the suite — `.github/workflows/ci.yml`
-- [x] (0.2a) `ruff` config in `pyproject.toml` + `.pre-commit-config.yaml`
-- [x] (0.2b) mechanical `ruff format` + `ruff check --fix` pass (47 files, suite green)
-- [x] (0.3) `pytest-cov` fail-under gate (floor 60%, current 63.74%) wired into CI
+## Phase 0 — Safety net *(COMPLETE 2026-07-02)*
+CI matrix (`.github/workflows/ci.yml`), ruff config + pre-commit, mechanical
+format pass, pytest-cov fail-under gate (floor 60%). Details in git history.
 
-## Phase 1 — Embedder module (isolated, no wiring)
-- [ ] (1.1) `embed/embed.py`: `BaseEmbedBackend`, `OllamaEmbedBackend`, `OpenAIEmbedBackend`, `HashEmbedBackend`, `EmbedFallbackChain`
-- [ ] (1.2) Config env vars; `embed_text()` returns `(bytes, dim, model_id)`
-- [ ] (1.3) Offline unit tests via hash backend
+## Phase 1 — Embedder module *(COMPLETE 2026-07-02)*
+`embed/embed.py` (5 backends + `EmbedFallbackChain` + `build_embed_chain` +
+`embed_text()`), `embed/__init__.py`, `tests/test_embed.py` (21 offline tests).
+Isolated — wired in nowhere yet (that is Phase 3). Details in git history.
 
 ## Phase 2 — Provider-agnostic schema
 - [ ] (2.1) Add `embedding_dim`, `embedding_model` to memories
@@ -67,9 +71,10 @@ update this file. Only Phases 0–4 are in scope for the loop.
 
 ---
 
-## Phase gate
-On completing the LAST task of a phase: write `PHASE_COMPLETE.md` naming the
-phase + what shipped, then STOP for human review.
+## Phase gate (SUPERSEDED by RUN MODE above)
+Per the user override, do NOT stop or write `PHASE_COMPLETE.md` at intermediate
+phase boundaries. Only after the LAST task of **Phase 4** is done and green:
+write `PHASE_COMPLETE.md` summarizing all of Phases 0–4, then stop.
 
 ## Escalation
 If blocked on a deferred product decision (chunk sizing beyond doc defaults,
