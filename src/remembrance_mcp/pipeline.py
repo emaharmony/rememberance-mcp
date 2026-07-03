@@ -31,6 +31,7 @@ from typing import Optional
 
 from remembrance_mcp.config import Settings
 from remembrance_mcp.dream.cycle import DreamCycle
+from remembrance_mcp.embed.embed import build_embed_chain
 from remembrance_mcp.extract import BaseExtractor, OllamaExtractor, StubExtractor
 from remembrance_mcp.gate import GateDecision
 from remembrance_mcp.gate.backends import GateMetrics
@@ -89,6 +90,12 @@ class MemoryPipeline:
         except Exception:
             logger.warning("Ollama extractor unavailable, using stub")
             self.extractor = StubExtractor()
+
+        # ── Embedding (provider-agnostic, non-blocking on write) ──
+        # Chain from REMEMBRANCE_EMBED_BACKENDS (default "hash" offline scaffold).
+        # Always usable: hash is the ultimate fallback, so capture() can embed
+        # even with no Ollama/OpenAI available.
+        self.embed_chain = build_embed_chain()
 
         # ── Layer 3: Store (database) ───────────────────────────
         self.store = MemoryStore(
@@ -177,6 +184,17 @@ class MemoryPipeline:
         final_category = category or extraction.category
         final_tier = tier or extraction.tier
 
+        # Stage 2.5: Embed (non-blocking). A failure must NEVER lose the memory —
+        # we log and store with a null vector; the dream cycle backfills later.
+        # (Whole-content embedding for now; Phase 4 will embed per-chunk.)
+        embedding_bytes: Optional[bytes] = None
+        embedding_dim: Optional[int] = None
+        embedding_model = ""
+        try:
+            embedding_bytes, embedding_dim, embedding_model = self.embed_chain.embed_text(text)
+        except Exception as e:
+            logger.warning(f"Embedding failed on capture (storing without vector): {e}")
+
         # Stage 3: Store
         mem_id = self.store.store(
             content=text,
@@ -185,6 +203,9 @@ class MemoryPipeline:
             tier=final_tier,
             key_topics=extraction.key_topics,
             source=source,
+            embedding=embedding_bytes,
+            embedding_dim=embedding_dim,
+            embedding_model=embedding_model,
         )
 
         # Stage 4: Graph Wiring (V2)

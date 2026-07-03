@@ -106,6 +106,8 @@ class MemoryStore:
                     key_topics TEXT,           -- JSON array stored as text
                     source TEXT DEFAULT '',
                     embedding BLOB,            -- binary vector for semantic search
+                    embedding_dim INTEGER,     -- vector length (provider-agnostic; §5.1)
+                    embedding_model TEXT DEFAULT '',  -- model id, e.g. ollama:nomic-embed-text
                     created_at REAL NOT NULL,  -- unix timestamp
                     accessed_at REAL NOT NULL, -- last access time (for consolidation)
                     expires_at REAL,           -- NULL = never expires
@@ -140,6 +142,8 @@ class MemoryStore:
         key_topics: list[str],
         source: str = "",
         embedding: Optional[bytes] = None,
+        embedding_dim: Optional[int] = None,
+        embedding_model: str = "",
     ) -> str:
         """
         Save a memory and return its ID.
@@ -161,8 +165,9 @@ class MemoryStore:
             conn.execute(
                 """
                 INSERT INTO memories (id, content, summary, category, tier, key_topics,
-                                      source, embedding, created_at, accessed_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      source, embedding, embedding_dim, embedding_model,
+                                      created_at, accessed_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     mem_id,
@@ -173,6 +178,8 @@ class MemoryStore:
                     json.dumps(key_topics),
                     source,
                     embedding,
+                    embedding_dim,
+                    embedding_model,
                     now,
                     now,
                     expires_at,

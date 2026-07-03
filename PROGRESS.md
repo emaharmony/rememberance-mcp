@@ -13,18 +13,19 @@ deferred product decision or 3 failed approaches. User reviews all work later.
 
 ## Status line
 - **Current phase:** Phase 3 — Wire semantic retrieval (single-user)
-- **Current task:** (3.1) Embed on write in `capture()` (non-blocking)
-- **Baseline:** 169 passed, 1 skipped (green).
-- **Last session:** 2026-07-03 — completed Phase 2 (provider-agnostic schema).
-  Extended the additive `_migrate_v2` in `store/memory.py` with 4 columns on
-  `memories`: `embedding_dim INTEGER`, `embedding_model TEXT DEFAULT ''` (§5.1),
-  `owner_id TEXT` (nullable), `scope TEXT DEFAULT 'private'` (§6 multi-user
-  forward-compat, unused in v1). Migration is additive + idempotent (ALTER ADD
-  COLUMN guarded by OperationalError). 6 tests in `tests/test_schema_migration.py`
-  prove columns present, correct defaults, existing rows survive, no data loss,
-  idempotent. NOTE for Phase 3: the write path (`store.store()`) does NOT yet set
-  these columns — 3.1 must populate `embedding`/`embedding_dim`/`embedding_model`
-  on write (store() needs new optional params or a follow-up UPDATE).
+- **Current task:** (3.2) Implement `_search_vector()` (model-matched)
+- **Baseline:** 173 passed, 1 skipped (green).
+- **Last session:** 2026-07-03 — completed (3.1) embed-on-write. `pipeline.py`
+  now builds `self.embed_chain = build_embed_chain()` and `capture()` embeds the
+  content (Stage 2.5) BEFORE store, non-blocking (embed failure logs + stores a
+  null vector; memory never lost). `store.store()` gained `embedding_dim` +
+  `embedding_model` params and writes them; the two embedding-metadata columns
+  are now ALSO in the base `CREATE TABLE` (store.py) so store() works with or
+  without the V2 migration. 4 tests in `tests/test_embed_on_write.py` (vector
+  persisted w/ dim+model, non-blocking on failure, SKIP stores nothing,
+  deterministic). Default backend = hash (256-dim). NOTE for 3.2: `_search_vector`
+  (hybrid.py L192) is a stub → keyword; must embed the QUERY via the same chain,
+  match only rows with the SAME `embedding_model`, cosine-rank, resolve to memories.
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -60,7 +61,7 @@ the additive idempotent `_migrate_v2`; `tests/test_schema_migration.py`. Details
 in git history.
 
 ## Phase 3 — Wire semantic retrieval (single-user)
-- [ ] (3.1) Embed on write in `capture()` (non-blocking)
+- [x] (3.1) Embed on write in `capture()` (non-blocking) — 2026-07-03
 - [ ] (3.2) Implement `_search_vector()` (model-matched)
 - [ ] (3.3) Fix the `LIMIT 500` candidate cap
 - [ ] (3.4) Fuse vector into `_search_balanced`
