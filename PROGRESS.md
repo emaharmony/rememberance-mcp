@@ -13,24 +13,21 @@ deferred product decision or 3 failed approaches. User reviews all work later.
 
 ## Status line
 - **Current phase:** Phase 4 — Chunking (all context sizes)
-- **Current task:** (4.1) `memory_chunks` table; chunk-on-write with overlap
-- **Baseline:** 185 passed, 1 skipped (green).
-- **Last session:** 2026-07-03 — completed (3.5) dream backfill + **Phase 3 DONE**.
-  Implemented `_phase_embed_stale` (dream/cycle.py): probes the active model,
-  finds rows with NULL/empty/wrong `embedding_model`, re-embeds in bounded
-  batches (`EMBED_BACKFILL_BATCH=200`) via the chain, UPDATEs embedding+dim+model,
-  returns a TRUE `embeddings_refreshed` count (+ `stale_found`, dry-run support).
-  DreamCycle now takes an `embed_chain` (pipeline shares the same one). 4 tests in
-  `tests/test_dream_backfill.py`.
-- **⚠ DECISION POINT for 4.1 (chunk sizing):** roadmap "Open decisions carried
-  forward" defers chunk size / overlap / single-chunk threshold to a human, and
-  the protocol hard-rule flags "chunk sizing" as human-owned. BUT the user's
-  RUN MODE says "complete all phases." Resolution for the 4.1 session: implement
-  chunking with conventional, **env-configurable** defaults (not hardcoded, not
-  irreversible) and flag them prominently for review — do NOT hard-block the run
-  on a reversible parameter. If a genuinely irreversible/product call appears,
-  THEN write BLOCKED.md. Suggested defaults to weigh: ~512-token chunk target,
-  ~64-token overlap, single-chunk threshold ~512 tokens (token≈4 chars heuristic).
+- **Current task:** (4.1b) `memory_chunks` table + chunk-on-write wiring
+- **Baseline:** 197 passed, 1 skipped (green).
+- **Last session:** 2026-07-03 — completed (4.1a) the chunking primitive.
+  `chunk/chunk.py` `chunk_text()`: empty→[], short(≤threshold)→[text] single
+  chunk, else overlapping word-boundary chunks (full word coverage, order
+  preserved, forward-progress guaranteed even with degenerate overlap≥target).
+  Sizing is CONVENTIONAL + env-configurable, NOT a final product decision —
+  defaults 512 target / 64 overlap / 512 single-threshold tokens (token≈4 chars),
+  overridable via `REMEMBRANCE_CHUNK_{TARGET,OVERLAP,SINGLE_THRESHOLD}_TOKENS`.
+  12 tests in `tests/test_chunk.py`. Chose configurable-defaults over BLOCKED.md
+  per RUN MODE ("complete all phases") — reversible, flagged for human review.
+  NOTE for 4.1b: add a `memory_chunks` table (chunk_id, memory_id, chunk_index,
+  content, embedding, embedding_dim, embedding_model, + owner_id/scope §6) via
+  `_migrate_v2`; on capture() write parent, then chunk_text(content), embed each
+  chunk, insert chunks (short memory → 1 chunk, uniform path). Non-blocking.
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -72,7 +69,8 @@ search is live end-to-end. Details in git history + `tests/test_embed_on_write`,
 `test_search_vector`, `test_search_balanced`, `test_dream_backfill`.
 
 ## Phase 4 — Chunking (all context sizes)
-- [ ] (4.1) `memory_chunks` table; chunk-on-write with overlap; short memories = single chunk
+- [x] (4.1a) chunking primitive `chunk/chunk.py` `chunk_text()` (env-configurable) — 2026-07-03
+- [ ] (4.1b) `memory_chunks` table + chunk-on-write wiring (short memory = single chunk)
 - [ ] (4.2) Search at chunk level → resolve to parent memories (dedup, best chunk wins)
 - [ ] (4.3) Backfill chunks for existing memories in the dream cycle
 
