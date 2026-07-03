@@ -56,6 +56,11 @@ ALL_PHASES = [
     "purge",
 ]
 
+# Max memories re-embedded per dream cycle (semantic-retrieval.md §5.5). A large
+# backlog (e.g. after a model swap) drains over several cycles instead of
+# blocking one run.
+EMBED_BACKFILL_BATCH = 200
+
 
 class DreamCycle:
     """
@@ -73,12 +78,23 @@ class DreamCycle:
         entity_store: EntityStore,
         memory_v2: MemoryStoreV2,
         ollama_base_url: str = "http://localhost:11434",
+        embed_chain=None,
     ):
         self.entity_store = entity_store
         self.memory_v2 = memory_v2
         self.ollama_base_url = ollama_base_url
         self.wiring = GraphWiring(entity_store)
         self.detector = EntityDetector(entity_store=entity_store)
+        # Embedder for backfill (embed_stale). Lazy so cycles that skip that
+        # phase pay nothing; defaults to the env-configured chain.
+        self._embed_chain = embed_chain
+
+    def _get_embed_chain(self):
+        if self._embed_chain is None:
+            from remembrance_mcp.embed.embed import build_embed_chain
+
+            self._embed_chain = build_embed_chain()
+        return self._embed_chain
 
     def run(self, phases: list[str] | None = None, dry_run: bool = False) -> dict:
         """
@@ -362,17 +378,67 @@ class DreamCycle:
 
     def _phase_embed_stale(self, dry_run: bool = False) -> dict:
         """
-        Phase 6: Re-embed memories whose content changed but
-        embedding is stale.
+        Phase 6: Embedding backfill (semantic-retrieval.md §5.5 "Backfill").
 
-        For V1, this is a placeholder — we don't have embedding
-        generation in the Python service yet (that's in the
-        hybrid search phase).
+        Re-embeds memories whose vector is missing (never embedded, or an embed
+        failed non-blockingly on write) or was produced by a DIFFERENT model
+        than the currently-active one — a model swap leaves old vectors in an
+        incompatible space, so they must be refreshed before they're searchable
+        again. Bounded per run (EMBED_BACKFILL_BATCH) so a large backlog drains
+        over several cycles. Returns a TRUE ``embeddings_refreshed`` count.
         """
+        db_path = self.entity_store.db_path
+        chain = self._get_embed_chain()
+
+        # Probe once to learn the active model, so we can spot wrong-model rows.
+        try:
+            _, _, current_model = chain.embed_text("probe")
+        except Exception as e:
+            logger.warning(f"embed_stale: no embedder available ({e}); skipping")
+            return {"status": "ok", "embeddings_refreshed": 0, "note": "no embedder"}
+
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, content FROM memories
+                WHERE content IS NOT NULL AND content != ''
+                AND (embedding IS NULL OR embedding_model IS NULL
+                     OR embedding_model = '' OR embedding_model != ?)
+                LIMIT ?
+                """,
+                (current_model, EMBED_BACKFILL_BATCH),
+            ).fetchall()
+
+            stale_found = len(rows)
+            if dry_run:
+                return {
+                    "status": "ok",
+                    "embeddings_refreshed": 0,
+                    "stale_found": stale_found,
+                    "note": f"{stale_found} row(s) would be re-embedded with {current_model}",
+                }
+
+            refreshed = 0
+            for r in rows:
+                try:
+                    vec, dim, model_id = chain.embed_text(r["content"])
+                except Exception as e:
+                    # Non-blocking: skip this row, keep draining the rest.
+                    logger.warning(f"embed_stale: failed to embed {r['id']}: {e}")
+                    continue
+                conn.execute(
+                    "UPDATE memories SET embedding = ?, embedding_dim = ?, "
+                    "embedding_model = ? WHERE id = ?",
+                    (vec, dim, model_id, r["id"]),
+                )
+                refreshed += 1
+
         return {
             "status": "ok",
-            "embeddings_refreshed": 0,
-            "note": "Embedding refresh deferred to hybrid search implementation",
+            "embeddings_refreshed": refreshed,
+            "stale_found": stale_found,
+            "model": current_model,
         }
 
     def _phase_purge(self, dry_run: bool = False) -> dict:

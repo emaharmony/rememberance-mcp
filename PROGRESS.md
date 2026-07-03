@@ -12,20 +12,25 @@ holds: one task per session, tests are the arbiter, `BLOCKED.md` halts on a
 deferred product decision or 3 failed approaches. User reviews all work later.
 
 ## Status line
-- **Current phase:** Phase 3 — Wire semantic retrieval (single-user)
-- **Current task:** (3.5) Dream-cycle backfill with true count — LAST Phase 3 task
-- **Baseline:** 181 passed, 1 skipped (green).
-- **Last session:** 2026-07-03 — completed (3.4) vector fusion into
-  `_search_balanced`. Replaced the `vec_results = []` placeholder: embed the
-  query, call `search_with_embedding(model=...)` DIRECTLY (not `_search_vector`,
-  whose keyword fallback would double-count FTS), feed the list into the existing
-  variadic `_rrf_fuse` (no algorithm change, §5.6). Failure/no-vectors → FTS-only.
-  3 tests in `tests/test_search_balanced.py` (vector-only memory surfaces,
-  sources merge when both legs hit, FTS-only path safe). NOTE for 3.5: dream
-  backfill is a stub returning `embeddings_refreshed: 0` (dream/cycle.py ~L357).
-  Implement: find rows with NULL embedding OR `embedding_model` != current model,
-  embed in bounded batches via the chain, UPDATE embedding+dim+model, return a
-  TRUE refreshed count.
+- **Current phase:** Phase 4 — Chunking (all context sizes)
+- **Current task:** (4.1) `memory_chunks` table; chunk-on-write with overlap
+- **Baseline:** 185 passed, 1 skipped (green).
+- **Last session:** 2026-07-03 — completed (3.5) dream backfill + **Phase 3 DONE**.
+  Implemented `_phase_embed_stale` (dream/cycle.py): probes the active model,
+  finds rows with NULL/empty/wrong `embedding_model`, re-embeds in bounded
+  batches (`EMBED_BACKFILL_BATCH=200`) via the chain, UPDATEs embedding+dim+model,
+  returns a TRUE `embeddings_refreshed` count (+ `stale_found`, dry-run support).
+  DreamCycle now takes an `embed_chain` (pipeline shares the same one). 4 tests in
+  `tests/test_dream_backfill.py`.
+- **⚠ DECISION POINT for 4.1 (chunk sizing):** roadmap "Open decisions carried
+  forward" defers chunk size / overlap / single-chunk threshold to a human, and
+  the protocol hard-rule flags "chunk sizing" as human-owned. BUT the user's
+  RUN MODE says "complete all phases." Resolution for the 4.1 session: implement
+  chunking with conventional, **env-configurable** defaults (not hardcoded, not
+  irreversible) and flag them prominently for review — do NOT hard-block the run
+  on a reversible parameter. If a genuinely irreversible/product call appears,
+  THEN write BLOCKED.md. Suggested defaults to weigh: ~512-token chunk target,
+  ~64-token overlap, single-chunk threshold ~512 tokens (token≈4 chars heuristic).
 
 ## Environment (READ THIS FIRST)
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
@@ -60,12 +65,11 @@ Isolated — wired in nowhere yet (that is Phase 3). Details in git history.
 the additive idempotent `_migrate_v2`; `tests/test_schema_migration.py`. Details
 in git history.
 
-## Phase 3 — Wire semantic retrieval (single-user)
-- [x] (3.1) Embed on write in `capture()` (non-blocking) — 2026-07-03
-- [x] (3.2) Implement `_search_vector()` (model-matched) — 2026-07-03
-- [x] (3.3) Fix the `LIMIT 500` candidate cap — 2026-07-03
-- [x] (3.4) Fuse vector into `_search_balanced` — 2026-07-03
-- [ ] (3.5) Dream-cycle backfill with true count
+## Phase 3 — Wire semantic retrieval (single-user) *(COMPLETE 2026-07-03)*
+Embed-on-write (non-blocking), model-matched `_search_vector`, LIMIT-500 fix,
+vector fusion into `_search_balanced`, dream backfill with true count. Semantic
+search is live end-to-end. Details in git history + `tests/test_embed_on_write`,
+`test_search_vector`, `test_search_balanced`, `test_dream_backfill`.
 
 ## Phase 4 — Chunking (all context sizes)
 - [ ] (4.1) `memory_chunks` table; chunk-on-write with overlap; short memories = single chunk

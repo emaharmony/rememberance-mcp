@@ -137,6 +137,7 @@ class MemoryPipeline:
             entity_store=self.entity_store,
             memory_v2=self.store_v2,
             ollama_base_url=self.settings.OLLAMA_BASE_URL,
+            embed_chain=self.embed_chain,  # same model as write/search for backfill
         )
 
         # ── V2: Markdown Sync ────────────────────────────────
