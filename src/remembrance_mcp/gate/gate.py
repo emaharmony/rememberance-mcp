@@ -38,8 +38,8 @@ GATE DECISION LOGIC:
 """
 
 import logging
-from enum import Enum
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -47,15 +47,17 @@ logger = logging.getLogger(__name__)
 
 class GateDecision(str, Enum):
     """The 4 classification classes for memory relevance."""
-    SKIP = "SKIP"        # Don't store at all
-    COLD = "COLD"        # Store with short TTL (1 day)
-    ACTIVE = "ACTIVE"   # Store with medium TTL (30 days)
+
+    SKIP = "SKIP"  # Don't store at all
+    COLD = "COLD"  # Store with short TTL (1 day)
+    ACTIVE = "ACTIVE"  # Store with medium TTL (30 days)
     PERSIST = "PERSIST"  # Store permanently
 
 
 @dataclass
 class GateResult:
     """Output of the gate classifier."""
+
     decision: GateDecision
     confidence: float  # 0.0 to 1.0
 
@@ -89,8 +91,7 @@ class MemoryGate:
 
         # Lazy imports — don't import torch/transformers until we actually need them.
         # This means `import remembrance_mcp` doesn't take 10 seconds.
-        import torch
-        from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
+        from transformers import DistilBertForSequenceClassification, DistilBertTokenizer
 
         if not self.model_path.exists():
             raise FileNotFoundError(
@@ -119,8 +120,8 @@ class MemoryGate:
         # (BERT models have a max input length of 512 tokens)
         inputs = self._tokenizer(
             text,
-            return_tensors="pt",       # PyTorch format
-            truncation=True,            # Don't exceed 512 tokens
+            return_tensors="pt",  # PyTorch format
+            truncation=True,  # Don't exceed 512 tokens
             max_length=512,
         )
 

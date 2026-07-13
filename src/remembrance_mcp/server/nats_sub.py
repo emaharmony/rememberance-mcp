@@ -34,8 +34,8 @@ import threading
 from collections import deque
 from typing import Optional, Set
 
-from remembrance_mcp.pipeline import MemoryPipeline
 from remembrance_mcp.config import Settings
+from remembrance_mcp.pipeline import MemoryPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +99,7 @@ class NatsSubscriber:
         try:
             import nats
         except ImportError:
-            logger.error(
-                "nats-py not installed. Install with: pip install nats-py"
-            )
+            logger.error("nats-py not installed. Install with: pip install nats-py")
             logger.info(
                 "Falling back to HTTP-only mode. "
                 "Capture will only work via REST API or pipeline calls."

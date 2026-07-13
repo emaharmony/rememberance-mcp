@@ -20,7 +20,7 @@ The Python package name is `remembrance-mcp` and the import/module path is `reme
 - `pip` or `uv`.
 - Optional: Ollama for LLM-based extraction and dream phases.
 - Optional: a local DistilBERT gate model if you install the `gate` extra.
-- Optional: NATS if you want event-bus capture through `remembrance_mcp.serve`.
+- Optional: NATS if you want event-bus capture through `remembrance_mcp.server.serve`.
 
 No API key is required for the default local/heuristic path. The OpenAI gate backend is available only when `OPENAI_API_KEY` is set and `REMEMBRANCE_GATE_BACKENDS` includes `openai`.
 
@@ -85,11 +85,11 @@ python -m remembrance_mcp.api
 Equivalent service command, with NATS disabled:
 
 ```bash
-python -m remembrance_mcp.serve --no-nats
+python -m remembrance_mcp.server.serve --no-nats
 ```
 
 Installing the package also exposes a `remembrance-service` console script that
-is equivalent to `python -m remembrance_mcp.serve`:
+is equivalent to `python -m remembrance_mcp.server.serve`:
 
 ```bash
 remembrance-service --no-nats
@@ -199,7 +199,7 @@ Other settings are available through `remembrance_mcp.config.Settings`:
 | `ACTIVE_TTL` | `2592000` seconds |
 | `PERSIST_TTL` | `-1`, meaning no expiry |
 
-REST host, REST port, NATS URL, and NATS enablement are CLI arguments on `remembrance_mcp.api` or `remembrance_mcp.serve`; they are not environment variables in the current implementation.
+REST host, REST port, NATS URL, and NATS enablement are CLI arguments on `remembrance_mcp.api` or `remembrance_mcp.server.serve`; they are not environment variables in the current implementation.
 
 Default data layout:
 
@@ -267,13 +267,13 @@ pip install -e ".[nats]"
 Run the combined REST service and NATS subscriber:
 
 ```bash
-python -m remembrance_mcp.serve --nats nats://localhost:4222
+python -m remembrance_mcp.server.serve --nats nats://localhost:4222
 ```
 
 Use REST only:
 
 ```bash
-python -m remembrance_mcp.serve --no-nats
+python -m remembrance_mcp.server.serve --no-nats
 ```
 
 ### DilBert v3 Gate

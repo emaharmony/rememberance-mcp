@@ -22,16 +22,15 @@ V2 ARCHITECTURE:
 5. Graph augment: expand results by following entity edges
 """
 
-import json
+import logging
 import math
 import sqlite3
 import struct
 import time
-import logging
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass
 
 from remembrance_mcp.store.edges import EntityStore
 
@@ -66,6 +65,7 @@ RRF_K = 60
 @dataclass
 class SearchResult:
     """A single search result with score and metadata."""
+
     id: str
     content: str
     compiled_truth: str
@@ -86,13 +86,28 @@ class HybridSearch:
         results = search.search("What did we decide about Prism?")
     """
 
-    def __init__(self, db_path: Path, entity_store: EntityStore):
+    def __init__(self, db_path: Path, entity_store: EntityStore, embed_chain=None):
         self.db_path = db_path
         self.entity_store = entity_store
+        # Embedder for query-time vectors. Lazy so keyword-only use pays nothing;
+        # defaults to the env-configured chain (same one capture() writes with).
+        self._embed_chain = embed_chain
 
-    def search(self, query: str, mode: str = "balanced",
-               category: Optional[str] = None, tier: Optional[str] = None,
-               limit: int = 10) -> list[dict]:
+    def _get_embed_chain(self):
+        if self._embed_chain is None:
+            from remembrance_mcp.embed.embed import build_embed_chain
+
+            self._embed_chain = build_embed_chain()
+        return self._embed_chain
+
+    def search(
+        self,
+        query: str,
+        mode: str = "balanced",
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """
         Search memories using hybrid retrieval.
 
@@ -116,15 +131,20 @@ class HybridSearch:
         else:
             return self._search_balanced(query, category, tier, limit)
 
-    def _search_keyword(self, query: str, category: Optional[str] = None,
-                       tier: Optional[str] = None, limit: int = 10) -> list[dict]:
+    def _search_keyword(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """FTS5 full-text search only."""
         results = []
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             try:
                 # Escape FTS5 special chars: hyphens become spaces, quotes escaped
-                safe_query = query.replace('-', ' ').replace('"', '""')
+                safe_query = query.replace("-", " ").replace('"', '""')
                 sql = """
                     SELECT m.*, fts.rank as fts_rank
                     FROM memories m
@@ -150,7 +170,9 @@ class HybridSearch:
                 rows = conn.execute(sql, params).fetchall()
                 for r in rows:
                     d = dict(r)
-                    d["score"] = 1.0 / (1.0 + abs(d.pop("fts_rank", 0)))  # FTS rank is negative (lower = better)
+                    d["score"] = 1.0 / (
+                        1.0 + abs(d.pop("fts_rank", 0))
+                    )  # FTS rank is negative (lower = better)
                     d["sources"] = ["fts5"]
                     results.append(d)
             except Exception as e:
@@ -189,23 +211,38 @@ class HybridSearch:
 
         return results
 
-    def _search_vector(self, query: str, category: Optional[str],
-                       limit: int) -> list[dict]:
+    def _search_vector(self, query: str, category: Optional[str], limit: int) -> list[dict]:
         """
-        Vector similarity search using cosine similarity on embedding BLOBs.
+        Vector similarity search (semantic-retrieval.md §5.5 "Query").
 
-        NOTE: This requires the query to already be embedded. For V2,
-        the caller is responsible for generating the query embedding
-        (via Ollama's embedding API). If no query embedding is provided,
-        this falls back to keyword search.
+        Embeds the query with the configured chain, then cosine-ranks against
+        rows embedded by the SAME model (cross-model cosine is meaningless).
+        Falls back to keyword search when there is no embedder or no matching
+        vectors yet — so search is always useful, never empty for lack of vectors.
         """
-        # V2.3 placeholder — vector search needs embedding generation
-        # which requires Ollama API call. For now, fall back to keyword.
-        return self._search_keyword(query, category, limit)
+        try:
+            query_bytes, _dim, model_id = self._get_embed_chain().embed_text(query)
+        except Exception as e:
+            logger.warning(f"Query embedding failed, using keyword search: {e}")
+            return self._search_keyword(query, category=category, limit=limit)
 
-    def search_with_embedding(self, query_embedding: bytes,
-                               category: Optional[str] = None,
-                               limit: int = 10) -> list[dict]:
+        results = self.search_chunks_with_embedding(
+            query_bytes, category=category, limit=limit, model=model_id
+        )
+        if not results:
+            # No chunks embedded with this model yet (fresh store, un-chunked
+            # legacy rows pending backfill, or a model swap) — keyword keeps
+            # search working.
+            return self._search_keyword(query, category=category, limit=limit)
+        return results
+
+    def search_with_embedding(
+        self,
+        query_embedding: bytes,
+        category: Optional[str] = None,
+        limit: int = 10,
+        model: Optional[str] = None,
+    ) -> list[dict]:
         """
         Search using a pre-computed embedding vector.
 
@@ -213,6 +250,10 @@ class HybridSearch:
             query_embedding: The query vector as bytes (float32 array)
             category: Optional category filter
             limit: Maximum results
+            model: Optional embedding-model filter. Only rows produced by this
+                   model are compared — different models live in incompatible
+                   vector spaces (and may differ in dimension), so cosine across
+                   them is meaningless.
 
         Returns:
             List of results sorted by cosine similarity
@@ -226,14 +267,28 @@ class HybridSearch:
             conn.row_factory = sqlite3.Row
             now = time.time()
 
-            rows = conn.execute("""
+            sql = """
                 SELECT id, content, compiled_truth, summary, category, tier,
                        embedding, key_topics, source
                 FROM memories
                 WHERE embedding IS NOT NULL
                 AND (expires_at IS NULL OR expires_at > ?)
-                ORDER BY accessed_at DESC LIMIT 500
-            """, (now,)).fetchall()
+            """
+            params: list = [now]
+            if model is not None:
+                sql += " AND embedding_model = ?"
+                params.append(model)
+            if category is not None:
+                sql += " AND category = ?"
+                params.append(category)
+            # No candidate cap (§7): the old `ORDER BY accessed_at DESC LIMIT 500`
+            # dropped the best semantic match whenever it wasn't recently accessed.
+            # We now scan ALL non-expired, model-matching embedded rows and rank by
+            # cosine below (top-`limit` taken after scoring). This is fine at
+            # personal scale (low tens of thousands); the linear scan dissolves
+            # under pgvector's ANN index in the multi-user phase (§6).
+
+            rows = conn.execute(sql, params).fetchall()
 
             for r in rows:
                 if not r["embedding"]:
@@ -246,22 +301,102 @@ class HybridSearch:
                 tier_boost = TIER_BOOST.get(r["tier"], 1.0)
                 boosted_score = similarity * tier_boost
 
-                candidates.append({
+                candidates.append(
+                    {
+                        "id": r["id"],
+                        "content": r["content"],
+                        "compiled_truth": r["compiled_truth"] or "",
+                        "summary": r["summary"] or "",
+                        "category": r["category"],
+                        "tier": r["tier"],
+                        "score": boosted_score,
+                        "sources": ["vector"],
+                    }
+                )
+
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        return candidates[:limit]
+
+    def search_chunks_with_embedding(
+        self,
+        query_embedding: bytes,
+        category: Optional[str] = None,
+        limit: int = 10,
+        model: Optional[str] = None,
+    ) -> list[dict]:
+        """Chunk-level vector search resolved to parent memories (§5.4/§5.5).
+
+        Cosine-ranks the query against ``memory_chunks`` of the matching model,
+        then resolves to parent memories keeping the BEST-scoring chunk per
+        ``memory_id`` (dedup). Parents are joined back for content/tier/etc.,
+        expired parents are dropped, and the tier boost is applied to the best
+        chunk score. This is the query path once memories are chunked on write.
+        """
+        query_vec = self._bytes_to_vector(query_embedding)
+        if not query_vec:
+            return []
+
+        now = time.time()
+        best_by_memory: dict[str, float] = {}
+        with _connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            sql = "SELECT memory_id, embedding FROM memory_chunks WHERE embedding IS NOT NULL"
+            params: list = []
+            if model is not None:
+                sql += " AND embedding_model = ?"
+                params.append(model)
+            for r in conn.execute(sql, params).fetchall():
+                cvec = self._bytes_to_vector(r["embedding"])
+                if not cvec:
+                    continue
+                sim = self._cosine_similarity(query_vec, cvec)
+                mid = r["memory_id"]
+                # Keep the best-scoring chunk per parent memory (dedup).
+                if mid not in best_by_memory or sim > best_by_memory[mid]:
+                    best_by_memory[mid] = sim
+
+            if not best_by_memory:
+                return []
+
+            placeholders = ",".join("?" for _ in best_by_memory)
+            msql = f"""
+                SELECT id, content, compiled_truth, summary, category, tier
+                FROM memories
+                WHERE id IN ({placeholders})
+                AND (expires_at IS NULL OR expires_at > ?)
+            """
+            mparams: list = [*best_by_memory.keys(), now]
+            if category is not None:
+                msql += " AND category = ?"
+                mparams.append(category)
+            memory_rows = conn.execute(msql, mparams).fetchall()
+
+        results = []
+        for r in memory_rows:
+            sim = best_by_memory[r["id"]]
+            tier_boost = TIER_BOOST.get(r["tier"], 1.0)
+            results.append(
+                {
                     "id": r["id"],
                     "content": r["content"],
                     "compiled_truth": r["compiled_truth"] or "",
                     "summary": r["summary"] or "",
                     "category": r["category"],
                     "tier": r["tier"],
-                    "score": boosted_score,
+                    "score": sim * tier_boost,
                     "sources": ["vector"],
-                })
+                }
+            )
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:limit]
 
-        candidates.sort(key=lambda x: x["score"], reverse=True)
-        return candidates[:limit]
-
-    def _search_balanced(self, query: str, category: Optional[str] = None,
-                         tier: Optional[str] = None, limit: int = 10) -> list[dict]:
+    def _search_balanced(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """
         Balanced hybrid search: FTS5 + vector + tier boost + graph + RRF.
 
@@ -276,11 +411,21 @@ class HybridSearch:
         # Step 1: FTS5 search
         fts_results = self._search_keyword(query, category, tier, limit=30)
 
-        # Step 2: Vector search (placeholder — needs embedding generation)
-        # For V2.3, vector results come from search_with_embedding if caller has embedding
-        vec_results = []  # Will be populated when embedding generation is wired
+        # Step 2: Vector search at the CHUNK level, resolved to parents. Call
+        # search_chunks_with_embedding DIRECTLY (not _search_vector, whose keyword
+        # fallback would re-add the FTS results and double-count them in fusion).
+        # Any failure or no matching vectors → empty list → fusion is FTS-only,
+        # preserving the previous keyword-only behavior.
+        vec_results: list[dict] = []
+        try:
+            query_bytes, _dim, model_id = self._get_embed_chain().embed_text(query)
+            vec_results = self.search_chunks_with_embedding(
+                query_bytes, category=category, limit=30, model=model_id
+            )
+        except Exception as e:
+            logger.warning(f"Vector leg of balanced search failed (FTS-only): {e}")
 
-        # Step 3+4: RRF fusion
+        # Step 3+4: RRF fusion (variadic — vector is just another ranked list, §5.6)
         fused = self._rrf_fuse(fts_results, vec_results)
 
         # Step 5: Graph augmentation
@@ -346,8 +491,7 @@ class HybridSearch:
         fused.sort(key=lambda x: x["score"], reverse=True)
         return fused
 
-    def _graph_augment(self, query: str, base_results: list[dict],
-                       limit: int = 5) -> list[dict]:
+    def _graph_augment(self, query: str, base_results: list[dict], limit: int = 5) -> list[dict]:
         """
         Augment search results by following entity edges.
 
@@ -412,7 +556,7 @@ class HybridSearch:
                 placeholders = ",".join("?" for _ in memory_ids)
                 rows = conn.execute(
                     f"SELECT memory_id, entity_id FROM memory_entities WHERE memory_id IN ({placeholders})",
-                    memory_ids
+                    memory_ids,
                 ).fetchall()
                 for mem_id, entity_id in rows:
                     result.setdefault(mem_id, []).append(entity_id)
@@ -457,8 +601,13 @@ class HybridSearch:
 
         return dot / (norm_a * norm_b)
 
-    def build_context(self, query: str, project: Optional[str] = None,
-                      agent: Optional[str] = None, limit: int = 10) -> dict:
+    def build_context(
+        self,
+        query: str,
+        project: Optional[str] = None,
+        agent: Optional[str] = None,
+        limit: int = 10,
+    ) -> dict:
         """
         Build a context response for a task query.
 
@@ -477,22 +626,26 @@ class HybridSearch:
         for eid in all_entity_ids:
             entity = self.entity_store.get_entity(eid)
             if entity:
-                entity_context.append({
-                    "id": eid,
-                    "name": entity["name"],
-                    "type": entity["type"],
-                    "compiled_truth": entity.get("compiled_truth", ""),
-                })
+                entity_context.append(
+                    {
+                        "id": eid,
+                        "name": entity["name"],
+                        "type": entity["type"],
+                        "compiled_truth": entity.get("compiled_truth", ""),
+                    }
+                )
 
         # Gather open threads from top entities
         open_threads = []
         for entity in entity_context[:5]:
             timeline = entity.get("compiled_truth", "")
             if timeline:
-                open_threads.append({
-                    "entity": entity["name"],
-                    "context": timeline[:200],
-                })
+                open_threads.append(
+                    {
+                        "entity": entity["name"],
+                        "context": timeline[:200],
+                    }
+                )
 
         return {
             "query": query,

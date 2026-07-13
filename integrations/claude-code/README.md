@@ -20,7 +20,7 @@ session** — if Remembrance is down they exit silently.
 Remembrance running on `http://127.0.0.1:18790` (override with `REMEMBRANCE_URL`):
 
 ```
-python -m remembrance_mcp.serve --host 127.0.0.1 --port 18790 --no-nats
+python -m remembrance_mcp.server.serve --host 127.0.0.1 --port 18790 --no-nats
 # or, from Prism:  prism remembrance serve
 ```
 

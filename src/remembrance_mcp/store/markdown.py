@@ -24,9 +24,8 @@ INSPIRED BY gbrain's "brain repo is git-backed markdown" pattern:
 from __future__ import annotations
 
 import json
-import os
-import time
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -45,8 +44,7 @@ class MarkdownSync:
         sync.import_edits()  # Pick up manual edits
     """
 
-    def __init__(self, entity_store: EntityStore,
-                 brain_dir: Optional[Path] = None):
+    def __init__(self, entity_store: EntityStore, brain_dir: Optional[Path] = None):
         self.entity_store = entity_store
         self.brain_dir = brain_dir or Path.home() / ".remembrance" / "brain"
         self.brain_dir.mkdir(parents=True, exist_ok=True)
@@ -154,7 +152,7 @@ class MarkdownSync:
                 date_str = time.strftime("%Y-%m-%d", time.localtime(file_mtime))
                 self.entity_store.add_timeline_entry(
                     entity_id,
-                    f"Compiled truth updated via manual edit",
+                    "Compiled truth updated via manual edit",
                     source="markdown_sync",
                 )
                 imported += 1
@@ -196,9 +194,9 @@ class MarkdownSync:
         timeline = entity.get("timeline", "") or ""
 
         page = f"""---
-type: {entity['type']}
+type: {entity["type"]}
 aliases: {aliases_str}
-tier: {entity['tier']}
+tier: {entity["tier"]}
 ---
 
 ## Executive Summary
@@ -246,13 +244,13 @@ tier: {entity['tier']}
         now = time.strftime("%Y-%m-%d %H:%M", time.localtime())
 
         lines = [
-            f"# Remembrance Brain",
-            f"",
+            "# Remembrance Brain",
+            "",
             f"Generated: {now}",
             f"Total entities: {len(entities)}",
-            f"",
-            f"## Entity Counts",
-            f"",
+            "",
+            "## Entity Counts",
+            "",
         ]
         for etype, count in sorted(type_counts.items()):
             lines.append(f"- **{etype}**: {count}")

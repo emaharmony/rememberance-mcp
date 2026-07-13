@@ -3,7 +3,8 @@ Tests for EntityDetector — Zero-LLM Entity Extraction
 """
 
 import pytest
-from remembrance_mcp.graph.entity import EntityDetector, DetectedEntity
+
+from remembrance_mcp.graph.entity import EntityDetector
 
 
 @pytest.fixture
@@ -94,9 +95,10 @@ class TestContextExtraction:
 class TestRegistryLookup:
     def test_uses_entity_store(self):
         """When entity_store is provided, detect registered entities."""
-        from remembrance_mcp.store.edges import EntityStore
         import tempfile
         from pathlib import Path
+
+        from remembrance_mcp.store.edges import EntityStore
 
         with tempfile.TemporaryDirectory() as d:
             store = EntityStore(Path(d) / "test.db")

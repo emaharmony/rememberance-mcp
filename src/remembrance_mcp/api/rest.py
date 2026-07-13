@@ -36,13 +36,13 @@ PRISM /v1 COMPATIBILITY LAYER:
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
-import errno
 import sqlite3
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 from remembrance_mcp.pipeline import MemoryPipeline
 
@@ -71,8 +71,9 @@ def _is_client_disconnect(error: BaseException) -> bool:
     return error.errno in CLIENT_DISCONNECT_ERRNOS
 
 
-def _build_context_pack(ctx: dict, task: str, project: Optional[str],
-                        agent: Optional[str], max_tokens: int) -> dict:
+def _build_context_pack(
+    ctx: dict, task: str, project: Optional[str], agent: Optional[str], max_tokens: int
+) -> dict:
     """Translate pipeline.build_context() output into the ContextPack shape
     that Prism's Go client (POST /v1/context/build) expects.
 
@@ -99,13 +100,15 @@ def _build_context_pack(ctx: dict, task: str, project: Optional[str],
             lines.append(f"- {text}{suffix}")
             if mem_id:
                 selected_ids.append(mem_id)
-            mem_details.append({
-                "memory_id": mem_id,
-                "title": m.get("category") or "memory",
-                "summary": text,
-                "score": float(m.get("score", 0.0) or 0.0),
-                "reason": "hybrid_search",
-            })
+            mem_details.append(
+                {
+                    "memory_id": mem_id,
+                    "title": m.get("category") or "memory",
+                    "summary": text,
+                    "score": float(m.get("score", 0.0) or 0.0),
+                    "reason": "hybrid_search",
+                }
+            )
         lines.append("")
 
     if entities:
@@ -280,8 +283,12 @@ class RemembranceHandler(BaseHTTPRequestHandler):
             elif path == "/v1/memory/ingest":
                 # Prism CaptureRequest → pipeline.capture()
                 text = body.get("content") or body.get("summary") or ""
-                source = (body.get("source_agent") or body.get("source_type")
-                          or body.get("source") or "prism")
+                source = (
+                    body.get("source_agent")
+                    or body.get("source_type")
+                    or body.get("source")
+                    or "prism"
+                )
                 category = body.get("category")
                 # NOTE: Prism's `scope` (project/user) is a different vocabulary
                 # from the gate tier (cold/active/persist), so we let the gate
@@ -305,9 +312,7 @@ class RemembranceHandler(BaseHTTPRequestHandler):
                 ctx = self.pipeline.build_context(
                     task=task, project=project, agent=agent, limit=limit
                 )
-                self._json_response(
-                    _build_context_pack(ctx, task, project, agent, max_tokens)
-                )
+                self._json_response(_build_context_pack(ctx, task, project, agent, max_tokens))
 
             else:
                 self._json_response({"error": "Not found"}, status=404)
@@ -390,8 +395,7 @@ class RemembranceHandler(BaseHTTPRequestHandler):
         logger.debug(f"REST API: {format % args}")
 
 
-def start_rest_api(pipeline: MemoryPipeline, host: str = "127.0.0.1",
-                   port: int = 8788):
+def start_rest_api(pipeline: MemoryPipeline, host: str = "127.0.0.1", port: int = 8788):
     """
     Start the REST API server.
 

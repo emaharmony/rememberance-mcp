@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Memory Pipeline — Orchestrates Gate → Extract → Store
 
@@ -26,23 +27,25 @@ WHY PIPELINE?
 """
 
 import logging
-from pathlib import Path
 from typing import Optional
+
+from remembrance_mcp.chunk.chunk import chunk_text
 from remembrance_mcp.config import Settings
+from remembrance_mcp.dream.cycle import DreamCycle
+from remembrance_mcp.embed.embed import build_embed_chain
+from remembrance_mcp.extract import BaseExtractor, OllamaExtractor, StubExtractor
 from remembrance_mcp.gate import GateDecision
-from remembrance_mcp.registry import build_gate_chain
-from remembrance_mcp.extract import OllamaExtractor, StubExtractor, BaseExtractor
-from remembrance_mcp.store import MemoryStore
-from remembrance_mcp.store.edges import EntityStore
-from remembrance_mcp.store.memory import MemoryStoreV2
-from remembrance_mcp.store.facts import FactStore
-from remembrance_mcp.store.markdown import MarkdownSync
-from remembrance_mcp.graph.entity import EntityDetector
+from remembrance_mcp.gate.backends import GateMetrics
+from remembrance_mcp.gate.registry import build_gate_chain
 from remembrance_mcp.graph.edges import GraphWiring
+from remembrance_mcp.graph.entity import EntityDetector
 from remembrance_mcp.graph.traversal import GraphTraversal
 from remembrance_mcp.search.hybrid import HybridSearch
-from remembrance_mcp.dream.cycle import DreamCycle
-from remembrance_mcp.gate_backends import GateMetrics
+from remembrance_mcp.store import MemoryStore
+from remembrance_mcp.store.edges import EntityStore
+from remembrance_mcp.store.facts import FactStore
+from remembrance_mcp.store.markdown import MarkdownSync
+from remembrance_mcp.store.memory import MemoryStoreV2
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,12 @@ class MemoryPipeline:
             logger.warning("Ollama extractor unavailable, using stub")
             self.extractor = StubExtractor()
 
+        # ── Embedding (provider-agnostic, non-blocking on write) ──
+        # Chain from REMEMBRANCE_EMBED_BACKENDS (default "hash" offline scaffold).
+        # Always usable: hash is the ultimate fallback, so capture() can embed
+        # even with no Ollama/OpenAI available.
+        self.embed_chain = build_embed_chain()
+
         # ── Layer 3: Store (database) ───────────────────────────
         self.store = MemoryStore(
             db_path=self.settings.DB_PATH,
@@ -102,17 +111,13 @@ class MemoryPipeline:
         # the entity graph against the `memories` table in a single connection.
         # Previously split into a separate entities.db, which broke
         # entity_sweep/backlink_audit/purge ("no such table: memories").
-        self.entity_store = EntityStore(
-            db_path=self.settings.DB_PATH
-        )
+        self.entity_store = EntityStore(db_path=self.settings.DB_PATH)
 
         # ── V2: Memory Store V2 Extensions ────────────────────
         self.store_v2 = MemoryStoreV2(v1_store=self.store)
 
         # ── V2: Fact Store ────────────────────────────────────
-        self.fact_store = FactStore(
-            db_path=self.settings.DB_PATH
-        )
+        self.fact_store = FactStore(db_path=self.settings.DB_PATH)
 
         # ── V2: Graph Wiring + Entity Detection ──────────────
         self.graph_wiring = GraphWiring(self.entity_store)
@@ -125,6 +130,7 @@ class MemoryPipeline:
         self.hybrid_search = HybridSearch(
             db_path=self.settings.DB_PATH,
             entity_store=self.entity_store,
+            embed_chain=self.embed_chain,  # same model for query as for write
         )
 
         # ── V2: Dream Cycle ──────────────────────────────────
@@ -132,13 +138,19 @@ class MemoryPipeline:
             entity_store=self.entity_store,
             memory_v2=self.store_v2,
             ollama_base_url=self.settings.OLLAMA_BASE_URL,
+            embed_chain=self.embed_chain,  # same model as write/search for backfill
         )
 
         # ── V2: Markdown Sync ────────────────────────────────
         self.markdown_sync = MarkdownSync(self.entity_store)
 
-    def capture(self, text: str, source: str = "cli",
-                category: Optional[str] = None, tier: Optional[str] = None) -> dict:
+    def capture(
+        self,
+        text: str,
+        source: str = "cli",
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+    ) -> dict:
         """
         Run the full pipeline on a piece of text.
 
@@ -151,7 +163,9 @@ class MemoryPipeline:
         gate_result, backend_used, fallback_used = self.gate_chain.classify(text)
 
         if gate_result.decision == GateDecision.SKIP:
-            logger.debug(f"Gate: SKIP (confidence: {gate_result.confidence:.3f}, backend: {backend_used})")
+            logger.debug(
+                f"Gate: SKIP (confidence: {gate_result.confidence:.3f}, backend: {backend_used})"
+            )
             return {
                 "id": None,
                 "decision": "SKIP",
@@ -173,6 +187,17 @@ class MemoryPipeline:
         final_category = category or extraction.category
         final_tier = tier or extraction.tier
 
+        # Stage 2.5: Embed (non-blocking). A failure must NEVER lose the memory —
+        # we log and store with a null vector; the dream cycle backfills later.
+        # (Whole-content embedding for now; Phase 4 will embed per-chunk.)
+        embedding_bytes: Optional[bytes] = None
+        embedding_dim: Optional[int] = None
+        embedding_model = ""
+        try:
+            embedding_bytes, embedding_dim, embedding_model = self.embed_chain.embed_text(text)
+        except Exception as e:
+            logger.warning(f"Embedding failed on capture (storing without vector): {e}")
+
         # Stage 3: Store
         mem_id = self.store.store(
             content=text,
@@ -181,7 +206,39 @@ class MemoryPipeline:
             tier=final_tier,
             key_topics=extraction.key_topics,
             source=source,
+            embedding=embedding_bytes,
+            embedding_dim=embedding_dim,
+            embedding_model=embedding_model,
         )
+
+        # Stage 3.5: Chunk-on-write (non-blocking, §5.4). Long content → several
+        # overlapping chunks; short content → one chunk (uniform path). Each chunk
+        # is embedded and stored in memory_chunks for chunk-level search (Phase 4.2).
+        # Reuse the whole-content embedding when there's a single chunk equal to
+        # the embedded text, to avoid a redundant embed on the common short case.
+        try:
+            chunk_contents = chunk_text(text)
+            chunk_rows = []
+            for c in chunk_contents:
+                if len(chunk_contents) == 1 and c == text and embedding_bytes is not None:
+                    c_emb, c_dim, c_model = embedding_bytes, embedding_dim, embedding_model
+                else:
+                    c_emb, c_dim, c_model = None, None, ""
+                    try:
+                        c_emb, c_dim, c_model = self.embed_chain.embed_text(c)
+                    except Exception as e:
+                        logger.warning(f"Chunk embed failed (stored without vector): {e}")
+                chunk_rows.append(
+                    {
+                        "content": c,
+                        "embedding": c_emb,
+                        "embedding_dim": c_dim,
+                        "embedding_model": c_model,
+                    }
+                )
+            self.store_v2.store_chunks(mem_id, chunk_rows)
+        except Exception as e:
+            logger.warning(f"Chunk-on-write failed (non-blocking): {e}")
 
         # Stage 4: Graph Wiring (V2)
         # Detect entities and wire them into the knowledge graph
@@ -206,8 +263,13 @@ class MemoryPipeline:
             "edges_created": len(wiring_result.get("edges", [])) if wiring_result else 0,
         }
 
-    def search(self, query: str, category: Optional[str] = None,
-               tier: Optional[str] = None, limit: int = 10) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
         """Search stored memories by text and metadata filters."""
         return self.store.search(query, category=category, tier=tier, limit=limit)
 
@@ -237,8 +299,9 @@ class MemoryPipeline:
 
     # ── V2 Methods ──────────────────────────────────────────────
 
-    def build_context(self, task: str, project: Optional[str] = None,
-                      agent: Optional[str] = None, limit: int = 10) -> dict:
+    def build_context(
+        self, task: str, project: Optional[str] = None, agent: Optional[str] = None, limit: int = 10
+    ) -> dict:
         """
         Build context for a task using hybrid search + graph traversal.
 
@@ -249,8 +312,9 @@ class MemoryPipeline:
             query=task, project=project, agent=agent, limit=limit
         )
 
-    def graph_query(self, entity_name: str, depth: int = 1,
-                    edge_types: Optional[list[str]] = None) -> dict:
+    def graph_query(
+        self, entity_name: str, depth: int = 1, edge_types: Optional[list[str]] = None
+    ) -> dict:
         """
         Traverse the knowledge graph from an entity.
         """
@@ -265,8 +329,7 @@ class MemoryPipeline:
         """
         return self.entity_store.find_entity(name)
 
-    def dream(self, phases: Optional[list[str]] = None,
-              dry_run: bool = False) -> dict:
+    def dream(self, phases: Optional[list[str]] = None, dry_run: bool = False) -> dict:
         """
         Run the dream cycle.
         """

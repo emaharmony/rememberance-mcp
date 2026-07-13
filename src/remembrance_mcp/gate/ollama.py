@@ -25,12 +25,11 @@ from __future__ import annotations
 
 import json
 import logging
-import urllib.request
 import urllib.error
-from typing import Optional
+import urllib.request
 
+from remembrance_mcp.gate.backends import BaseGateBackend
 from remembrance_mcp.gate.gate import GateDecision, GateResult
-from remembrance_mcp.gate_backends import BaseGateBackend
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +55,12 @@ class OllamaGateBackend(BaseGateBackend):
     Default model: nemotron-3-nano:4b (fast, local, zero-cost).
     """
 
-    def __init__(self, base_url: str = "http://localhost:11434",
-                 model: str = "nemotron-3-nano:4b",
-                 timeout: int = 10):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11434",
+        model: str = "nemotron-3-nano:4b",
+        timeout: int = 10,
+    ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -77,15 +79,17 @@ class OllamaGateBackend(BaseGateBackend):
         # Try Ollama classification
         try:
             prompt = GATE_PROMPT.format(text=text[:500])
-            payload = json.dumps({
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,  # Low temp for deterministic classification
-                    "num_predict": 10,   # Only need one word
-                },
-            }).encode("utf-8")
+            payload = json.dumps(
+                {
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,  # Low temp for deterministic classification
+                        "num_predict": 10,  # Only need one word
+                    },
+                }
+            ).encode("utf-8")
 
             req = urllib.request.Request(
                 f"{self.base_url}/api/generate",
@@ -104,8 +108,6 @@ class OllamaGateBackend(BaseGateBackend):
             return GateResult(
                 decision=decision,
                 confidence=confidence,
-                
-                
             )
 
         except Exception as e:
@@ -149,28 +151,38 @@ class OllamaGateBackend(BaseGateBackend):
             return GateResult(
                 decision=GateDecision.SKIP,
                 confidence=0.9,
-                
-                
             )
 
         # Decision keywords
-        decision_words = {"decided", "decision", "chose", "confirmed", "ruling", "defined", "architected"}
+        decision_words = {
+            "decided",
+            "decision",
+            "chose",
+            "confirmed",
+            "ruling",
+            "defined",
+            "architected",
+        }
         if any(w in text_lower for w in decision_words):
             return GateResult(
                 decision=GateDecision.PERSIST,
                 confidence=0.7,
-                
-                
             )
 
         # Active keywords
-        active_words = {"implementing", "working on", "building", "shipping", "fixing", "testing", "deploy"}
+        active_words = {
+            "implementing",
+            "working on",
+            "building",
+            "shipping",
+            "fixing",
+            "testing",
+            "deploy",
+        }
         if any(w in text_lower for w in active_words):
             return GateResult(
                 decision=GateDecision.ACTIVE,
                 confidence=0.7,
-                
-                
             )
 
         # Skip patterns
@@ -179,15 +191,11 @@ class OllamaGateBackend(BaseGateBackend):
             return GateResult(
                 decision=GateDecision.SKIP,
                 confidence=0.8,
-                
-                
             )
 
         return GateResult(
             decision=GateDecision.COLD,
             confidence=0.5,
-            
-            
         )
 
     def is_available(self) -> bool:

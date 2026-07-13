@@ -12,6 +12,7 @@ They guard the failure modes that previously slipped through unit tests:
 Isolation: REMEMBRANCE_HOME points at a tmp dir, so the gate falls back to the
 heuristic backend (no DilBERT model needed) and no real data is touched.
 """
+
 from __future__ import annotations
 
 import json
@@ -38,9 +39,9 @@ def server():
     os.environ["REMEMBRANCE_HOME"] = home
     os.environ["REMEMBRANCE_GATE_BACKENDS"] = "heuristic"
 
+    from remembrance_mcp.api.rest import RemembranceHandler
     from remembrance_mcp.config import Settings
     from remembrance_mcp.pipeline import MemoryPipeline
-    from remembrance_mcp.api.rest import RemembranceHandler
 
     pipeline = MemoryPipeline(settings=Settings())
     RemembranceHandler.pipeline = pipeline
@@ -71,8 +72,10 @@ def _get(base, path):
 def _post(base, path, body):
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        base + path, data=data,
-        headers={"Content-Type": "application/json"}, method="POST",
+        base + path,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.status, json.loads(r.read().decode("utf-8"))
@@ -85,10 +88,14 @@ def test_capture_then_search_finds_it(server):
     returns nothing even though the memory was stored.
     """
     token = "zzqwxmarker"
-    status, res = _post(server, "/capture", {
-        "text": f"We decided the {token} subsystem is the canonical event bus.",
-        "source": "test",
-    })
+    status, res = _post(
+        server,
+        "/capture",
+        {
+            "text": f"We decided the {token} subsystem is the canonical event bus.",
+            "source": "test",
+        },
+    )
     assert status == 201
     assert res["decision"] != "SKIP"
     assert res["id"]
@@ -103,13 +110,24 @@ def test_v1_context_build_returns_markdown(server):
     """POST /v1/context/build must return non-empty context_markdown after a
     relevant capture (the shape Prism injects)."""
     token = "qprojmarker"
-    _post(server, "/capture", {
-        "text": f"Important decision: {token} is the shared memory brain for all agents.",
-        "source": "test",
-    })
-    status, res = _post(server, "/v1/context/build", {
-        "task": token, "project_id": "test", "agent_id": "pytest", "max_tokens": 1500,
-    })
+    _post(
+        server,
+        "/capture",
+        {
+            "text": f"Important decision: {token} is the shared memory brain for all agents.",
+            "source": "test",
+        },
+    )
+    status, res = _post(
+        server,
+        "/v1/context/build",
+        {
+            "task": token,
+            "project_id": "test",
+            "agent_id": "pytest",
+            "max_tokens": 1500,
+        },
+    )
     assert status == 200
     assert res["context_markdown"].strip()
     assert token in res["context_markdown"]
@@ -119,14 +137,18 @@ def test_v1_context_build_returns_markdown(server):
 def test_v1_memory_ingest_prism_shape(server):
     """Prism's CaptureRequest (content/source_agent/scope/...) must map onto capture."""
     token = "ingestmarker"
-    status, res = _post(server, "/v1/memory/ingest", {
-        "content": f"We decided {token} ships in v3.",
-        "source_agent": "prism:astraea",
-        "category": "decision",
-        "scope": "project",
-        "project_id": "prism",
-        "title": "decision",
-    })
+    status, res = _post(
+        server,
+        "/v1/memory/ingest",
+        {
+            "content": f"We decided {token} ships in v3.",
+            "source_agent": "prism:astraea",
+            "category": "decision",
+            "scope": "project",
+            "project_id": "prism",
+            "title": "decision",
+        },
+    )
     assert status == 201
     assert res["decision"] != "SKIP"
 

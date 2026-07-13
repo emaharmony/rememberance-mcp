@@ -18,6 +18,7 @@ Env:
   REMEMBRANCE_TIMEOUT      HTTP timeout seconds (default 6)
   REMEMBRANCE_INJECT_LIMIT max memories to inject (default 8)
 """
+
 from __future__ import annotations
 
 import json
@@ -75,12 +76,16 @@ def main() -> int:
     if not markdown:
         return 0
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": markdown,
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": markdown,
+                }
+            }
+        )
+    )
     return 0
 
 

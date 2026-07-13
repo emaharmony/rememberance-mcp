@@ -32,13 +32,13 @@ Metrics are stored in the same SQLite DB as memories, in a `gate_metrics` table.
 """
 
 import json
-import time
 import logging
 import re
 import sqlite3
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from remembrance_mcp.gate import GateDecision, GateResult
@@ -48,15 +48,17 @@ logger = logging.getLogger(__name__)
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class GateMetric:
     """A single gate classification event, stored for effectiveness analysis."""
+
     timestamp: float
-    backend: str          # "dilbert", "openai", "heuristic"
-    text_preview: str     # first 100 chars of input
-    decision: str          # SKIP, COLD, ACTIVE, PERSIST
-    confidence: float      # 0.0 to 1.0
-    fallback_used: bool    # did we fall back from a preferred backend?
+    backend: str  # "dilbert", "openai", "heuristic"
+    text_preview: str  # first 100 chars of input
+    decision: str  # SKIP, COLD, ACTIVE, PERSIST
+    confidence: float  # 0.0 to 1.0
+    fallback_used: bool  # did we fall back from a preferred backend?
 
 
 class GateMetrics:
@@ -87,23 +89,30 @@ class GateMetrics:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_backend ON gate_metrics(backend)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_decision ON gate_metrics(decision)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON gate_metrics(timestamp)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metrics_decision ON gate_metrics(decision)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON gate_metrics(timestamp)"
+            )
 
     def record(self, metric: GateMetric):
         """Record a classification event."""
         with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO gate_metrics (timestamp, backend, text_preview, decision, confidence, fallback_used)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                metric.timestamp,
-                metric.backend,
-                metric.text_preview[:100],
-                metric.decision,
-                metric.confidence,
-                1 if metric.fallback_used else 0,
-            ))
+            """,
+                (
+                    metric.timestamp,
+                    metric.backend,
+                    metric.text_preview[:100],
+                    metric.decision,
+                    metric.confidence,
+                    1 if metric.fallback_used else 0,
+                ),
+            )
 
     def summary(self, hours: int = 24) -> dict:
         """
@@ -118,35 +127,41 @@ class GateMetrics:
             conn.row_factory = sqlite3.Row
 
             total = conn.execute(
-                "SELECT COUNT(*) as cnt FROM gate_metrics WHERE timestamp > ?",
-                (cutoff,)
+                "SELECT COUNT(*) as cnt FROM gate_metrics WHERE timestamp > ?", (cutoff,)
             ).fetchone()["cnt"]
 
             by_backend_rows = conn.execute(
                 "SELECT backend, COUNT(*) as cnt, AVG(confidence) as avg_conf FROM gate_metrics WHERE timestamp > ? GROUP BY backend",
-                (cutoff,)
+                (cutoff,),
             ).fetchall()
-            by_backend = {row["backend"]: {"count": row["cnt"], "avg_confidence": round(row["avg_conf"], 3)} for row in by_backend_rows}
+            by_backend = {
+                row["backend"]: {"count": row["cnt"], "avg_confidence": round(row["avg_conf"], 3)}
+                for row in by_backend_rows
+            }
 
-            by_decision = dict(conn.execute(
-                "SELECT decision, COUNT(*) as cnt FROM gate_metrics WHERE timestamp > ? GROUP BY decision",
-                (cutoff,)
-            ).fetchall())
+            by_decision = dict(
+                conn.execute(
+                    "SELECT decision, COUNT(*) as cnt FROM gate_metrics WHERE timestamp > ? GROUP BY decision",
+                    (cutoff,),
+                ).fetchall()
+            )
 
             fallback_count = conn.execute(
                 "SELECT COUNT(*) as cnt FROM gate_metrics WHERE timestamp > ? AND fallback_used = 1",
-                (cutoff,)
+                (cutoff,),
             ).fetchone()["cnt"]
 
             skip_count = conn.execute(
                 "SELECT COUNT(*) as cnt FROM gate_metrics WHERE timestamp > ? AND decision = 'SKIP'",
-                (cutoff,)
+                (cutoff,),
             ).fetchone()["cnt"]
 
-            avg_conf = conn.execute(
-                "SELECT AVG(confidence) as avg FROM gate_metrics WHERE timestamp > ?",
-                (cutoff,)
-            ).fetchone()["avg"] or 0.0
+            avg_conf = (
+                conn.execute(
+                    "SELECT AVG(confidence) as avg FROM gate_metrics WHERE timestamp > ?", (cutoff,)
+                ).fetchone()["avg"]
+                or 0.0
+            )
 
         return {
             "period_hours": hours,
@@ -160,6 +175,7 @@ class GateMetrics:
 
 
 # ── Backend Interface ────────────────────────────────────────────────────────
+
 
 class BaseGateBackend(ABC):
     """Interface for gate classification backends."""
@@ -177,6 +193,7 @@ class BaseGateBackend(ABC):
 
 
 # ── Heuristic Backend (always available, zero dependencies) ────────────────────
+
 
 class HeuristicBackend(BaseGateBackend):
     """
@@ -208,27 +225,27 @@ class HeuristicBackend(BaseGateBackend):
 
     # Patterns for each classification
     SKIP_PATTERNS = [
-        r'^(ok|okay|k|got it|gotcha|sure|yep|yup|yeah|nope|nah|hmm|hm|lol|ha|thx|thanks|ty|👍|😊|🙌|✅|❤️|🔥|💪|💯|🎉|😉|👋)$',
-        r'^(yes|no|maybe|right|correct|wrong|true|false)$',
-        r'^.{1,5}$',  # very short messages (1-5 chars)
+        r"^(ok|okay|k|got it|gotcha|sure|yep|yup|yeah|nope|nah|hmm|hm|lol|ha|thx|thanks|ty|👍|😊|🙌|✅|❤️|🔥|💪|💯|🎉|😉|👋)$",
+        r"^(yes|no|maybe|right|correct|wrong|true|false)$",
+        r"^.{1,5}$",  # very short messages (1-5 chars)
     ]
 
     COLD_PATTERNS = [
-        r'\?$',                           # ends with question mark
-        r'^(what|how|when|where|why|who|is|can|do|does|did|will|would|should|could)\b',
-        r'^(hmm|interesting|oh|ah|well)\b',
+        r"\?$",  # ends with question mark
+        r"^(what|how|when|where|why|who|is|can|do|does|did|will|would|should|could)\b",
+        r"^(hmm|interesting|oh|ah|well)\b",
     ]
 
     ACTIVE_PATTERNS = [
-        r'\b(fix|implement| build|create|update|change|refactor|debug|deploy|test|merge|push|branch|commit|pr|issue|task|ticket)\b',
-        r'\b(todo|blocker|progress|status|review|approve|request)\b',
-        r'\b(error|bug|crash|fail|broken|issue|problem)\b',
+        r"\b(fix|implement| build|create|update|change|refactor|debug|deploy|test|merge|push|branch|commit|pr|issue|task|ticket)\b",
+        r"\b(todo|blocker|progress|status|review|approve|request)\b",
+        r"\b(error|bug|crash|fail|broken|issue|problem)\b",
     ]
 
     PERSIST_PATTERNS = [
-        r'\b(decision|decided|architecture|design pattern|agreed|rule|policy|preference|always|never)\b',
-        r'\b(name is|i am|i prefer|i want|my name|remember this|important|critical|must|don\'t forget)\b',
-        r'\b(project|milestone|deadline|launch|release|version)\b',
+        r"\b(decision|decided|architecture|design pattern|agreed|rule|policy|preference|always|never)\b",
+        r"\b(name is|i am|i prefer|i want|my name|remember this|important|critical|must|don\'t forget)\b",
+        r"\b(project|milestone|deadline|launch|release|version)\b",
     ]
 
     def classify(self, text: str) -> GateResult:
@@ -265,6 +282,7 @@ class HeuristicBackend(BaseGateBackend):
 
 # ── OpenAI Backend ────────────────────────────────────────────────────────────
 
+
 class OpenAIBackend(BaseGateBackend):
     """
     Cloud-based classification using OpenAI's API.
@@ -296,9 +314,8 @@ class OpenAIBackend(BaseGateBackend):
         self.model = model
 
     def classify(self, text: str) -> GateResult:
-        import json
-        import urllib.request
         import os
+        import urllib.request
 
         api_key = self.api_key or os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
@@ -313,15 +330,20 @@ PERSIST: Decisions, preferences, important facts, architecture (store forever)
 
 Text: {text}"""
 
-        payload = json.dumps({
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": "You classify text for memory relevance. Return only JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0,
-            "max_tokens": 50,
-        }).encode("utf-8")
+        payload = json.dumps(
+            {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You classify text for memory relevance. Return only JSON.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+                "max_tokens": 50,
+            }
+        ).encode("utf-8")
 
         req = urllib.request.Request(
             "https://api.openai.com/v1/chat/completions",
@@ -340,7 +362,11 @@ Text: {text}"""
                 data = json.loads(content)
                 decision_str = data.get("decision", "ACTIVE").upper()
                 confidence = float(data.get("confidence", 0.5))
-                decision = GateDecision(decision_str.lower()) if decision_str.lower() in [d.value.lower() for d in GateDecision] else GateDecision.ACTIVE
+                decision = (
+                    GateDecision(decision_str.lower())
+                    if decision_str.lower() in [d.value.lower() for d in GateDecision]
+                    else GateDecision.ACTIVE
+                )
                 return GateResult(decision=decision, confidence=confidence)
         except Exception as e:
             logger.warning(f"OpenAI gate failed: {e}")
@@ -348,6 +374,7 @@ Text: {text}"""
 
 
 # ── DilBERT Backend (local ML) ──────────────────────────────────────────────
+
 
 class DilBERTBackend(BaseGateBackend):
     """
@@ -374,8 +401,7 @@ class DilBERTBackend(BaseGateBackend):
     def _load_model(self):
         if self._model is not None:
             return
-        import torch
-        from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
+        from transformers import DistilBertForSequenceClassification, DistilBertTokenizer
 
         if not self.model_path.exists():
             raise FileNotFoundError(f"DilBERT model not found at {self.model_path}")
@@ -412,6 +438,7 @@ class DilBERTBackend(BaseGateBackend):
 
 
 # ── Fallback Chain ───────────────────────────────────────────────────────────
+
 
 class GateFallbackChain:
     """
@@ -458,14 +485,16 @@ class GateFallbackChain:
                 result = backend.classify(text)
                 # Record metrics
                 if self.metrics:
-                    self.metrics.record(GateMetric(
-                        timestamp=time.time(),
-                        backend=backend.name,
-                        text_preview=text[:100],
-                        decision=result.decision.value,
-                        confidence=result.confidence,
-                        fallback_used=fallback_used,
-                    ))
+                    self.metrics.record(
+                        GateMetric(
+                            timestamp=time.time(),
+                            backend=backend.name,
+                            text_preview=text[:100],
+                            decision=result.decision.value,
+                            confidence=result.confidence,
+                            fallback_used=fallback_used,
+                        )
+                    )
                 return result, backend.name, fallback_used
             except Exception as e:
                 logger.warning(f"Gate backend '{backend.name}' failed: {e}, trying next")
@@ -475,12 +504,14 @@ class GateFallbackChain:
         logger.error("All gate backends failed, defaulting to ACTIVE")
         result = GateResult(decision=GateDecision.ACTIVE, confidence=0.5)
         if self.metrics:
-            self.metrics.record(GateMetric(
-                timestamp=time.time(),
-                backend="emergency_fallback",
-                text_preview=text[:100],
-                decision="ACTIVE",
-                confidence=0.5,
-                fallback_used=True,
-            ))
+            self.metrics.record(
+                GateMetric(
+                    timestamp=time.time(),
+                    backend="emergency_fallback",
+                    text_preview=text[:100],
+                    decision="ACTIVE",
+                    confidence=0.5,
+                    fallback_used=True,
+                )
+            )
         return result, "emergency_fallback", True

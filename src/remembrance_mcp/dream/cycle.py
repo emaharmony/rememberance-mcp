@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Dream Cycle — Automated Brain Maintenance
 
@@ -31,16 +32,15 @@ Each phase is independently testable and independently runnable.
 """
 
 import json
+import logging
 import sqlite3
 import time
-import logging
-from pathlib import Path
-from typing import Optional
 
+from remembrance_mcp.chunk.chunk import chunk_text
+from remembrance_mcp.graph.edges import GraphWiring
+from remembrance_mcp.graph.entity import EntityDetector
 from remembrance_mcp.store.edges import EntityStore
 from remembrance_mcp.store.memory import MemoryStoreV2
-from remembrance_mcp.graph.entity import EntityDetector
-from remembrance_mcp.graph.edges import GraphWiring
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +54,14 @@ ALL_PHASES = [
     "pattern_detect",
     "orphan_detect",
     "embed_stale",
+    "chunk_backfill",
     "purge",
 ]
+
+# Max memories re-embedded per dream cycle (semantic-retrieval.md §5.5). A large
+# backlog (e.g. after a model swap) drains over several cycles instead of
+# blocking one run.
+EMBED_BACKFILL_BATCH = 200
 
 
 class DreamCycle:
@@ -69,16 +75,30 @@ class DreamCycle:
         report = dream.run(phases=["entity_sweep", "orphan_detect"])  # specific phases
     """
 
-    def __init__(self, entity_store: EntityStore, memory_v2: MemoryStoreV2,
-                 ollama_base_url: str = "http://localhost:11434"):
+    def __init__(
+        self,
+        entity_store: EntityStore,
+        memory_v2: MemoryStoreV2,
+        ollama_base_url: str = "http://localhost:11434",
+        embed_chain=None,
+    ):
         self.entity_store = entity_store
         self.memory_v2 = memory_v2
         self.ollama_base_url = ollama_base_url
         self.wiring = GraphWiring(entity_store)
         self.detector = EntityDetector(entity_store=entity_store)
+        # Embedder for backfill (embed_stale). Lazy so cycles that skip that
+        # phase pay nothing; defaults to the env-configured chain.
+        self._embed_chain = embed_chain
 
-    def run(self, phases: list[str] | None = None,
-            dry_run: bool = False) -> dict:
+    def _get_embed_chain(self):
+        if self._embed_chain is None:
+            from remembrance_mcp.embed.embed import build_embed_chain
+
+            self._embed_chain = build_embed_chain()
+        return self._embed_chain
+
+    def run(self, phases: list[str] | None = None, dry_run: bool = False) -> dict:
         """
         Run the dream cycle.
 
@@ -118,12 +138,14 @@ class DreamCycle:
                 result = self._run_phase(phase, dry_run=dry_run)
                 phase_duration = time.time() - phase_start
 
-                phase_results.append({
-                    "phase": phase,
-                    "status": result.get("status", "ok"),
-                    "duration_ms": int(phase_duration * 1000),
-                    "details": result,
-                })
+                phase_results.append(
+                    {
+                        "phase": phase,
+                        "status": result.get("status", "ok"),
+                        "duration_ms": int(phase_duration * 1000),
+                        "details": result,
+                    }
+                )
 
                 # Accumulate totals
                 for key in totals:
@@ -132,18 +154,21 @@ class DreamCycle:
 
             except Exception as e:
                 logger.error(f"Dream phase {phase} failed: {e}")
-                phase_results.append({
-                    "phase": phase,
-                    "status": "fail",
-                    "duration_ms": 0,
-                    "details": {"error": str(e)},
-                })
+                phase_results.append(
+                    {
+                        "phase": phase,
+                        "status": "fail",
+                        "duration_ms": 0,
+                        "details": {"error": str(e)},
+                    }
+                )
                 status = "partial"
 
         # Complete the dream log
         total_duration = time.time() - started_at
         self.memory_v2.complete_dream_log(
-            log_id, status=status,
+            log_id,
+            status=status,
             phases_run=phases,
             totals=totals,
         )
@@ -170,6 +195,8 @@ class DreamCycle:
             return self._phase_orphan_detect(dry_run)
         elif phase == "embed_stale":
             return self._phase_embed_stale(dry_run)
+        elif phase == "chunk_backfill":
+            return self._phase_chunk_backfill(dry_run)
         elif phase == "purge":
             return self._phase_purge(dry_run)
         else:
@@ -211,7 +238,9 @@ class DreamCycle:
             entities_created += len(wiring_result.get("new_entities", []))
             links_created += wiring_result.get("links", 0)
 
-        logger.info(f"Entity sweep: {len(rows)} memories scanned, {entities_created} new entities, {links_created} links")
+        logger.info(
+            f"Entity sweep: {len(rows)} memories scanned, {entities_created} new entities, {links_created} links"
+        )
 
         return {
             "status": "ok",
@@ -353,17 +382,153 @@ class DreamCycle:
 
     def _phase_embed_stale(self, dry_run: bool = False) -> dict:
         """
-        Phase 6: Re-embed memories whose content changed but
-        embedding is stale.
+        Phase 6: Embedding backfill (semantic-retrieval.md §5.5 "Backfill").
 
-        For V1, this is a placeholder — we don't have embedding
-        generation in the Python service yet (that's in the
-        hybrid search phase).
+        Re-embeds memories whose vector is missing (never embedded, or an embed
+        failed non-blockingly on write) or was produced by a DIFFERENT model
+        than the currently-active one — a model swap leaves old vectors in an
+        incompatible space, so they must be refreshed before they're searchable
+        again. Bounded per run (EMBED_BACKFILL_BATCH) so a large backlog drains
+        over several cycles. Returns a TRUE ``embeddings_refreshed`` count.
         """
+        db_path = self.entity_store.db_path
+        chain = self._get_embed_chain()
+
+        # Probe once to learn the active model, so we can spot wrong-model rows.
+        try:
+            _, _, current_model = chain.embed_text("probe")
+        except Exception as e:
+            logger.warning(f"embed_stale: no embedder available ({e}); skipping")
+            return {"status": "ok", "embeddings_refreshed": 0, "note": "no embedder"}
+
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, content FROM memories
+                WHERE content IS NOT NULL AND content != ''
+                AND (embedding IS NULL OR embedding_model IS NULL
+                     OR embedding_model = '' OR embedding_model != ?)
+                LIMIT ?
+                """,
+                (current_model, EMBED_BACKFILL_BATCH),
+            ).fetchall()
+
+            stale_found = len(rows)
+            if dry_run:
+                return {
+                    "status": "ok",
+                    "embeddings_refreshed": 0,
+                    "stale_found": stale_found,
+                    "note": f"{stale_found} row(s) would be re-embedded with {current_model}",
+                }
+
+            refreshed = 0
+            for r in rows:
+                try:
+                    vec, dim, model_id = chain.embed_text(r["content"])
+                except Exception as e:
+                    # Non-blocking: skip this row, keep draining the rest.
+                    logger.warning(f"embed_stale: failed to embed {r['id']}: {e}")
+                    continue
+                conn.execute(
+                    "UPDATE memories SET embedding = ?, embedding_dim = ?, "
+                    "embedding_model = ? WHERE id = ?",
+                    (vec, dim, model_id, r["id"]),
+                )
+                refreshed += 1
+
         return {
             "status": "ok",
-            "embeddings_refreshed": 0,
-            "note": "Embedding refresh deferred to hybrid search implementation",
+            "embeddings_refreshed": refreshed,
+            "stale_found": stale_found,
+            "model": current_model,
+        }
+
+    def _phase_chunk_backfill(self, dry_run: bool = False) -> dict:
+        """
+        Phase: backfill chunks for existing memories (semantic-retrieval.md §5.4/§5.5).
+
+        Chunk-level search only finds memories that have current-model chunks.
+        Legacy memories captured before chunking existed — or memories left with
+        old-model chunks after a model swap — have none, so they're invisible to
+        vector search until re-chunked. This finds memories lacking any current-
+        model embedded chunk, re-runs chunk_text → embed → store_chunks (which
+        replaces stale chunks), bounded per run. Returns true counts.
+        """
+        db_path = self.entity_store.db_path
+        chain = self._get_embed_chain()
+
+        try:
+            _, _, current_model = chain.embed_text("probe")
+        except Exception as e:
+            logger.warning(f"chunk_backfill: no embedder available ({e}); skipping")
+            return {
+                "status": "ok",
+                "memories_chunked": 0,
+                "chunks_written": 0,
+                "note": "no embedder",
+            }
+
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, content FROM memories
+                WHERE content IS NOT NULL AND content != ''
+                AND NOT EXISTS (
+                    SELECT 1 FROM memory_chunks c
+                    WHERE c.memory_id = memories.id
+                    AND c.embedding_model = ? AND c.embedding IS NOT NULL
+                )
+                LIMIT ?
+                """,
+                (current_model, EMBED_BACKFILL_BATCH),
+            ).fetchall()
+
+        stale_found = len(rows)
+        if dry_run:
+            return {
+                "status": "ok",
+                "memories_chunked": 0,
+                "chunks_written": 0,
+                "stale_found": stale_found,
+                "note": f"{stale_found} memory(ies) would be re-chunked with {current_model}",
+            }
+
+        memories_chunked = 0
+        chunks_written = 0
+        for r in rows:
+            try:
+                contents = chunk_text(r["content"])
+                chunk_rows = []
+                for c in contents:
+                    emb, dim, model = None, None, ""
+                    try:
+                        emb, dim, model = chain.embed_text(c)
+                    except Exception as e:
+                        logger.warning(f"chunk_backfill: embed failed for {r['id']} chunk: {e}")
+                    chunk_rows.append(
+                        {
+                            "content": c,
+                            "embedding": emb,
+                            "embedding_dim": dim,
+                            "embedding_model": model,
+                        }
+                    )
+                chunks_written += self.memory_v2.store_chunks(r["id"], chunk_rows)
+                memories_chunked += 1
+            except Exception as e:
+                # Non-blocking: skip this memory, keep draining the rest.
+                logger.warning(f"chunk_backfill: failed for {r['id']}: {e}")
+                continue
+
+        return {
+            "status": "ok",
+            "memories_chunked": memories_chunked,
+            "chunks_written": chunks_written,
+            "stale_found": stale_found,
+            "model": current_model,
         }
 
     def _phase_purge(self, dry_run: bool = False) -> dict:
@@ -382,8 +547,7 @@ class DreamCycle:
         with sqlite3.connect(str(db_path)) as conn:
             # Delete expired memories past recovery window
             cursor = conn.execute(
-                "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?",
-                (cutoff,)
+                "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?", (cutoff,)
             )
             purged += cursor.rowcount
 
@@ -401,8 +565,8 @@ class DreamCycle:
         Falls back to simple timeline truncation if Ollama is unavailable.
         """
         try:
-            import urllib.request
             import urllib.error
+            import urllib.request
 
             prompt = f"""Synthesize a concise compiled truth summary for {entity_name} from these timeline entries.
 Output ONLY the summary paragraph, no bullet points, no headers.
@@ -410,11 +574,13 @@ Output ONLY the summary paragraph, no bullet points, no headers.
 Timeline:
 {timeline[:2000]}"""
 
-            payload = json.dumps({
-                "model": "nemotron-3-nano:4b",
-                "prompt": prompt,
-                "stream": False,
-            }).encode("utf-8")
+            payload = json.dumps(
+                {
+                    "model": "nemotron-3-nano:4b",
+                    "prompt": prompt,
+                    "stream": False,
+                }
+            ).encode("utf-8")
 
             req = urllib.request.Request(
                 f"{self.ollama_base_url}/api/generate",
