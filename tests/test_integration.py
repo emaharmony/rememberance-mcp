@@ -5,15 +5,12 @@ These tests exercise the full pipeline: gate → extract → graph → search �
 They're the "system tests" that unit tests can't replace.
 """
 
-import json
-import sqlite3
 import tempfile
 import time
 from pathlib import Path
 import pytest
-from remembrance_mcp.pipeline import MemoryPipeline
-from remembrance_mcp.config import Settings
-from remembrance_mcp.gate import MemoryGate
+from recall_mcp.pipeline import MemoryPipeline
+from recall_mcp.config import Settings
 
 
 @pytest.fixture
@@ -28,8 +25,9 @@ def pipeline():
         )
         pipe = MemoryPipeline(settings=settings)
         # Override gate to heuristic-only for fast tests (no Ollama/DilBERT calls)
-        from remembrance_mcp.gate_backends import HeuristicBackend, GateFallbackChain
-        from remembrance_mcp.extract import StubExtractor
+        from recall_mcp.gate_backends import HeuristicBackend, GateFallbackChain
+        from recall_mcp.extract import StubExtractor
+
         pipe.gate_chain = GateFallbackChain([HeuristicBackend()])
         pipe.extractor = StubExtractor()
         yield pipe
@@ -39,32 +37,44 @@ class TestCaptureIntegration:
     """Test the full capture pipeline: gate → extract → graph → store."""
 
     def test_capture_creates_memory(self, pipeline):
-        result = pipeline.capture("Ema decided Prism stays domain-agnostic", source="test")
+        result = pipeline.capture(
+            "Ema decided Prism stays domain-agnostic", source="test"
+        )
         assert result["id"] is not None
         assert result["decision"].lower() in ("persist", "active", "cold", "skip")
         assert result["tier"].lower() in ("persist", "active", "cold", "skip")
 
     def test_capture_detects_entities(self, pipeline):
-        result = pipeline.capture("Ema decided Prism stays domain-agnostic", source="test")
+        result = pipeline.capture(
+            "Ema decided Prism stays domain-agnostic", source="test"
+        )
         # Should detect "ema" and "prism" entities
         assert len(result.get("entities", [])) >= 1
 
     def test_capture_creates_edges(self, pipeline):
-        result = pipeline.capture("Ema decided Prism stays domain-agnostic", source="test")
+        result = pipeline.capture(
+            "Ema decided Prism stays domain-agnostic", source="test"
+        )
         # Should create edges between detected entities
         assert result.get("edges_created", 0) >= 0  # May be 0 if only 1 entity detected
 
     def test_capture_multiple_memories(self, pipeline):
         r1 = pipeline.capture("Ema works on Prism", source="test")
         r2 = pipeline.capture("Mango implements vector search for Prism", source="test")
-        r3 = pipeline.capture("DilBERT gate classifies at 0.929 confidence", source="test")
+        r3 = pipeline.capture(
+            "DilBERT gate classifies at 0.929 confidence", source="test"
+        )
 
         # Count non-SKIP captures
         stored = sum(1 for r in [r1, r2, r3] if r.get("id"))
         assert stored >= 2  # At least 2 should be stored
 
     def test_capture_with_category_override(self, pipeline):
-        result = pipeline.capture("Project update about the architecture decision", source="test", category="general")
+        result = pipeline.capture(
+            "Project update about the architecture decision",
+            source="test",
+            category="general",
+        )
         # Gate/extraction may override category but should still store
         if result.get("id"):
             assert "category" in result
@@ -74,8 +84,14 @@ class TestSearchIntegration:
     """Test hybrid search end-to-end."""
 
     def test_search_finds_memory(self, pipeline):
-        pipeline.capture("Ema decided Prism stays domain-agnostic", source="test", tier="persist")
-        pipeline.capture("DilBERT gate classifies memories at 0.929 confidence", source="test", tier="persist")
+        pipeline.capture(
+            "Ema decided Prism stays domain-agnostic", source="test", tier="persist"
+        )
+        pipeline.capture(
+            "DilBERT gate classifies memories at 0.929 confidence",
+            source="test",
+            tier="persist",
+        )
 
         results = pipeline.hybrid_search.search("Prism", mode="keyword", limit=5)
         # May or may not find results depending on FTS5 availability
@@ -89,14 +105,20 @@ class TestSearchIntegration:
         assert isinstance(results, list)
 
     def test_search_no_results(self, pipeline):
-        results = pipeline.hybrid_search.search("xylophone banana quantum", mode="balanced", limit=5)
+        results = pipeline.hybrid_search.search(
+            "xylophone banana quantum", mode="balanced", limit=5
+        )
         assert len(results) == 0
 
     def test_search_category_filter(self, pipeline):
-        pipeline.capture("Project update about Prism", source="test", category="project")
+        pipeline.capture(
+            "Project update about Prism", source="test", category="project"
+        )
         pipeline.capture("Weather is nice today", source="test", category="general")
 
-        results = pipeline.hybrid_search.search("Prism", mode="keyword", category="project", limit=5)
+        results = pipeline.hybrid_search.search(
+            "Prism", mode="keyword", category="project", limit=5
+        )
         assert isinstance(results, list)  # May be empty in test env
 
     def test_context_build(self, pipeline):
@@ -153,7 +175,7 @@ class TestGraphIntegration:
 
 class TestDreamCycleIntegration:
     """Test dream cycle end-to-end.
-    
+
     NOTE: These tests use the entity_sweep/orphan_detect phases which
     don't require Ollama. The truth_rewrite phase is skipped because it
     needs Ollama which may not be available in test environments.

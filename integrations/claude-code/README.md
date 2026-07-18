@@ -1,56 +1,57 @@
-# Remembrance ↔ Claude Code integration
+# Recall and Claude Code
 
-Give any Claude Code session shared, persistent memory backed by Remembrance.
-Three layers, use any combination:
+Give Claude Code sessions shared, persistent context backed by Recall.
 
-1. **MCP server** — exposes `memory_search`, `memory_capture`, `memory_context_build`,
-   `memory_graph_query`, `memory_dream` as tools Claude can call on demand.
-2. **SessionStart hook** (`inject_context.py`) — automatically injects recalled
-   memory for the current project at the start of every session. No model
-   decision required.
-3. **Stop hook** (`capture_transcript.py`) — automatically captures new
-   conversation into Remembrance at the end of each turn. The Remembrance gate
-   decides what is worth keeping, so it is safe to forward everything.
+The integration has three independent layers:
 
-Both hook scripts are pure stdlib, run under any Python 3, and **never block a
-session** — if Remembrance is down they exit silently.
+1. The Recall MCP server exposes memory tools on demand.
+2. inject_context.py searches at SessionStart and adds project context.
+3. capture_transcript.py forwards new user and assistant text at Stop.
+
+The hooks are best-effort and write protocol output only when they have valid context to inject. Compatibility warnings and diagnostics go to stderr.
 
 ## Prerequisites
 
-Remembrance running on `http://127.0.0.1:18790` (override with `REMEMBRANCE_URL`):
+Start Recall on the integration port:
 
-```
-python -m remembrance_mcp.serve --host 127.0.0.1 --port 18790 --no-nats
-# or, from Prism:  prism remembrance serve
-```
+~~~bash
+recall-service --host 127.0.0.1 --port 18790 --no-nats
+~~~
 
-## 1. Register the MCP server
+Override the hook URL with RECALL_URL.
 
-```bash
-claude mcp add remembrance --scope user -- \
-  "D:/_projects_/remembrance-mcp/.venv/Scripts/python.exe" -m remembrance_mcp
-```
+## Register the MCP server
 
-On this Windows setup, the user-scoped Claude entry uses the included wrapper so
-the MCP subprocess gets the correct working directory and Remembrance
-environment:
+~~~bash
+claude mcp add recall --scope user -- recall-mcp
+~~~
 
-```powershell
-claude mcp add remembrance --scope user -- `
-  D:\_projects_\remembrance-mcp\integrations\claude-code\remembrance_mcp_stdio.cmd
-```
+For a source checkout on Windows, use the canonical wrapper:
 
-## 2. Add the hooks
+~~~powershell
+claude mcp add recall --scope user -- D:\path\to\recall\integrations\claude-code\recall_mcp_stdio.cmd
+~~~
 
-Merge `settings.snippet.json` into `~/.claude/settings.json` (user scope = all
-projects) or a project `.claude/settings.json`. Paths must be absolute. The
-`project_id` is derived automatically from each session's working directory.
+The deprecated remembrance_mcp_stdio.cmd filename delegates to the canonical wrapper.
 
-## Notes
+## Install hooks
 
-- The Stop hook tracks a per-session cursor under `~/.remembrance/.cc_cursors/`
-  so it only captures *new* messages, never duplicates the whole transcript.
-- Only `text` from user/assistant messages is captured — tool calls, tool
-  results, and thinking are ignored.
-- To scope memory per project, install the hooks in that project's
-  `.claude/settings.json` instead of the user file.
+Edit the paths in settings.snippet.json, then merge its hooks table into either:
+
+- ~/.claude/settings.json for all projects
+- .claude/settings.json for one project
+
+Keep integrations/compat_env.py with the hook scripts. It centralizes RECALL_URL, RECALL_TIMEOUT, RECALL_INJECT_LIMIT, and safe home-directory fallbacks.
+
+The Stop hook stores cursors and temporary outbox files under the resolved Recall home. If only the legacy home exists, it keeps using that directory in place.
+
+## Environment
+
+| Variable | Default |
+| --- | --- |
+| RECALL_URL | http://127.0.0.1:18790 |
+| RECALL_TIMEOUT | 30 seconds for capture, 6 seconds for injection |
+| RECALL_INJECT_LIMIT | 8 |
+| RECALL_HOME | safe home-resolution order |
+
+Matching REMEMBRANCE_* names remain lower-priority fallbacks during migration.

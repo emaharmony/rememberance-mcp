@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"D:/_projects_/remembrance-mcp/.venv/Scripts/python.exe\" \"D:/_projects_/remembrance-mcp/integrations/claude-code/inject_context.py\""
+            "command": "\"D:/path/to/recall/.venv/Scripts/python.exe\" \"D:/path/to/recall/integrations/claude-code/inject_context.py\""
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"D:/_projects_/remembrance-mcp/.venv/Scripts/python.exe\" \"D:/_projects_/remembrance-mcp/integrations/claude-code/capture_transcript.py\""
+            "command": "\"D:/path/to/recall/.venv/Scripts/python.exe\" \"D:/path/to/recall/integrations/claude-code/capture_transcript.py\""
           }
         ]
       }

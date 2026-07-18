@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Codex Stop hook — capture the turn into Remembrance.
+"""Codex Stop hook — capture the turn into Recall.
 
 Codex's Stop event hands the hook `last_assistant_message` directly (it does
 NOT pass a transcript path like Claude Code does), so this captures that final
-message per turn and forwards it to Remembrance's /capture endpoint. The gate
+message per turn and forwards it to Recall's /capture endpoint. The gate
 decides what is worth keeping (SKIP/COLD/ACTIVE/PERSIST), so it is safe to
 forward every turn — trivial ones are dropped, and one message per Stop means
 captures are naturally deduplicated without a cursor.
@@ -16,9 +16,10 @@ Pure stdlib — runs under any Python 3. Never blocks a session: any failure
 exits 0.
 
 Env:
-  REMEMBRANCE_URL      base URL of the service (default 127.0.0.1:18790)
-  REMEMBRANCE_TIMEOUT  HTTP timeout seconds (default 30)
+  RECALL_URL      base URL of the service (default 127.0.0.1:18790)
+  RECALL_TIMEOUT  HTTP timeout seconds (default 30)
 """
+
 from __future__ import annotations
 
 import json
@@ -29,9 +30,12 @@ import sys
 import tempfile
 import urllib.request
 
-REMEMBRANCE_URL = os.environ.get("REMEMBRANCE_URL", "http://127.0.0.1:18790").rstrip("/")
-TIMEOUT = float(os.environ.get("REMEMBRANCE_TIMEOUT", "30"))
-HOME = pathlib.Path(os.path.expanduser("~/.remembrance"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from compat_env import get_env, resolve_home  # noqa: E402
+
+RECALL_URL = get_env("URL", "http://127.0.0.1:18790").rstrip("/")
+TIMEOUT = float(get_env("TIMEOUT", "30"))
+HOME = resolve_home()
 OUTBOX_DIR = HOME / ".codex_outbox"
 MIN_CHARS = 20
 
@@ -47,7 +51,7 @@ def _send(payload_path: str) -> int:
         with open(payload_path, "rb") as f:
             data = f.read()
         req = urllib.request.Request(
-            REMEMBRANCE_URL + "/capture",
+            RECALL_URL + "/capture",
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -55,7 +59,7 @@ def _send(payload_path: str) -> int:
         urllib.request.urlopen(req, timeout=TIMEOUT).read()
     except Exception as exc:
         if os.environ.get("REM_DEBUG"):
-            sys.stderr.write(f"remembrance capture failed: {type(exc).__name__}: {exc}\n")
+            sys.stderr.write(f"recall capture failed: {type(exc).__name__}: {exc}\n")
     finally:
         try:
             os.remove(payload_path)
@@ -123,11 +127,13 @@ def main() -> int:
         return 0
 
     project = _project_from_cwd(event.get("cwd", ""))
-    payload = json.dumps({
-        "text": text,
-        "source": f"codex:{project}",
-        "category": project,
-    })
+    payload = json.dumps(
+        {
+            "text": text,
+            "source": f"codex:{project}",
+            "category": project,
+        }
+    )
 
     OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
     fd, payload_path = tempfile.mkstemp(suffix=".json", dir=str(OUTBOX_DIR))

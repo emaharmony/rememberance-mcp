@@ -2,13 +2,12 @@
 Tests for EntityStore — Entity Registry + Typed Edges + Graph Traversal
 """
 
-import json
 import sqlite3
 import tempfile
 import time
 from pathlib import Path
 import pytest
-from remembrance_mcp.store.edges import EntityStore, Entity, Edge, ENTITY_TYPES, EDGE_TYPES
+from recall_mcp.store.edges import EntityStore
 
 
 @pytest.fixture
@@ -73,17 +72,19 @@ class TestEntityCRUD:
 
     def test_update_entity(self, store):
         store.create_entity("Ema", "person")
-        store.update_entity("ema", compiled_truth="Senior dev transitioning to AI engineering")
+        store.update_entity(
+            "ema", compiled_truth="Senior dev transitioning to AI engineering"
+        )
 
         entity = store.get_entity("ema")
         assert entity["compiled_truth"] == "Senior dev transitioning to AI engineering"
 
     def test_add_timeline_entry(self, store):
         store.create_entity("Ema", "person")
-        store.add_timeline_entry("ema", "Defined Remembrance V2 architecture", source="Lumi")
+        store.add_timeline_entry("ema", "Defined Recall V2 architecture", source="Lumi")
 
         entity = store.get_entity("ema")
-        assert "Defined Remembrance V2 architecture" in entity["timeline"]
+        assert "Defined Recall V2 architecture" in entity["timeline"]
         assert "[Source: Lumi]" in entity["timeline"]
 
     def test_delete_entity_cascades(self, store):
@@ -120,7 +121,9 @@ class TestEdges:
         store.create_entity("Ema", "person")
         store.create_entity("Prism", "project")
 
-        result = store.add_edge("ema", "prism", "works_on", evidence="Ema leads Prism development")
+        result = store.add_edge(
+            "ema", "prism", "works_on", evidence="Ema leads Prism development"
+        )
         assert result is True
 
         edges = store.get_edges("ema", direction="outgoing")
@@ -226,7 +229,12 @@ class TestMemoryEntityLinks:
             """)
             conn.execute(
                 "INSERT INTO memories (id, content, created_at, accessed_at) VALUES (?, ?, ?, ?)",
-                ("mem_123", "Ema decided Prism stays domain-agnostic", time.time(), time.time())
+                (
+                    "mem_123",
+                    "Ema decided Prism stays domain-agnostic",
+                    time.time(),
+                    time.time(),
+                ),
             )
 
         store.create_entity("Ema", "person")

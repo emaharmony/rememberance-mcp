@@ -1,0 +1,61 @@
+name: Recall signed release
+
+on:
+  push:
+    tags: ["v2.1.*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip "setuptools>=83" wheel build cyclonedx-bom
+      - name: Build reproducible distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          python -m build --outdir dist-first
+          python -m build --outdir dist-second
+          first_wheel="$(find dist-first -maxdepth 1 -name '*.whl' -print -quit)"
+          second_wheel="$(find dist-second -maxdepth 1 -name '*.whl' -print -quit)"
+          cmp "$first_wheel" "$second_wheel"
+          mkdir -p dist
+          cp dist-first/* dist/
+      - name: Verify install and create release evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install "dist/"*.whl
+          recall-admin version
+          sha256sum dist/* > SHA256SUMS
+          cyclonedx-py environment --of JSON -o sbom.json
+      - name: Sign wheel with GitHub OIDC
+        uses: sigstore/gh-action-sigstore-python@v3.2.0
+        with:
+          inputs: dist/*.whl
+          verify: true
+          verify-cert-identity: >-
+            https://github.com/emaharmony/remembrance/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
+          verify-oidc-issuer: https://token.actions.githubusercontent.com
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          dist/*
+          SHA256SUMS
+          sbom.json
+          --verify-tag
+          --generate-notes

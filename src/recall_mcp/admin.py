@@ -1,0 +1,503 @@
+"""Administrative CLI for Recall production operations."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+from contextlib import contextmanager
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import sqlite3
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from recall_mcp.config import Settings
+from recall_mcp.api.security import verify_token_file_permissions
+
+from recall_mcp.store import MemoryStore
+
+VERSION = "2.1.0"
+
+
+def _sqlite_backup(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source_conn = sqlite3.connect(str(source))
+    destination_conn = sqlite3.connect(str(destination))
+    try:
+        source_conn.backup(destination_conn)
+    finally:
+        destination_conn.close()
+        source_conn.close()
+
+
+def _integrity(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    with sqlite3.connect(str(path)) as connection:
+        return str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_secret(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(value + "\n", encoding="utf-8")
+    if os.name != "nt":
+        temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+def _run_nats_cli(settings: Settings, args: argparse.Namespace, *command: str) -> None:
+    executable = str(getattr(args, "nats_cli", "nats"))
+    invocation = [executable, "--server", settings.NATS_URL]
+    if settings.NATS_CREDS_FILE:
+        invocation.extend(["--creds", str(settings.NATS_CREDS_FILE)])
+    invocation.extend(command)
+    subprocess.run(invocation, check=True)
+
+
+def _verify_manifest(directory: Path) -> None:
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.exists():
+        raise SystemExit("backup manifest is missing")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for item in manifest.get("files", []):
+        candidate = directory / item["name"]
+        if not candidate.is_file() or _sha256(candidate) != item["sha256"]:
+            raise SystemExit(f"backup checksum failed for {item['name']}")
+
+
+def _extract_backup_archive(archive: tarfile.TarFile, extraction_root: Path) -> None:
+    """Extract only bounded regular files and directories below the target."""
+
+    root = extraction_root.resolve()
+    members = archive.getmembers()
+    if len(members) > 10_000:
+        raise SystemExit("backup archive contains too many entries")
+    if sum(max(0, member.size) for member in members) > 100 * 1024**3:
+        raise SystemExit("backup archive is too large")
+
+    for member in members:
+        target = (extraction_root / member.name).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise SystemExit("backup archive contains an unsafe path") from exc
+
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if not member.isfile():
+            raise SystemExit("backup archive contains an unsafe entry")
+
+        payload = archive.extractfile(member)
+        if payload is None:
+            raise SystemExit("backup archive contains an unreadable file")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with target.open("xb") as destination:
+                shutil.copyfileobj(payload, destination, length=1024 * 1024)
+        finally:
+            payload.close()
+
+
+@contextmanager
+def _materialize_backup(source: Path, args: argparse.Namespace):
+    if source.suffix.lower() != ".age":
+        yield source
+        return
+
+    identity = getattr(args, "age_identity", None)
+    if identity is None:
+        raise SystemExit("--age-identity is required for encrypted backups")
+    age_executable = str(getattr(args, "age_exe", "age"))
+    with tempfile.TemporaryDirectory(prefix="recall-restore-") as temporary:
+        temporary_path = Path(temporary)
+        archive_path = temporary_path / "backup.tar.gz"
+        subprocess.run(
+            [
+                age_executable,
+                "--decrypt",
+                "--identity",
+                str(identity),
+                "--output",
+                str(archive_path),
+                str(source),
+            ],
+            check=True,
+        )
+        extraction_root = temporary_path / "extracted"
+        extraction_root.mkdir()
+        with tarfile.open(archive_path, "r:gz") as archive:
+            _extract_backup_archive(archive, extraction_root)
+
+        children = list(extraction_root.iterdir())
+        materialized = (
+            children[0]
+            if len(children) == 1 and children[0].is_dir()
+            else extraction_root
+        )
+        yield materialized
+
+
+def _encrypt_backup(destination: Path, recipient: str, age_executable: str) -> Path:
+    archive = Path(
+        shutil.make_archive(
+            str(destination),
+            "gztar",
+            root_dir=destination.parent,
+            base_dir=destination.name,
+        )
+    )
+    encrypted = destination.parent / f"{destination.name}.tar.gz.age"
+    try:
+        subprocess.run(
+            [
+                age_executable,
+                "--recipient",
+                recipient,
+                "--output",
+                str(encrypted),
+                str(archive),
+            ],
+            check=True,
+        )
+    finally:
+        archive.unlink(missing_ok=True)
+    return encrypted
+
+
+def command_init(settings: Settings, args: argparse.Namespace) -> int:
+    for name in ("models", "brain", "backups", "logs", "secrets"):
+        (settings.BASE_DIR / name).mkdir(parents=True, exist_ok=True)
+    token_file = args.token_file or settings.API_TOKEN_FILE
+    if token_file is None:
+        token_file = settings.BASE_DIR / "secrets" / "api-token"
+    if not token_file.exists():
+        _write_secret(token_file, secrets.token_urlsafe(48))
+    from recall_mcp.pipeline import MemoryPipeline
+
+    MemoryPipeline(settings)
+    print(json.dumps({"home": str(settings.BASE_DIR), "token_file": str(token_file)}))
+    return 0
+
+
+def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
+    integrity = MemoryStore(settings.DB_PATH).integrity_report(quick=True)
+    checks: dict[str, object] = {
+        "version": VERSION,
+        "home": str(settings.BASE_DIR),
+        "database": str(settings.DB_PATH),
+        "database_integrity": integrity,
+    }
+    token_file = args.token_file or settings.API_TOKEN_FILE
+    checks["token_file"] = str(token_file) if token_file else None
+    checks["token_present"] = bool(
+        settings.API_TOKEN or (token_file and token_file.exists())
+    )
+    checks["token_permissions_ok"] = (
+        True if token_file is None else verify_token_file_permissions(token_file)
+    )
+
+    try:
+        with urllib.request.urlopen(
+            f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/tags", timeout=3
+        ) as response:
+            checks["ollama"] = response.status == 200
+    except (OSError, urllib.error.URLError):
+        checks["ollama"] = False
+
+    network_safe = (
+        settings.HOST in {"127.0.0.1", "::1", "localhost"} or checks["token_present"]
+    )
+    checks["ready"] = bool(
+        integrity["ok"] and network_safe and checks["token_permissions_ok"]
+    )
+    print(json.dumps(checks, indent=2))
+    return 0 if checks["ready"] else 1
+
+
+def command_migrate(settings: Settings, _args: argparse.Namespace) -> int:
+    from recall_mcp.pipeline import MemoryPipeline
+
+    pipeline = MemoryPipeline(settings)
+    print(json.dumps(pipeline.stats(), indent=2))
+    return 0
+
+
+def command_models_pull(settings: Settings, _args: argparse.Namespace) -> int:
+    models = list(dict.fromkeys([settings.EXTRACT_MODEL, settings.EMBED_MODEL]))
+    for model in models:
+        payload = json.dumps({"name": model, "stream": False}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/pull",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(
+            request, timeout=max(300, settings.OLLAMA_TIMEOUT_SECONDS)
+        ):
+            pass
+        print(f"pulled {model}")
+    return 0
+
+
+async def _bootstrap_nats(settings: Settings) -> None:
+    import nats
+    from nats.js.api import AckPolicy, ConsumerConfig, StorageType
+    from nats.js.errors import NotFoundError
+
+    options: dict[str, Any] = {"servers": [settings.NATS_URL]}
+    if settings.NATS_CREDS_FILE:
+        options["user_credentials"] = str(settings.NATS_CREDS_FILE)
+    client = await nats.connect(**options)
+    try:
+        jetstream = client.jetstream()
+        required_subjects = {
+            settings.NATS_SUBJECT,
+            settings.NATS_DLQ_SUBJECT,
+        }
+        try:
+            stream_info = await jetstream.stream_info(settings.NATS_STREAM)
+        except NotFoundError:
+            await jetstream.add_stream(
+                name=settings.NATS_STREAM,
+                subjects=sorted(required_subjects),
+                storage=StorageType.FILE,
+            )
+        else:
+            configured = set(stream_info.config.subjects or [])
+            if not required_subjects.issubset(configured):
+                stream_info.config.subjects = sorted(configured | required_subjects)
+                await jetstream.update_stream(config=stream_info.config)
+
+        try:
+            await jetstream.consumer_info(settings.NATS_STREAM, settings.NATS_CONSUMER)
+        except NotFoundError:
+            config = ConsumerConfig(
+                durable_name=settings.NATS_CONSUMER,
+                filter_subject=settings.NATS_SUBJECT,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=60,
+                max_ack_pending=64,
+                max_deliver=10,
+                backoff=[1, 5, 15, 30, 60, 120, 300, 300, 300, 300],
+            )
+            await jetstream.add_consumer(settings.NATS_STREAM, config)
+    finally:
+        await client.drain()
+
+
+def command_nats_bootstrap(settings: Settings, _args: argparse.Namespace) -> int:
+    asyncio.run(_bootstrap_nats(settings))
+    print(f"bootstrapped {settings.NATS_STREAM}/{settings.NATS_CONSUMER}")
+    return 0
+
+
+def command_token_rotate(settings: Settings, args: argparse.Namespace) -> int:
+    current = args.token_file or settings.API_TOKEN_FILE
+    if current is None:
+        raise SystemExit("configure --token-file or RECALL_API_TOKEN_FILE")
+    previous = settings.PREVIOUS_API_TOKEN_FILE or current.with_name(
+        current.name + ".previous"
+    )
+    if current.exists():
+        previous.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(current, previous)
+        if os.name != "nt":
+            previous.chmod(0o600)
+    _write_secret(current, secrets.token_urlsafe(48))
+    print(json.dumps({"current": str(current), "previous": str(previous)}))
+    return 0
+
+
+def command_backup(settings: Settings, args: argparse.Namespace) -> int:
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    requested = getattr(args, "destination", None)
+    destination = requested or settings.BASE_DIR / "backups" / stamp
+    destination.mkdir(parents=True, exist_ok=True)
+    files: list[dict[str, str]] = []
+    for source in (settings.DB_PATH, settings.BASE_DIR / "metrics.db"):
+        if not source.exists():
+            continue
+        target = destination / source.name
+        _sqlite_backup(source, target)
+        files.append({"name": target.name, "sha256": _sha256(target)})
+
+    nats_included = bool(getattr(args, "include_nats", False))
+    if nats_included:
+        _run_nats_cli(
+            settings,
+            args,
+            "stream",
+            "backup",
+            settings.NATS_STREAM,
+            str(destination / "nats"),
+        )
+        for snapshot_file in sorted((destination / "nats").rglob("*")):
+            if snapshot_file.is_file():
+                files.append(
+                    {
+                        "name": snapshot_file.relative_to(destination).as_posix(),
+                        "sha256": _sha256(snapshot_file),
+                    }
+                )
+
+    manifest = {
+        "version": VERSION,
+        "created_at": time.time(),
+        "source_home": str(settings.BASE_DIR),
+        "nats_included": nats_included,
+        "files": files,
+    }
+    (destination / "manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+
+    encrypted = None
+    recipient = getattr(args, "age_recipient", None)
+    if recipient:
+        encrypted = _encrypt_backup(
+            destination,
+            recipient,
+            str(getattr(args, "age_exe", "age")),
+        )
+    print(
+        json.dumps(
+            {
+                "backup": str(destination),
+                "encrypted": str(encrypted) if encrypted else None,
+            }
+        )
+    )
+    return 0
+
+
+def command_restore(settings: Settings, args: argparse.Namespace) -> int:
+    with _materialize_backup(args.source, args) as materialized:
+        if materialized.is_dir():
+            _verify_manifest(materialized)
+            source = materialized / "memory.db"
+            nats_backup = materialized / "nats"
+        else:
+            source = materialized
+            nats_backup = None
+
+        if _integrity(source) != "ok":
+            raise SystemExit("backup database failed integrity_check")
+        if settings.DB_PATH.exists() and not getattr(args, "force", False):
+            raise SystemExit("target exists; pass --force after taking a backup")
+        _sqlite_backup(source, settings.DB_PATH)
+
+        if (
+            getattr(args, "include_nats", False)
+            and nats_backup is not None
+            and nats_backup.exists()
+        ):
+            _run_nats_cli(settings, args, "stream", "restore", str(nats_backup))
+
+    report = MemoryStore(settings.DB_PATH).integrity_report()
+    print(json.dumps({"restored": str(settings.DB_PATH), **report}))
+    return 0 if report["ok"] else 1
+
+
+def command_integrity(settings: Settings, _args: argparse.Namespace) -> int:
+    result = MemoryStore(settings.DB_PATH).integrity_report()
+    print(json.dumps(result, indent=2))
+    return 0 if result["ok"] else 1
+
+
+def command_reembed(settings: Settings, args: argparse.Namespace) -> int:
+    from recall_mcp.pipeline import MemoryPipeline
+
+    pipeline = MemoryPipeline(settings)
+    result = pipeline.dream(phases=["embed_stale"], dry_run=args.dry_run)
+    print(json.dumps(result, indent=2))
+    return 0 if result["status"] in {"ok", "partial"} else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="recall-admin")
+    parser.add_argument("--home", type=Path)
+    parser.add_argument("--token-file", type=Path)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("init")
+    subparsers.add_parser("doctor")
+    subparsers.add_parser("migrate")
+    models = subparsers.add_parser("models")
+    models.add_argument("action", choices=["pull"])
+    nats_parser = subparsers.add_parser("nats")
+    nats_parser.add_argument("action", choices=["bootstrap"])
+    token = subparsers.add_parser("token")
+    token.add_argument("action", choices=["rotate"])
+    backup = subparsers.add_parser("backup")
+    backup.add_argument("destination", type=Path, nargs="?")
+    backup.add_argument("--include-nats", action="store_true")
+    backup.add_argument("--nats-cli", default="nats")
+    backup.add_argument("--age-recipient")
+    backup.add_argument("--age-exe", default="age")
+    restore = subparsers.add_parser("restore")
+    restore.add_argument("source", type=Path)
+    restore.add_argument("--force", action="store_true")
+    restore.add_argument("--include-nats", action="store_true")
+    restore.add_argument("--nats-cli", default="nats")
+    restore.add_argument("--age-identity", type=Path)
+    restore.add_argument("--age-exe", default="age")
+    subparsers.add_parser("integrity-check")
+    reembed = subparsers.add_parser("reembed")
+    reembed.add_argument("--dry-run", action="store_true")
+    subparsers.add_parser("version")
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.home:
+        os.environ["RECALL_HOME"] = str(args.home)
+    if args.token_file:
+        os.environ["RECALL_API_TOKEN_FILE"] = str(args.token_file)
+    settings = Settings()
+
+    commands = {
+        "init": command_init,
+        "doctor": command_doctor,
+        "migrate": command_migrate,
+        "backup": command_backup,
+        "restore": command_restore,
+        "integrity-check": command_integrity,
+        "reembed": command_reembed,
+    }
+    if args.command == "models":
+        code = command_models_pull(settings, args)
+    elif args.command == "nats":
+        code = command_nats_bootstrap(settings, args)
+    elif args.command == "token":
+        code = command_token_rotate(settings, args)
+    elif args.command == "version":
+        print(VERSION)
+        code = 0
+    else:
+        code = commands[args.command](settings, args)
+    raise SystemExit(code)
+
+
+if __name__ == "__main__":
+    main()

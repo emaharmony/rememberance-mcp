@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Claude Code Stop hook — capture new conversation into Remembrance.
+"""Claude Code Stop hook — capture new conversation into Recall.
 
 Reads the Stop hook event from stdin, collects the messages added to the
 session transcript since the last run (tracked by a per-session cursor), and
-hands them to Remembrance's /capture endpoint. The Remembrance gate decides
+hands them to Recall's /capture endpoint. The Recall gate decides
 what is worth keeping (SKIP/COLD/ACTIVE/PERSIST), so it is safe to forward
 everything new.
 
@@ -16,8 +16,9 @@ exits 0. Only `text` blocks from user/assistant messages are captured; tool
 calls, results, and thinking are ignored.
 
 Env:
-  REMEMBRANCE_URL   base URL of the Remembrance service (default 127.0.0.1:18790)
+  RECALL_URL   base URL of the Recall service (default 127.0.0.1:18790)
 """
+
 from __future__ import annotations
 
 import json
@@ -28,9 +29,12 @@ import sys
 import tempfile
 import urllib.request
 
-REMEMBRANCE_URL = os.environ.get("REMEMBRANCE_URL", "http://127.0.0.1:18790").rstrip("/")
-TIMEOUT = float(os.environ.get("REMEMBRANCE_TIMEOUT", "30"))
-HOME = pathlib.Path(os.path.expanduser("~/.remembrance"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from compat_env import get_env, resolve_home  # noqa: E402
+
+RECALL_URL = get_env("URL", "http://127.0.0.1:18790").rstrip("/")
+TIMEOUT = float(get_env("TIMEOUT", "30"))
+HOME = resolve_home()
 CURSOR_DIR = HOME / ".cc_cursors"
 OUTBOX_DIR = HOME / ".cc_outbox"
 MIN_CHARS = 20
@@ -68,7 +72,7 @@ def _send(payload_path: str) -> int:
         with open(payload_path, "rb") as f:
             data = f.read()
         req = urllib.request.Request(
-            REMEMBRANCE_URL + "/capture",
+            RECALL_URL + "/capture",
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -76,7 +80,7 @@ def _send(payload_path: str) -> int:
         urllib.request.urlopen(req, timeout=TIMEOUT).read()
     except Exception as exc:
         if os.environ.get("REM_DEBUG"):
-            sys.stderr.write(f"remembrance capture failed: {type(exc).__name__}: {exc}\n")
+            sys.stderr.write(f"recall capture failed: {type(exc).__name__}: {exc}\n")
     finally:
         try:
             os.remove(payload_path)
@@ -188,11 +192,13 @@ def main() -> int:
     if len(blob) < MIN_CHARS:
         return 0
 
-    payload = json.dumps({
-        "text": blob,
-        "source": f"claude-code:{project}",
-        "category": project,
-    })
+    payload = json.dumps(
+        {
+            "text": blob,
+            "source": f"claude-code:{project}",
+            "category": project,
+        }
+    )
 
     OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
     fd, payload_path = tempfile.mkstemp(suffix=".json", dir=str(OUTBOX_DIR))

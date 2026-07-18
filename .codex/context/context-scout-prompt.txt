@@ -1,0 +1,58 @@
+You are a local context scout. Produce a compact, task-specific codebase review context pack.
+
+Task: Review this Python codebase, rate it from 1-10, identify weaknesses and incomplete features, and form a plan to implement missing work and harden it until it scores above 9.
+
+Repository state:
+- Branch: refactor/rename-to-recall
+- The working tree contains an in-progress rename from src/remembrance_mcp to src/recall_mcp. Old tracked modules are deleted, new recall_mcp modules are currently untracked, and compatibility shims remain under remembrance_mcp. Do not treat intentional rename churn alone as a defect, but identify migration risks.
+- Current package manifest: recall-mcp 2.0.0, Python >=3.10, setuptools. Optional extras: mcp, nats, gate(torch/transformers), dev(pytest). Console scripts expose recall, recall-mcp, recall-service, remembrance-mcp, remembrance-service.
+
+Primary source files and entry points:
+- src/recall_mcp/__init__.py: public exports and main()
+- src/recall_mcp/__main__.py
+- src/recall_mcp/serve.py: service CLI
+- src/recall_mcp/server.py: MCP create_server()
+- src/recall_mcp/api/rest.py: RecallHandler, start_rest_api()
+- src/recall_mcp/pipeline.py: MemoryPipeline
+- src/recall_mcp/config.py: Settings
+- src/recall_mcp/compat.py: environment/home compatibility
+- src/recall_mcp/store/{store,memory,edges,facts,markdown}.py
+- src/recall_mcp/search/hybrid.py: HybridSearch
+- src/recall_mcp/graph/{entity,edges,traversal}.py
+- src/recall_mcp/dream/cycle.py: DreamCycle
+- src/recall_mcp/extract/extract.py: BaseExtractor, OllamaExtractor, StubExtractor
+- src/recall_mcp/gate/{gate,ollama}.py and gate_backends.py
+- src/recall_mcp/registry.py: backend registration/building
+- src/recall_mcp/nats_sub.py: NatsSubscriber
+- src/remembrance_mcp/{__init__,__main__}.py: legacy namespace shims
+- integrations/{codex,claude-code,windows}
+
+Tests:
+- unit/integration coverage exists for entities, entity store, fact store, hybrid search, pipeline integration, markdown sync, MCP server startup, Ollama gate, Prism REST compatibility, REST API, RRF edge cases, and rename compatibility.
+- No visible CI config, type checker config, security tooling, changelog, contributing guide, or release automation in the file list.
+
+Notable search hits:
+- src/recall_mcp/search/hybrid.py: vector search is explicitly a placeholder and needs embedding generation (around lines 217 and 304).
+- src/recall_mcp/dream/cycle.py: consolidation is described as a V1 placeholder because embeddings are unavailable (around line 370).
+- src/recall_mcp/pipeline.py: extractor supports Ollama with StubExtractor fallback; warning says Ollama unavailable, using stub (around lines 81-90).
+- src/recall_mcp/graph/entity.py: LLM-based entity extraction deferred as an optional future second pass.
+- Broad exception swallowing/pass occurs in nats_sub.py, store/memory.py, search/hybrid.py, and integration hook scripts.
+
+Important source sizes:
+- store/edges.py 26 KB; server.py 21 KB; gate_backends.py 20 KB; search/hybrid.py 19.5 KB; api/rest.py 17.6 KB; dream/cycle.py 16 KB; store/memory.py 14.8 KB; pipeline.py 12.5 KB.
+
+Available symbols:
+- Gate backends: HeuristicBackend, OpenAIBackend, DilBERTBackend, GateFallbackChain, OllamaGateBackend.
+- Storage: MemoryStore (legacy/basic), MemoryStoreV2, EntityStore, FactStore, MarkdownSync.
+- Graph: EntityDetector, GraphWiring, GraphTraversal.
+- Search: HybridSearch, SearchResult.
+
+Return only a compact Markdown context pack containing:
+1. Relevant files ranked by review importance.
+2. Likely entry points and architecture/data flow.
+3. Important functions/classes and what to verify.
+4. Concrete incomplete-feature hypotheses from the evidence.
+5. Quality/security/reliability/testing/release risks and unknowns.
+6. The smallest recommended set of files/snippets/checks to inspect next.
+
+Do not invent findings. Clearly label hypotheses and unknowns.

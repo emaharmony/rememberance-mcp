@@ -5,9 +5,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"D:/_projects_/remembrance-mcp/.venv/Scripts/python.exe\" \"D:/_projects_/remembrance-mcp/integrations/codex/recall_session.py\"",
+            "command": "\"D:/path/to/recall/.venv/Scripts/python.exe\" \"D:/path/to/recall/integrations/codex/recall_session.py\"",
             "timeoutSec": 10,
-            "statusMessage": "Recalling Remembrance memory"
+            "statusMessage": "Recalling Recall memory"
           }
         ]
       }
@@ -17,9 +17,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"D:/_projects_/remembrance-mcp/.venv/Scripts/python.exe\" \"D:/_projects_/remembrance-mcp/integrations/codex/capture_turn.py\"",
+            "command": "\"D:/path/to/recall/.venv/Scripts/python.exe\" \"D:/path/to/recall/integrations/codex/capture_turn.py\"",
             "timeoutSec": 10,
-            "statusMessage": "Capturing turn to Remembrance"
+            "statusMessage": "Capturing turn to Recall"
           }
         ]
       }

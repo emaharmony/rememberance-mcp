@@ -1,4 +1,4 @@
-"""Run the Remembrance MCP stdio server with ``python -m remembrance_mcp``."""
+"""Run the deprecated Remembrance CLI through Recall."""
 
 from remembrance_mcp import main
 

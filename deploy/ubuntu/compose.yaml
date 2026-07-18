@@ -1,0 +1,74 @@
+name: recall
+
+services:
+  recall:
+    build:
+      context: ../..
+      dockerfile: deploy/ubuntu/Dockerfile
+    image: recall-mcp:2.1.0
+    restart: unless-stopped
+    env_file:
+      - recall.env
+    environment:
+      RECALL_HOST: 0.0.0.0
+      RECALL_PORT: 8788
+      RECALL_HOME: /var/lib/recall
+      RECALL_API_TOKEN_FILE: /var/lib/recall/secrets/api-token
+      RECALL_OLLAMA_URL: http://ollama:11434
+      RECALL_EMBEDDINGS_ENABLED: "true"
+    command: ["--host", "0.0.0.0", "--port", "8788"]
+    secrets:
+      - recall-api-token
+    volumes:
+      - /var/lib/recall/data:/var/lib/recall
+    ports:
+      - "127.0.0.1:8788:8788"
+    depends_on:
+      ollama:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/health/live', timeout=2)"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:0.11.10
+    restart: unless-stopped
+    volumes:
+      - /var/lib/recall/ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  nats:
+    image: nats:2.11.8-alpine
+    restart: unless-stopped
+    command: ["-c", "/etc/nats/nats.conf"]
+    env_file:
+      - recall.env
+    volumes:
+      - /var/lib/recall/nats:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+secrets:
+  recall-api-token:
+    file: ./secrets/api-token

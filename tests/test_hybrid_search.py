@@ -5,12 +5,11 @@ Tests for HybridSearch — FTS5 + Vector + Graph + RRF
 import sqlite3
 import tempfile
 import time
-import json
 from contextlib import closing
 from pathlib import Path
 import pytest
-from remembrance_mcp.search.hybrid import HybridSearch, TIER_BOOST
-from remembrance_mcp.store.edges import EntityStore
+from recall_mcp.search.hybrid import HybridSearch, TIER_BOOST
+from recall_mcp.store.edges import EntityStore
 
 
 @pytest.fixture
@@ -48,24 +47,56 @@ def search_env():
             # Insert test memories
             now = time.time()
             memories = [
-                ("mem_1", "Ema decided Prism stays domain-agnostic", "Prism stays domain-agnostic", "project", "persist"),
-                ("mem_2", "Mango implements vector search for Prism", "Vector search implementation", "project", "active"),
-                ("mem_3", "Remembrance V2 uses SQLite and FTS5", "SQLite + FTS5 architecture", "project", "active"),
-                ("mem_4", "DilBERT gate classifies memories at 0.929 confidence", "DilBERT gate 0.929", "project", "persist"),
+                (
+                    "mem_1",
+                    "Ema decided Prism stays domain-agnostic",
+                    "Prism stays domain-agnostic",
+                    "project",
+                    "persist",
+                ),
+                (
+                    "mem_2",
+                    "Mango implements vector search for Prism",
+                    "Vector search implementation",
+                    "project",
+                    "active",
+                ),
+                (
+                    "mem_3",
+                    "Recall V2 uses SQLite and FTS5",
+                    "SQLite + FTS5 architecture",
+                    "project",
+                    "active",
+                ),
+                (
+                    "mem_4",
+                    "DilBERT gate classifies memories at 0.929 confidence",
+                    "DilBERT gate 0.929",
+                    "project",
+                    "persist",
+                ),
                 ("mem_5", "The weather is nice today", "Weather", "general", "cold"),
             ]
             for mem_id, content, summary, category, tier in memories:
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO memories (id, content, summary, category, tier, created_at, accessed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (mem_id, content, summary, category, tier, now, now))
+                """,
+                    (mem_id, content, summary, category, tier, now, now),
+                )
 
                 try:
-                    rowid = conn.execute("SELECT rowid FROM memories WHERE id = ?", (mem_id,)).fetchone()[0]
-                    conn.execute("""
+                    rowid = conn.execute(
+                        "SELECT rowid FROM memories WHERE id = ?", (mem_id,)
+                    ).fetchone()[0]
+                    conn.execute(
+                        """
                         INSERT INTO memories_fts (rowid, content, compiled_truth, summary, key_topics)
                         VALUES (?, ?, '', ?, '')
-                    """, (rowid, content, summary))
+                    """,
+                        (rowid, content, summary),
+                    )
                 except Exception:
                     pass
 
@@ -82,14 +113,18 @@ def search_env():
 
 class TestKeywordSearch:
     def test_fts5_search(self, search_env):
-        results = search_env["search"]._search_keyword("Prism domain-agnostic", None, None, 5)
+        results = search_env["search"]._search_keyword(
+            "Prism domain-agnostic", None, None, 5
+        )
         assert len(results) > 0
         # Should find the Prism memory
         ids = [r["id"] for r in results]
         assert "mem_1" in ids
 
     def test_keyword_no_results(self, search_env):
-        results = search_env["search"]._search_keyword("xylophone banana", None, None, 5)
+        results = search_env["search"]._search_keyword(
+            "xylophone banana", None, None, 5
+        )
         assert len(results) == 0
 
     def test_keyword_with_category(self, search_env):
@@ -117,7 +152,9 @@ class TestTierBoost:
 
 class TestBalancedSearch:
     def test_balanced_returns_results(self, search_env):
-        results = search_env["search"].search("Prism domain-agnostic", mode="balanced", limit=5)
+        results = search_env["search"].search(
+            "Prism domain-agnostic", mode="balanced", limit=5
+        )
         assert len(results) > 0
 
     def test_balanced_finds_relevant(self, search_env):
@@ -128,7 +165,9 @@ class TestBalancedSearch:
 
 class TestContextBuild:
     def test_context_build(self, search_env):
-        context = search_env["search"].build_context("Prism architecture", project="prism")
+        context = search_env["search"].build_context(
+            "Prism architecture", project="prism"
+        )
         assert "memories" in context
         assert "entities" in context
         assert "query" in context
@@ -137,27 +176,31 @@ class TestContextBuild:
 
 class TestCosineSimilarity:
     def test_identical_vectors(self):
-        from remembrance_mcp.search.hybrid import HybridSearch
+        from recall_mcp.search.hybrid import HybridSearch
+
         vec = [1.0, 0.0, 0.0]
         sim = HybridSearch._cosine_similarity(vec, vec)
         assert abs(sim - 1.0) < 0.001
 
     def test_orthogonal_vectors(self):
-        from remembrance_mcp.search.hybrid import HybridSearch
+        from recall_mcp.search.hybrid import HybridSearch
+
         a = [1.0, 0.0]
         b = [0.0, 1.0]
         sim = HybridSearch._cosine_similarity(a, b)
         assert abs(sim) < 0.001
 
     def test_opposite_vectors(self):
-        from remembrance_mcp.search.hybrid import HybridSearch
+        from recall_mcp.search.hybrid import HybridSearch
+
         a = [1.0, 0.0]
         b = [-1.0, 0.0]
         sim = HybridSearch._cosine_similarity(a, b)
         assert abs(sim + 1.0) < 0.001
 
     def test_zero_vector(self):
-        from remembrance_mcp.search.hybrid import HybridSearch
+        from recall_mcp.search.hybrid import HybridSearch
+
         a = [0.0, 0.0]
         b = [1.0, 0.0]
         sim = HybridSearch._cosine_similarity(a, b)
@@ -166,7 +209,8 @@ class TestCosineSimilarity:
 
 class TestVectorConversion:
     def test_bytes_roundtrip(self):
-        from remembrance_mcp.search.hybrid import HybridSearch
+        from recall_mcp.search.hybrid import HybridSearch
+
         vec = [0.1, 0.2, 0.3, 0.4]
         blob = HybridSearch._vector_to_bytes(vec)
         recovered = HybridSearch._bytes_to_vector(blob)
@@ -175,6 +219,7 @@ class TestVectorConversion:
             assert abs(a - b) < 0.001
 
     def test_empty_vector(self):
-        from remembrance_mcp.search.hybrid import HybridSearch
+        from recall_mcp.search.hybrid import HybridSearch
+
         assert HybridSearch._bytes_to_vector(b"") == []
         assert HybridSearch._vector_to_bytes([]) == b""

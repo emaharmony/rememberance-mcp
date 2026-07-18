@@ -1,19 +1,18 @@
 """
-REST API Tests — HTTP handler coverage for the Remembrance REST API
+REST API Tests — HTTP handler coverage for the Recall REST API
 """
 
 import json
 import tempfile
-import time
 from pathlib import Path
 import pytest
 from http.server import HTTPServer
 from threading import Thread
 
-from remembrance_mcp.pipeline import MemoryPipeline
-from remembrance_mcp.config import Settings
-from remembrance_mcp.api.rest import RemembranceHandler, start_rest_api, _is_client_disconnect
-from remembrance_mcp.gate_backends import HeuristicBackend, GateFallbackChain
+from recall_mcp.pipeline import MemoryPipeline
+from recall_mcp.config import Settings
+from recall_mcp.api.rest import RecallHandler, _is_client_disconnect
+from recall_mcp.gate_backends import HeuristicBackend, GateFallbackChain
 import urllib.request
 import urllib.error
 
@@ -40,18 +39,20 @@ def api_server():
         )
         pipeline = MemoryPipeline(settings=settings)
         pipeline.gate_chain = GateFallbackChain([HeuristicBackend()])
-        from remembrance_mcp.extract import StubExtractor
+        from recall_mcp.extract import StubExtractor
+
         pipeline.extractor = StubExtractor()
 
         # Find an available port
         import socket
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(('127.0.0.1', 0))
+        sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
         sock.close()
 
-        RemembranceHandler.pipeline = pipeline
-        server = HTTPServer(('127.0.0.1', port), RemembranceHandler)
+        RecallHandler.pipeline = pipeline
+        server = HTTPServer(("127.0.0.1", port), RecallHandler)
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
@@ -80,7 +81,7 @@ class TestClientDisconnectHandling:
         assert _is_client_disconnect(error)
 
     def test_safe_json_response_suppresses_client_disconnect(self):
-        RemembranceHandler._safe_json_response(
+        RecallHandler._safe_json_response(
             _DisconnectingHandler(),
             {"error": "request failed"},
             status=500,
@@ -88,7 +89,7 @@ class TestClientDisconnectHandling:
 
     def test_safe_json_response_raises_non_disconnect_errors(self):
         with pytest.raises(RuntimeError):
-            RemembranceHandler._safe_json_response(
+            RecallHandler._safe_json_response(
                 _FailingHandler(),
                 {"error": "request failed"},
                 status=500,
@@ -105,10 +106,12 @@ class TestStatsEndpoint:
 
 class TestCaptureEndpoint:
     def test_capture_post(self, api_server):
-        body = json.dumps({
-            "text": "Ema decided Prism stays domain-agnostic",
-            "source": "test",
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "text": "Ema decided Prism stays domain-agnostic",
+                "source": "test",
+            }
+        ).encode("utf-8")
 
         req = urllib.request.Request(
             f"{api_server['base_url']}/capture",
@@ -137,7 +140,9 @@ class TestCaptureEndpoint:
 class TestSearchEndpoint:
     def test_search(self, api_server):
         # First capture something
-        body = json.dumps({"text": "Ema decided Prism stays domain-agnostic", "source": "test"}).encode("utf-8")
+        body = json.dumps(
+            {"text": "Ema decided Prism stays domain-agnostic", "source": "test"}
+        ).encode("utf-8")
         req = urllib.request.Request(
             f"{api_server['base_url']}/capture",
             data=body,
@@ -146,7 +151,9 @@ class TestSearchEndpoint:
         urllib.request.urlopen(req)
 
         # Then search
-        resp = urllib.request.urlopen(f"{api_server['base_url']}/search?q=Prism&mode=keyword")
+        resp = urllib.request.urlopen(
+            f"{api_server['base_url']}/search?q=Prism&mode=keyword"
+        )
         data = json.loads(resp.read())
         assert "results" in data
         assert "count" in data
@@ -162,7 +169,9 @@ class TestSearchEndpoint:
 class TestEntityEndpoint:
     def test_entity_get(self, api_server):
         # Capture to create entity
-        body = json.dumps({"text": "Ema works on Prism", "source": "test"}).encode("utf-8")
+        body = json.dumps({"text": "Ema works on Prism", "source": "test"}).encode(
+            "utf-8"
+        )
         req = urllib.request.Request(
             f"{api_server['base_url']}/capture",
             data=body,
@@ -191,7 +200,9 @@ class TestEntityEndpoint:
 class TestContextBuildEndpoint:
     def test_context_build(self, api_server):
         # Capture first
-        body = json.dumps({"text": "Ema decided Prism stays domain-agnostic", "source": "test"}).encode("utf-8")
+        body = json.dumps(
+            {"text": "Ema decided Prism stays domain-agnostic", "source": "test"}
+        ).encode("utf-8")
         req = urllib.request.Request(
             f"{api_server['base_url']}/capture",
             data=body,
@@ -200,7 +211,9 @@ class TestContextBuildEndpoint:
         urllib.request.urlopen(req)
 
         # Build context
-        resp = urllib.request.urlopen(f"{api_server['base_url']}/context/build?task=implement+vector+search")
+        resp = urllib.request.urlopen(
+            f"{api_server['base_url']}/context/build?task=implement+vector+search"
+        )
         data = json.loads(resp.read())
         assert "memories" in data
         assert "entities" in data
@@ -215,10 +228,12 @@ class TestContextBuildEndpoint:
 
 class TestDreamEndpoint:
     def test_dream_post(self, api_server):
-        body = json.dumps({
-            "phases": ["orphan_detect"],
-            "dry_run": False,
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "phases": ["orphan_detect"],
+                "dry_run": False,
+            }
+        ).encode("utf-8")
         req = urllib.request.Request(
             f"{api_server['base_url']}/dream",
             data=body,

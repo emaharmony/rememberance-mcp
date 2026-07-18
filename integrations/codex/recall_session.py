@@ -11,24 +11,29 @@ We only inject on `startup` and `resume` — `clear`/`compact` already carry the
 session's own context and re-injecting there is noise.
 
 Pure stdlib — runs under any Python 3. Never blocks a session: any failure
-(Remembrance down, bad JSON, timeout) exits 0 with no output.
+(Recall down, bad JSON, timeout) exits 0 with no output.
 
 Env:
-  REMEMBRANCE_URL          base URL of the service (default 127.0.0.1:18790)
-  REMEMBRANCE_TIMEOUT      HTTP timeout seconds (default 6)
-  REMEMBRANCE_INJECT_LIMIT max memories to inject (default 8)
+  RECALL_URL          base URL of the service (default 127.0.0.1:18790)
+  RECALL_TIMEOUT      HTTP timeout seconds (default 6)
+  RECALL_INJECT_LIMIT max memories to inject (default 8)
 """
+
 from __future__ import annotations
 
 import json
 import os
+import pathlib
 import sys
 import urllib.parse
 import urllib.request
 
-REMEMBRANCE_URL = os.environ.get("REMEMBRANCE_URL", "http://127.0.0.1:18790").rstrip("/")
-TIMEOUT = float(os.environ.get("REMEMBRANCE_TIMEOUT", "6"))
-LIMIT = int(os.environ.get("REMEMBRANCE_INJECT_LIMIT", "8"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from compat_env import get_env  # noqa: E402
+
+RECALL_URL = get_env("URL", "http://127.0.0.1:18790").rstrip("/")
+TIMEOUT = float(get_env("TIMEOUT", "6"))
+LIMIT = int(get_env("INJECT_LIMIT", "8"))
 INJECT_SOURCES = {"startup", "resume"}
 
 
@@ -48,7 +53,7 @@ def _format(results: list, project: str) -> str:
         lines.append(f"- {text}{suffix}")
     if not lines:
         return ""
-    return f"## Remembrance — recalled memory for **{project}**\n\n" + "\n".join(lines)
+    return f"## Recall — recalled memory for **{project}**\n\n" + "\n".join(lines)
 
 
 def main() -> int:
@@ -63,10 +68,14 @@ def main() -> int:
         return 0
 
     project = _project_from_cwd(event.get("cwd", ""))
-    query = urllib.parse.urlencode({"q": project, "mode": "keyword", "limit": str(LIMIT)})
+    query = urllib.parse.urlencode(
+        {"q": project, "mode": "keyword", "limit": str(LIMIT)}
+    )
 
     try:
-        with urllib.request.urlopen(f"{REMEMBRANCE_URL}/search?{query}", timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(
+            f"{RECALL_URL}/search?{query}", timeout=TIMEOUT
+        ) as resp:
             data = json.load(resp)
     except Exception:
         return 0  # memory is best-effort; never block the session
@@ -75,12 +84,16 @@ def main() -> int:
     if not markdown:
         return 0
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": markdown,
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": markdown,
+                }
+            }
+        )
+    )
     return 0
 
 

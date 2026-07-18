@@ -1,0 +1,58 @@
+name: Recall 2.1 release gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-24.04
+    env:
+      RECALL_RUN_NATS_INTEGRATION: "1"
+    steps:
+      - name: Start pinned JetStream
+        run: >-
+          docker run --detach --name recall-nats
+          --publish 4222:4222 --publish 8222:8222
+          nats:2.11.8-alpine
+          -js -m 8222
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip "setuptools>=83" wheel
+      - run: python -m pip install -e ".[all,dev]"
+      - run: ruff format --check src tests
+      - run: ruff check src tests
+      - run: mypy src/recall_mcp
+      - run: bandit -q -lll -r src/recall_mcp
+      - run: pip-audit
+      - run: >-
+          pytest
+          --cov=recall_mcp
+          --cov-branch
+          --cov-fail-under=90
+          --cov-report=term
+          --cov-report=xml
+      - run: >-
+          pytest tests/test_production_hardening.py tests/test_rest_api.py
+          --cov=recall_mcp.api.security
+          --cov=recall_mcp.api.rest
+          --cov=recall_mcp.pipeline
+          --cov=recall_mcp.store
+          --cov=recall_mcp.nats_jetstream
+          --cov-branch
+          --cov-fail-under=95
+          --cov-report=term
+      - run: python -m build
+      - run: cyclonedx-py environment --of JSON -o sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-evidence
+          path: |
+            coverage.xml
+            sbom.json
+            dist/*
