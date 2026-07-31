@@ -37,6 +37,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+from recall_mcp.store.migrations import run_migrations
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,41 +72,9 @@ class FactStore:
         self._init_table()
 
     def _init_table(self):
-        """Create facts table if it doesn't exist."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS facts (
-                    id TEXT PRIMARY KEY,
-                    entity_id TEXT NOT NULL,
-                    claim_key TEXT NOT NULL,
-                    claim_value TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    confidence REAL DEFAULT 1.0,
-                    observed_at REAL NOT NULL,
-                    superseded_at REAL,
-                    UNIQUE(entity_id, claim_key, observed_at),
-                    FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_facts_entity ON facts(entity_id)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_facts_key ON facts(claim_key)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_facts_current
-                ON facts(entity_id, claim_key) WHERE superseded_at IS NULL
-            """)
-            conn.executescript("""
-                CREATE TRIGGER IF NOT EXISTS entities_cleanup_facts
-                AFTER DELETE ON entities BEGIN
-                    DELETE FROM facts WHERE entity_id = OLD.id;
-                END;
-            """)
-            logger.info(f"Fact store initialized at {self.db_path}")
+        """Install the shared canonical schema through the migration runner."""
+        run_migrations(self.db_path)
+        logger.info("Fact store initialized at %s", self.db_path)
 
     def assert_fact(
         self,

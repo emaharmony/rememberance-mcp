@@ -44,6 +44,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
+from recall_mcp.store.migrations import CURRENT_SCHEMA_VERSION, run_migrations
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,115 +108,9 @@ class MemoryStore:
             connection.close()
 
     def _init_db(self):
-        """Create tables if they don't exist.
-
-        CONCEPT: Idempotent Initialization
-        CREATE TABLE IF NOT EXISTS means this function is safe to call
-        multiple times — it won't error or destroy existing data.
-        """
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS memories (
-                    id TEXT PRIMARY KEY,
-                    content TEXT NOT NULL,
-                    summary TEXT,
-                    category TEXT NOT NULL DEFAULT 'project',
-                    tier TEXT NOT NULL DEFAULT 'active',
-                    key_topics TEXT,           -- JSON array stored as text
-                    source TEXT DEFAULT '',
-                    embedding BLOB,            -- binary vector for semantic search
-                    created_at REAL NOT NULL,  -- unix timestamp
-                    accessed_at REAL NOT NULL, -- last access time (for consolidation)
-                    expires_at REAL,           -- NULL = never expires
-                    UNIQUE(id)
-                )
-            """)
-
-            # Vector search index for fast similarity queries
-            # rowid is SQLite's built-in integer primary key — fast for lookups
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at)
-                WHERE expires_at IS NOT NULL
-            """)  # Partial index — only index rows that have an expiry
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_memories_accessed ON memories(accessed_at)
-            """)
-
-            self._migrate_production_schema(conn)
-            logger.info(f"Memory store initialized at {self.db_path}")
-
-    @staticmethod
-    def _migrate_production_schema(conn: sqlite3.Connection) -> None:
-        """Install backward-compatible 2.1 columns and ingestion state."""
-        existing = {
-            row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()
-        }
-        migrations = {
-            "project": "TEXT DEFAULT ''",
-            "agent": "TEXT DEFAULT ''",
-            "access_count": "INTEGER NOT NULL DEFAULT 0",
-            "embedding_model": "TEXT DEFAULT ''",
-            "embedding_dimensions": "INTEGER",
-            "embedding_content_hash": "TEXT DEFAULT ''",
-            "embedding_status": "TEXT NOT NULL DEFAULT 'missing'",
-            "embedding_updated_at": "REAL",
-            "processing_status": "TEXT NOT NULL DEFAULT 'complete'",
-            "processing_error": "TEXT DEFAULT ''",
-        }
-        for column, definition in migrations.items():
-            if column not in existing:
-                conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {definition}")
-
-        conn.executescript("""
-            CREATE INDEX IF NOT EXISTS idx_memories_scope
-            ON memories(project, agent);
-            CREATE INDEX IF NOT EXISTS idx_memories_embedding_status
-            ON memories(embedding_status);
-            CREATE TABLE IF NOT EXISTS ingest_events (
-                event_id TEXT PRIMARY KEY,
-                memory_id TEXT,
-                raw_capture_id TEXT,
-                status TEXT NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 1,
-                last_error TEXT DEFAULT '',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                processed_at REAL,
-                FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL,
-                FOREIGN KEY (raw_capture_id) REFERENCES raw_captures(id) ON DELETE SET NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_ingest_events_status
-            ON ingest_events(status, updated_at);
-            CREATE TABLE IF NOT EXISTS raw_captures (
-                id TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                source TEXT NOT NULL DEFAULT '',
-                project TEXT NOT NULL DEFAULT '',
-                agent TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'pending',
-                memory_id TEXT,
-                error TEXT NOT NULL DEFAULT '',
-                received_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL
-            );
-        """)
-        event_columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(ingest_events)").fetchall()
-        }
-        if "raw_capture_id" not in event_columns:
-            conn.execute("ALTER TABLE ingest_events ADD COLUMN raw_capture_id TEXT")
+        """Bring the database to the latest supported canonical schema."""
+        run_migrations(self.db_path)
+        logger.info("Memory store initialized at %s", self.db_path)
 
     def persist_raw_capture(
         self,
@@ -690,6 +586,9 @@ class MemoryStore:
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 ).fetchall()
             }
+            schema_version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+            ).fetchone()[0]
             orphans: dict[str, int] = {}
             if {"memory_entities", "memories", "entities"}.issubset(tables):
                 orphans["memory_entities"] = conn.execute(
@@ -714,7 +613,10 @@ class MemoryStore:
             "integrity": integrity_rows,
             "foreign_key_errors": foreign_key_errors,
             "orphans": orphans,
-            "ok": integrity_rows == ["ok"]
+            "schema_version": schema_version,
+            "schema_current": schema_version == CURRENT_SCHEMA_VERSION,
+            "ok": schema_version == CURRENT_SCHEMA_VERSION
+            and integrity_rows == ["ok"]
             and not foreign_key_errors
             and not any(orphans.values()),
         }

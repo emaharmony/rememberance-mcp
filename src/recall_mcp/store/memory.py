@@ -1,15 +1,9 @@
 """
 Memory Store V2 Extensions — Compiled Truth, Timeline, FTS5, Dream Log
 
-Extends the V1 MemoryStore with V2 columns and tables.
-Uses the "mixin" pattern: V2Store wraps V1 MemoryStore and adds
-new functionality without modifying the original code.
-
-MIGRATION STRATEGY:
-- ALTER TABLE adds new columns (compiled_truth, timeline, dream_count, last_dream_at)
-- CREATE TABLE adds new tables (memories_fts, dream_log)
-- All changes are backward compatible — V1 API still works
-- V2 API is opt-in (new methods, new return fields)
+Wraps the canonical memory store with derived FTS5 indexing and V2 behavior.
+Canonical columns and tables are installed by the formal migration runner;
+the optional FTS index remains rebuildable derived state.
 """
 
 from __future__ import annotations
@@ -47,33 +41,8 @@ class MemoryStoreV2:
         self._migrate_v2()
 
     def _migrate_v2(self):
-        """Run V2 schema migration (idempotent)."""
+        """Initialize the optional, rebuildable FTS5 index."""
         with self.store._connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            # Add new columns to memories table
-            migrations = [
-                (
-                    "ALTER TABLE memories ADD COLUMN compiled_truth TEXT DEFAULT ''",
-                    "compiled_truth",
-                ),
-                (
-                    "ALTER TABLE memories ADD COLUMN timeline TEXT DEFAULT ''",
-                    "timeline",
-                ),
-                (
-                    "ALTER TABLE memories ADD COLUMN dream_count INTEGER DEFAULT 0",
-                    "dream_count",
-                ),
-                ("ALTER TABLE memories ADD COLUMN last_dream_at REAL", "last_dream_at"),
-            ]
-            for sql, col_name in migrations:
-                try:
-                    conn.execute(sql)
-                    logger.info(f"V2 migration: added column '{col_name}' to memories")
-                except sqlite3.OperationalError:
-                    pass  # Column already exists
-
-            # Create FTS5 virtual table
             try:
                 conn.execute("""
                     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -85,12 +54,7 @@ class MemoryStoreV2:
                         content_rowid=rowid
                     )
                 """)
-                logger.info("V2 migration: FTS5 virtual table created")
-
-                # Keep the FTS index in sync with `memories`. This is an
-                # external-content FTS5 table (content=memories), which is NOT
-                # populated automatically — inserts/updates/deletes on the base
-                # table must be mirrored into the index via triggers.
+                logger.info("V2 derived FTS5 table created")
                 conn.executescript("""
                     CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
                         INSERT INTO memories_fts(rowid, content, compiled_truth, summary, key_topics)
@@ -111,34 +75,15 @@ class MemoryStoreV2:
                                 new.summary, new.key_topics);
                     END;
                 """)
-
-                # Repair/populate the index from the base table. `rebuild` is the
-                # correct, idempotent way to (re)index an external-content table —
-                # COUNT(*) on it reflects the content table, so it can't be used to
-                # detect an empty index. Cheap at personal scale; runs once per boot.
                 conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
-                logger.info("V2 migration: FTS5 triggers installed and index rebuilt")
-
-            except sqlite3.OperationalError as e:
+                logger.info("V2 derived FTS5 index rebuilt")
+            except sqlite3.OperationalError as exc:
                 logger.warning(
-                    f"FTS5 not available: {e}. Keyword search will use LIKE fallback."
+                    "FTS5 not available: %s. Keyword search will use LIKE fallback.",
+                    exc,
                 )
 
-            # Create dream_log table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS dream_log (
-                    id TEXT PRIMARY KEY,
-                    started_at REAL NOT NULL,
-                    completed_at REAL,
-                    status TEXT NOT NULL,
-                    phases_run TEXT,
-                    totals TEXT,
-                    error TEXT
-                )
-            """)
-            logger.info("V2 migration: dream_log table ready")
-
-    # ── FTS5 Search ─────────────────────────────────────────────
+    # FTS5 search
 
     def search_fts(
         self,

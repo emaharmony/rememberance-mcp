@@ -22,3 +22,13 @@ Service logs must be collected off-host. Avoid logging bearer tokens, NATS passw
 - After model changes: run `recall-admin reembed --dry-run`, then `recall-admin reembed`.
 
 Recommended retention is 7 daily, 4 weekly, and 6 monthly backups. Model files are reproducible and are excluded from backups.
+
+## Schema migrations
+
+Take and verify a backup before upgrades, then run `recall-admin migrate`.
+The command reports the database path, starting and resulting schema versions,
+and every migration applied. A repeated run reports an empty `applied` list.
+
+Recall fails startup for unknown future or non-contiguous migration histories.
+Rollback restores the matching database backup and previous artifact. See
+[Schema migrations](schema-migrations.md).

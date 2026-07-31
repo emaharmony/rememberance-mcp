@@ -24,6 +24,7 @@ from recall_mcp.config import Settings
 from recall_mcp.api.security import verify_token_file_permissions
 
 from recall_mcp.store import MemoryStore
+from recall_mcp.store.migrations import run_migrations
 
 VERSION = "2.1.0"
 
@@ -234,10 +235,8 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def command_migrate(settings: Settings, _args: argparse.Namespace) -> int:
-    from recall_mcp.pipeline import MemoryPipeline
-
-    pipeline = MemoryPipeline(settings)
-    print(json.dumps(pipeline.stats(), indent=2))
+    result = run_migrations(settings.DB_PATH)
+    print(json.dumps(result.as_dict(), indent=2))
     return 0
 
 

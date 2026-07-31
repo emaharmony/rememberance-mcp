@@ -43,6 +43,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
+from recall_mcp.store.migrations import run_migrations
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,118 +112,9 @@ class EntityStore:
             connection.close()
 
     def _init_tables(self):
-        """Create entity and edge tables if they don't exist."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=5000")
-            # Enable WAL mode for better concurrent read/write performance
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS entities (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    aliases TEXT DEFAULT '[]',
-                    compiled_truth TEXT DEFAULT '',
-                    timeline TEXT DEFAULT '',
-                    tier TEXT NOT NULL DEFAULT 'active',
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS edges (
-                    source_id TEXT NOT NULL,
-                    target_id TEXT NOT NULL,
-                    edge_type TEXT NOT NULL,
-                    since_date REAL NOT NULL,
-                    confidence REAL DEFAULT 1.0,
-                    evidence TEXT DEFAULT '',
-                    UNIQUE(source_id, target_id, edge_type),
-                    FOREIGN KEY (source_id) REFERENCES entities(id) ON DELETE CASCADE,
-                    FOREIGN KEY (target_id) REFERENCES entities(id) ON DELETE CASCADE
-                )
-            """)
-            has_memories = conn.execute(
-                """
-                SELECT 1 FROM sqlite_master
-                WHERE type = 'table' AND name = 'memories'
-                """
-            ).fetchone()
-            memory_reference = (
-                "FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,"
-                if has_memories
-                else ""
-            )
-            conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS memory_entities (
-                    memory_id TEXT NOT NULL,
-                    entity_id TEXT NOT NULL,
-                    confidence REAL DEFAULT 1.0,
-                    UNIQUE(memory_id, entity_id),
-                    {memory_reference}
-                    FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
-                )
-            """)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(edge_type)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memory_entities_memory ON memory_entities(memory_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_tier ON entities(tier)"
-            )
-
-            # Alias lookup table for O(1) alias resolution (replaces O(n) JSON scan)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS entity_aliases (
-                    alias TEXT NOT NULL,
-                    entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-                    UNIQUE(alias, entity_id)
-                )
-            """)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entity_aliases_alias ON entity_aliases(alias)"
-            )
-            conn.executescript("""
-                CREATE TRIGGER IF NOT EXISTS entities_cleanup_relations
-                AFTER DELETE ON entities BEGIN
-                    DELETE FROM edges
-                    WHERE source_id = OLD.id OR target_id = OLD.id;
-                    DELETE FROM memory_entities WHERE entity_id = OLD.id;
-                    DELETE FROM entity_aliases WHERE entity_id = OLD.id;
-                END;
-            """)
-            has_memories = conn.execute(
-                """
-                SELECT 1 FROM sqlite_master
-                WHERE type = 'table' AND name = 'memories'
-                """
-            ).fetchone()
-            if has_memories:
-                conn.executescript("""
-                    CREATE TRIGGER IF NOT EXISTS memories_cleanup_entities
-                    AFTER DELETE ON memories BEGIN
-                        DELETE FROM memory_entities WHERE memory_id = OLD.id;
-                    END;
-                """)
-            logger.info(f"Entity store initialized at {self.db_path}")
-
-    # ── Entity CRUD ───────────────────────────────────────────
+        """Install the shared canonical schema through the migration runner."""
+        run_migrations(self.db_path)
+        logger.info("Entity store initialized at %s", self.db_path)
 
     def create_entity(
         self,

@@ -38,6 +38,11 @@ Keyword retrieval uses FTS5 with a LIKE fallback. Vector retrieval uses exact co
 
 The primary database owns raw captures, memories, entities, edges, aliases, structured facts, memory/entity links, dream logs, and ingestion event IDs. Every Recall connection enables foreign keys; cleanup triggers protect upgraded databases created before cascade rules existed.
 
+Canonical schema ownership is centralized in four ordered migrations.
+The schema ledger, migration DDL, and each version record are transactional;
+concurrent startup serializes through SQLite locking. Optional FTS5 structures
+remain rebuildable derived state. See [Schema migrations](schema-migrations.md).
+
 SQLite runs in WAL mode with a five-second busy timeout. This design supports one Recall process. Multiple writers, high availability, PostgreSQL, and shared multi-user authorization are outside the 2.1 boundary.
 
 ## Failure behavior
