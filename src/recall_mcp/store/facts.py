@@ -83,39 +83,56 @@ class FactStore:
         claim_value: str,
         source: str,
         confidence: float = 1.0,
+        derivation_key: str | None = None,
     ) -> str:
-        """
-        Assert a new fact about an entity.
-
-        If a current fact exists with the same (entity_id, claim_key) and
-        different value, the old fact gets superseded (but not deleted).
-        If the value is the same, we just refresh the confidence/source.
-
-        Returns the fact ID.
-        """
+        """Assert a temporal fact, optionally idempotent by derivation key."""
         now = time.time()
         fact_id = f"fact_{int(now * 1000)}_{entity_id}_{claim_key}"
 
-        # Check for existing current fact
-        current = self.get_current_fact(entity_id, claim_key)
-
         with _connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            if derivation_key:
+                existing = conn.execute(
+                    "SELECT id FROM facts WHERE derivation_key = ?",
+                    (derivation_key,),
+                ).fetchone()
+                if existing is not None:
+                    conn.execute(
+                        "UPDATE facts SET confidence = ?, source = ? WHERE id = ?",
+                        (confidence, source, existing["id"]),
+                    )
+                    return str(existing["id"])
+
+            current = conn.execute(
+                """
+                SELECT * FROM facts
+                WHERE entity_id = ? AND claim_key = ? AND superseded_at IS NULL
+                ORDER BY observed_at DESC LIMIT 1
+                """,
+                (entity_id, claim_key),
+            ).fetchone()
             if current and current["claim_value"] != claim_value:
-                # New value contradicts old → supersede the old one
                 conn.execute(
                     "UPDATE facts SET superseded_at = ? WHERE id = ?",
                     (now, current["id"]),
                 )
                 logger.info(
-                    f"Fact superseded: {entity_id}.{claim_key} = {current['claim_value']} → {claim_value}"
+                    "Fact superseded: %s.%s = %s -> %s",
+                    entity_id,
+                    claim_key,
+                    current["claim_value"],
+                    claim_value,
                 )
 
             try:
                 conn.execute(
                     """
-                    INSERT INTO facts (id, entity_id, claim_key, claim_value, source, confidence, observed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
+                    INSERT INTO facts (
+                        id, entity_id, claim_key, claim_value, source,
+                        confidence, observed_at, derivation_key
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
                     (
                         fact_id,
                         entity_id,
@@ -124,17 +141,18 @@ class FactStore:
                         source,
                         confidence,
                         now,
+                        derivation_key,
                     ),
                 )
             except sqlite3.IntegrityError:
-                # Same observed_at — update in place
-                conn.execute(
-                    """
-                    UPDATE facts SET claim_value = ?, source = ?, confidence = ?
-                    WHERE entity_id = ? AND claim_key = ? AND observed_at = ?
-                """,
-                    (claim_value, source, confidence, entity_id, claim_key, now),
-                )
+                if derivation_key:
+                    existing = conn.execute(
+                        "SELECT id FROM facts WHERE derivation_key = ?",
+                        (derivation_key,),
+                    ).fetchone()
+                    if existing is not None:
+                        return str(existing["id"])
+                raise
 
         return fact_id
 

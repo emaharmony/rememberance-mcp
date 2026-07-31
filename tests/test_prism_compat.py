@@ -58,6 +58,7 @@ def server():
     finally:
         httpd.shutdown()
         httpd.server_close()
+        pipeline.close()
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)

@@ -47,6 +47,8 @@ from recall_mcp.search.hybrid import HybridSearch
 from recall_mcp.embeddings import EmbeddingError, OllamaEmbeddingProvider
 from recall_mcp.dream.cycle import DreamCycle
 from recall_mcp.gate_backends import GateMetrics
+from recall_mcp.outbox import CaptureOutcome, CaptureOutboxDispatcher
+from recall_mcp.store.store import OutboxJob
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +68,12 @@ class MemoryPipeline:
         metrics = pipeline.metrics_summary()   # effectiveness report
     """
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(
+        self,
+        settings: Optional[Settings] = None,
+        *,
+        start_outbox_worker: bool = True,
+    ):
         self.settings = settings or Settings()
 
         # ── Layer 1: Gate (pluggable fallback chain) ──────────
@@ -160,6 +167,34 @@ class MemoryPipeline:
             self.entity_store, brain_dir=self.settings.BASE_DIR / "brain"
         )
 
+        self._closed = False
+        self.outbox_dispatcher = CaptureOutboxDispatcher(
+            store=self.store,
+            handler=self._finish_capture,
+            executor=self._executor,
+            capacity=self._processing_slots,
+            poll_interval=self.settings.OUTBOX_POLL_INTERVAL,
+            lease_seconds=self.settings.OUTBOX_LEASE_SECONDS,
+            max_attempts=self.settings.OUTBOX_MAX_ATTEMPTS,
+            retry_base_seconds=self.settings.OUTBOX_RETRY_BASE_SECONDS,
+        )
+        if start_outbox_worker:
+            self.outbox_dispatcher.start()
+
+    def close(self, *, wait: bool = True) -> None:
+        """Stop durable dispatch and release background processing threads."""
+        if self._closed:
+            return
+        self._closed = True
+        self.outbox_dispatcher.stop()
+        self._executor.shutdown(wait=wait)
+
+    def __enter__(self) -> "MemoryPipeline":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
     def capture(
         self,
         text: str,
@@ -169,57 +204,23 @@ class MemoryPipeline:
         project: Optional[str] = None,
         agent: Optional[str] = None,
     ) -> dict:
-        """
-        Run the full pipeline on a piece of text.
-
-        PIPELINE FLOW:
-          1. Gate classifies (with fallback chain): SKIP → stop, COLD/ACTIVE/PERSIST → continue
-          2. Extract summarizes and categorizes
-          3. Store persists to SQLite with tier-based TTL
-        """
-        capture_id = self.store.persist_raw_capture(
-            text, source=source, project=project or "", agent=agent or ""
+        """Durably enqueue a capture and wait briefly for derived processing."""
+        if self._closed:
+            raise RuntimeError("memory pipeline is closed")
+        capture_id, _job_id = self.store.enqueue_capture(
+            text,
+            source=source,
+            project=project or "",
+            agent=agent or "",
+            category=category,
+            tier=tier,
         )
-        if not self._processing_slots.acquire(blocking=False):
-            self.store.fail_raw_capture(capture_id, "processing capacity exhausted")
-            return {
-                "id": capture_id,
-                "decision": "FAILED",
-                "confidence": None,
-                "backend": None,
-                "fallback_used": False,
-                "category": category,
-                "tier": tier,
-                "summary": text[:200],
-                "topics": [],
-                "processing_status": "failed",
-                "processing_error": "processing capacity exhausted",
-            }
+        waiter = self.outbox_dispatcher.register_waiter(capture_id)
+        self.outbox_dispatcher.notify()
         try:
-            future = self._executor.submit(
-                self._finish_capture,
-                capture_id,
-                text,
-                source,
-                category,
-                tier,
-                project,
-                agent,
-            )
-        except Exception:
-            self._processing_slots.release()
-            self.store.fail_raw_capture(capture_id, "processing unavailable")
-            logger.exception("Unable to schedule capture %s", capture_id)
-            return {
-                "id": capture_id,
-                "decision": "FAILED",
-                "processing_status": "failed",
-                "processing_error": "processing unavailable",
-            }
-        future.add_done_callback(lambda _future: self._processing_slots.release())
-        try:
-            return future.result(timeout=self.settings.CAPTURE_PROCESSING_TIMEOUT)
+            return waiter.result(timeout=self.settings.CAPTURE_PROCESSING_TIMEOUT)
         except FutureTimeoutError:
+            self.outbox_dispatcher.abandon_waiter(capture_id, waiter)
             return {
                 "id": capture_id,
                 "decision": "PENDING",
@@ -239,138 +240,129 @@ class MemoryPipeline:
                 else "disabled",
                 "facts_created": 0,
             }
-        except Exception:
-            logger.exception("Capture processing failed for %s", capture_id)
-            return {
-                "id": capture_id,
-                "decision": "FAILED",
-                "confidence": None,
-                "backend": None,
-                "fallback_used": False,
-                "category": category,
-                "tier": tier,
-                "summary": text[:200],
-                "topics": [],
-                "processing_status": "failed",
-                "processing_error": "capture processing failed",
+
+    def _finish_capture(self, job: OutboxJob) -> CaptureOutcome:
+        """Idempotently process one leased capture outbox job."""
+        if job.gate_decision is None:
+            gate_result, backend_used, fallback_used = self.gate_chain.classify(
+                job.content
+            )
+            decision = gate_result.decision
+            confidence = gate_result.confidence
+            persisted = self.store.record_gate_result(
+                job,
+                gate_decision=decision.value,
+                gate_confidence=confidence,
+                gate_backend=backend_used,
+                gate_fallback_used=fallback_used,
+            )
+            decision = GateDecision(persisted[0])
+            confidence, backend_used, fallback_used = persisted[1:]
+        else:
+            decision = GateDecision(job.gate_decision)
+            confidence = float(job.gate_confidence or 0.0)
+            backend_used = job.gate_backend or "persisted"
+            fallback_used = bool(job.gate_fallback_used)
+
+        if decision == GateDecision.SKIP:
+            skip_result: dict[str, object] = {
+                "id": None,
+                "decision": "SKIP",
+                "confidence": confidence,
+                "backend": backend_used,
+                "fallback_used": fallback_used,
+                "category": None,
+                "tier": None,
+                "summary": None,
+                "topics": None,
+                "processing_status": "complete",
             }
-
-    def _finish_capture(
-        self,
-        capture_id: str,
-        text: str,
-        source: str,
-        category: Optional[str],
-        tier: Optional[str],
-        project: Optional[str],
-        agent: Optional[str],
-    ) -> dict:
-        """Process a previously persisted raw capture."""
-        mem_id: str | None = None
-        try:
-            gate_result, backend_used, fallback_used = self.gate_chain.classify(text)
-            if gate_result.decision == GateDecision.SKIP:
-                self.store.complete_raw_capture(capture_id, None, status="skipped")
-                return {
-                    "id": None,
-                    "decision": "SKIP",
-                    "confidence": gate_result.confidence,
-                    "backend": backend_used,
-                    "fallback_used": fallback_used,
-                    "category": None,
-                    "tier": None,
-                    "summary": None,
-                    "topics": None,
-                    "processing_status": "complete",
-                }
-
-            provisional_tier = tier or gate_result.decision.value.lower()
-            provisional_category = category or "project"
-            mem_id = self.store.store(
-                content=text,
-                summary=text[:200],
-                category=provisional_category,
-                tier=provisional_tier,
-                key_topics=[],
-                source=source,
-                project=project or "",
-                agent=agent or "",
-                processing_status="pending",
-                memory_id=capture_id,
+            return CaptureOutcome(
+                result=skip_result,
+                memory_id=None,
+                raw_status="skipped",
+                gate_decision=decision.value,
+                gate_confidence=confidence,
+                gate_backend=backend_used,
+                gate_fallback_used=fallback_used,
             )
 
-            extraction = self.extractor.extract(
-                text, source=source, gate_decision=gate_result.decision.value
-            )
-            final_category = category or extraction.category
-            final_tier = tier or extraction.tier
+        provisional_tier = job.requested_tier or decision.value.lower()
+        provisional_category = job.requested_category or "project"
+        mem_id = self.store.ensure_capture_memory(
+            job,
+            gate_decision=decision.value,
+            gate_confidence=confidence,
+            gate_backend=backend_used,
+            gate_fallback_used=fallback_used,
+            category=provisional_category,
+            tier=provisional_tier,
+        )
+
+        extraction = self.extractor.extract(
+            job.content,
+            source=job.source,
+            gate_decision=decision.value,
+        )
+        final_category = job.requested_category or extraction.category
+        final_tier = job.requested_tier or extraction.tier
+        self.store.update_enrichment(
+            mem_id,
+            summary=extraction.summary,
+            category=final_category,
+            tier=final_tier,
+            key_topics=extraction.key_topics,
+            processing_status="pending",
+        )
+
+        wiring_result = self.graph_wiring.wire(
+            job.content, memory_id=mem_id, source=job.source
+        )
+        facts_created = self._capture_facts(
+            job.content, source=f"{job.source}:{mem_id}"
+        )
+
+        embedding_status = "disabled"
+        if self.embedding_provider is not None:
+            if not self._embed_memory(mem_id, job.content):
+                raise EmbeddingError(f"embedding failed for {mem_id}")
+            embedding_status = "complete"
+        else:
             self.store.update_enrichment(
                 mem_id,
                 summary=extraction.summary,
                 category=final_category,
                 tier=final_tier,
                 key_topics=extraction.key_topics,
-                processing_status="pending" if self.embedding_provider else "complete",
+                processing_status="complete",
             )
 
-            wiring_result = None
-            try:
-                wiring_result = self.graph_wiring.wire(
-                    text, memory_id=mem_id, source=source
-                )
-            except Exception as exc:
-                logger.warning("Graph wiring failed (non-blocking): %s", exc)
-
-            try:
-                facts_created = self._capture_facts(text, source=f"{source}:{mem_id}")
-            except Exception as exc:
-                logger.warning("Fact extraction failed (non-blocking): %s", exc)
-                facts_created = []
-
-            embedding_status = "disabled"
-            processing_status = "complete"
-            if self.embedding_provider is not None:
-                embedded = self._embed_memory(mem_id, text)
-                embedding_status = "complete" if embedded else "failed"
-                processing_status = "complete" if embedded else "failed"
-
-            self.store.complete_raw_capture(
-                capture_id, mem_id, status=processing_status
-            )
-            return {
-                "id": mem_id,
-                "decision": gate_result.decision.value,
-                "confidence": gate_result.confidence,
-                "backend": backend_used,
-                "fallback_used": fallback_used,
-                "category": final_category,
-                "tier": final_tier,
-                "summary": extraction.summary,
-                "topics": extraction.key_topics,
-                "entities": wiring_result.get("entities", []) if wiring_result else [],
-                "new_entities": wiring_result.get("new_entities", [])
-                if wiring_result
-                else [],
-                "edges_created": len(wiring_result.get("edges", []))
-                if wiring_result
-                else 0,
-                "processing_status": processing_status,
-                "embedding_status": embedding_status,
-                "facts_created": len(facts_created),
-            }
-        except Exception as exc:
-            self.store.fail_raw_capture(capture_id, str(exc))
-            if mem_id is not None:
-                self.store.update_enrichment(
-                    mem_id,
-                    summary=text[:200],
-                    category=category or "project",
-                    tier=tier or "active",
-                    key_topics=[],
-                    processing_status="failed",
-                    processing_error=str(exc),
-                )
-            raise
+        result: dict[str, object] = {
+            "id": mem_id,
+            "decision": decision.value,
+            "confidence": confidence,
+            "backend": backend_used,
+            "fallback_used": fallback_used,
+            "category": final_category,
+            "tier": final_tier,
+            "summary": extraction.summary,
+            "topics": extraction.key_topics,
+            "entities": wiring_result.get("entities", []),
+            "new_entities": wiring_result.get("new_entities", []),
+            "edges_created": len(wiring_result.get("edges", [])),
+            "processing_status": "complete",
+            "embedding_status": embedding_status,
+            "facts_created": len(facts_created),
+        }
+        return CaptureOutcome(
+            result=result,
+            memory_id=mem_id,
+            raw_status="complete",
+            gate_decision=decision.value,
+            gate_confidence=confidence,
+            gate_backend=backend_used,
+            gate_fallback_used=fallback_used,
+        )
 
     def _capture_facts(self, text: str, source: str) -> list[str]:
         """Extract conservative entity facts with source provenance."""
@@ -408,6 +400,9 @@ class MemoryPipeline:
                         value,
                         source,
                         confidence=0.8,
+                        derivation_key=(
+                            f"{source}|{entity['id']}|{claim_key}|{value.lower()}"
+                        ),
                     )
                 )
         return fact_ids
@@ -541,6 +536,7 @@ class MemoryPipeline:
         return {
             "memories": self.store.count(),
             "operational": self.store.operational_stats(),
+            "outbox_worker": self.outbox_dispatcher.health(),
             "entities": self.entity_store.stats(),
             "facts": self.fact_store.stats(),
             "v2": self.store_v2.v2_stats(),

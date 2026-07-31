@@ -39,12 +39,13 @@ The user should not need to explain the same project repeatedly.
 Implementation records:
 
 - [`implementation-notes/phase-0-formal-migrations.md`](implementation-notes/phase-0-formal-migrations.md)
+- [`implementation-notes/phase-0-transactional-outbox.md`](implementation-notes/phase-0-transactional-outbox.md)
 
 ## Current progress
 
-Phase 0 is in progress. Formal schema migrations, foreign-key enforcement,
-and backup/restore are complete. The transactional outbox is the next
-recommended slice.
+Phase 0 is in progress. Formal schema migrations, the transactional outbox,
+foreign-key enforcement, and backup/restore are complete. General capture
+idempotency is the next recommended slice.
 
 ## One-line architecture
 

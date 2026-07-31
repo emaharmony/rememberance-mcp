@@ -317,3 +317,22 @@ Approved behavior:
 
 Alembic and other migration dependencies are not justified for the current
 single-user SQLite target.
+
+## 25. Transactional capture outbox
+
+Recall Local uses SQLite as both the canonical capture store and the durable
+derived-processing queue.
+
+Approved behavior:
+
+- Raw capture and outbox job commit atomically before acknowledgment.
+- Processing is leased, retryable, restart-safe, and at least once.
+- Derived handlers are idempotent; exactly-once delivery is not claimed.
+- Model calls never run inside the enqueue or completion transaction.
+- Queue saturation creates durable pending work rather than rejecting it.
+- Exhausted jobs are visible and require an explicit single-job retry.
+- The current REST, MCP, Prism, NATS, and library capture contracts remain
+  compatible.
+
+An external queue or distributed lock is not justified for the approved
+single-process SQLite deployment.

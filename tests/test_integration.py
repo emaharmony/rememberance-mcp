@@ -30,7 +30,10 @@ def pipeline():
 
         pipe.gate_chain = GateFallbackChain([HeuristicBackend()])
         pipe.extractor = StubExtractor()
-        yield pipe
+        try:
+            yield pipe
+        finally:
+            pipe.close()
 
 
 class TestCaptureIntegration:

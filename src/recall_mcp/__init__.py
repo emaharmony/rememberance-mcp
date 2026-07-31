@@ -141,19 +141,25 @@ def main():
 
         settings = Settings.get()
         server = create_server()
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await server.run(
+        try:
+            async with mcp.server.stdio.stdio_server() as (
                 read_stream,
                 write_stream,
-                InitializationOptions(
-                    server_name=settings.MCP_SERVER_NAME,
-                    server_version=settings.MCP_SERVER_VERSION,
-                    capabilities=server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
+            ):
+                await server.run(
+                    read_stream,
+                    write_stream,
+                    InitializationOptions(
+                        server_name=settings.MCP_SERVER_NAME,
+                        server_version=settings.MCP_SERVER_VERSION,
+                        capabilities=server.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={},
+                        ),
                     ),
-                ),
-            )
+                )
+        finally:
+            server.recall_pipeline.close()
 
     asyncio.run(_serve())
 

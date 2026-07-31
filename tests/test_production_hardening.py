@@ -27,6 +27,17 @@ from recall_mcp.pipeline import MemoryPipeline
 from recall_mcp.store import MemoryStore
 
 
+_PIPELINES: list[MemoryPipeline] = []
+
+
+@pytest.fixture(autouse=True)
+def close_test_pipelines(tmp_path):
+    """Release dispatcher threads before pytest removes temporary databases."""
+    yield
+    while _PIPELINES:
+        _PIPELINES.pop().close()
+
+
 class FakeEmbeddingProvider:
     model = "fake-embedding"
 
@@ -50,6 +61,7 @@ def make_pipeline(tmp_path: Path, **settings_overrides) -> MemoryPipeline:
         **settings_overrides,
     )
     pipeline = MemoryPipeline(settings)
+    _PIPELINES.append(pipeline)
     pipeline.gate_chain = GateFallbackChain([HeuristicBackend()])
     pipeline.extractor = StubExtractor()
     return pipeline
@@ -235,6 +247,8 @@ def test_secured_rest_context_metrics_and_safe_errors(secured_server):
     with urllib.request.urlopen(request, timeout=10) as response:
         metrics = response.read().decode()
     assert "recall_memories" in metrics
+    assert "recall_outbox_complete" in metrics
+    assert "recall_outbox_worker_alive 1.0" in metrics
 
     status, error = request_json(
         f"{base_url}/search?q=x&limit=100000",
@@ -284,6 +298,7 @@ def test_backup_and_restore_round_trip(tmp_path):
         == 0
     )
     restored = MemoryPipeline(restored_settings)
+    _PIPELINES.append(restored)
     assert restored.get(captured["id"]) is not None
 
 

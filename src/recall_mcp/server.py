@@ -57,6 +57,7 @@ def create_server():
 
     server = Server(settings.MCP_SERVER_NAME)
     server.settings = settings  # type: ignore[attr-defined]
+    server.recall_pipeline = pipeline  # type: ignore[attr-defined]
 
     @server.list_tools()
     async def list_tools():

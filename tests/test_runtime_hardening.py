@@ -23,6 +23,10 @@ from recall_mcp.pipeline import MemoryPipeline
         ({"NATS_URL": "http://127.0.0.1:4222"}, "NATS URL"),
         ({"OLLAMA_BASE_URL": "file:///tmp/ollama"}, "HTTP"),
         ({"PROCESSING_QUEUE_LIMIT": 1}, "queue limit"),
+        ({"OUTBOX_POLL_INTERVAL": 0}, "outbox polling"),
+        ({"OUTBOX_LEASE_SECONDS": 0}, "outbox polling"),
+        ({"OUTBOX_MAX_ATTEMPTS": 0}, "outbox retry"),
+        ({"OUTBOX_RETRY_BASE_SECONDS": 0}, "outbox retry"),
     ],
 )
 def test_settings_reject_invalid_runtime_limits(tmp_path, override, message):
@@ -51,22 +55,31 @@ class _NoCapacity:
         return False
 
 
-def test_capture_fails_safely_when_processing_queue_is_full(tmp_path):
+def test_capture_remains_durable_when_processing_capacity_is_full(tmp_path):
     settings = Settings(
         BASE_DIR=tmp_path,
         DB_PATH=tmp_path / "memory.db",
         EMBEDDINGS_ENABLED=False,
+        CAPTURE_PROCESSING_TIMEOUT=0.01,
     )
     pipeline = MemoryPipeline(settings)
-    pipeline._processing_slots = _NoCapacity()
+    pipeline.outbox_dispatcher.stop()
+    pipeline.outbox_dispatcher.capacity = _NoCapacity()
+    pipeline.outbox_dispatcher.start()
+    try:
+        result = pipeline.capture("preserve this raw capture")
 
-    result = pipeline.capture("preserve this raw capture")
-
-    assert result["processing_status"] == "failed"
-    assert result["processing_error"] == "processing capacity exhausted"
-    with sqlite3.connect(settings.DB_PATH) as connection:
-        row = connection.execute(
-            "SELECT status, error FROM raw_captures WHERE id = ?",
-            (result["id"],),
-        ).fetchone()
-    assert row == ("failed", "processing capacity exhausted")
+        assert result["processing_status"] == "pending"
+        with sqlite3.connect(settings.DB_PATH) as connection:
+            raw = connection.execute(
+                "SELECT status, error FROM raw_captures WHERE id = ?",
+                (result["id"],),
+            ).fetchone()
+            outbox = connection.execute(
+                "SELECT status FROM outbox_jobs WHERE raw_capture_id = ?",
+                (result["id"],),
+            ).fetchone()
+        assert raw == ("pending", "")
+        assert outbox == ("pending",)
+    finally:
+        pipeline.close()

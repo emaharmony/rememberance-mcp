@@ -90,3 +90,4 @@ def test_jetstream_redelivers_and_deduplicates(tmp_path):
         assert pipeline.store.count() == 1
     finally:
         subscriber.stop()
+        pipeline.close()

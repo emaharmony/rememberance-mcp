@@ -203,6 +203,11 @@ class RecallHandler(BaseHTTPRequestHandler):
                 storage = self.pipeline.store.integrity_report(quick=True)
                 probe["storage"] = storage
                 ready = ready and bool(storage["ok"])
+                outbox_worker = self.pipeline.outbox_dispatcher.health()
+                probe["outbox_worker"] = outbox_worker
+                ready = ready and bool(
+                    outbox_worker["running"] and outbox_worker["thread_alive"]
+                )
                 if self.pipeline.settings.API_TOKEN_FILE is not None:
                     token_permissions_ok = verify_token_file_permissions(
                         self.pipeline.settings.API_TOKEN_FILE
@@ -232,6 +237,23 @@ class RecallHandler(BaseHTTPRequestHandler):
                     self.service_metrics.set_gauge(
                         f"recall_ingest_events_{status}", float(count)
                     )
+                for status, count in operations["outbox"].items():
+                    self.service_metrics.set_gauge(
+                        f"recall_outbox_{status}", float(count)
+                    )
+                self.service_metrics.set_gauge(
+                    "recall_outbox_active_leases",
+                    float(operations["outbox_active_leases"]),
+                )
+                self.service_metrics.set_gauge(
+                    "recall_outbox_oldest_due_seconds",
+                    float(operations["outbox_oldest_due_seconds"]),
+                )
+                worker_health = self.pipeline.outbox_dispatcher.health()
+                self.service_metrics.set_gauge(
+                    "recall_outbox_worker_alive",
+                    1.0 if worker_health["thread_alive"] else 0.0,
+                )
                 nats_sub = getattr(self.pipeline, "nats_sub", None)
                 if nats_sub is not None:
                     nats_health = nats_sub.health()

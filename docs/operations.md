@@ -7,7 +7,7 @@
 - `/health` and `/v1/health`: compatibility responses.
 - `/metrics`: authenticated Prometheus text metrics.
 
-Alert when readiness fails for five minutes, disk free space drops below 20%, the latest successful off-host backup is older than 26 hours, NATS dead-letter count increases, or pending/failed embeddings grow continuously.
+Alert when readiness fails for five minutes, disk free space drops below 20%, the latest successful off-host backup is older than 26 hours, NATS dead-letter count increases, outbox dead jobs appear, the oldest due outbox age grows continuously, or pending/failed embeddings grow continuously.
 
 ## Logs
 
@@ -32,3 +32,19 @@ and every migration applied. A repeated run reports an empty `applied` list.
 Recall fails startup for unknown future or non-contiguous migration histories.
 Rollback restores the matching database backup and previous artifact. See
 [Schema migrations](schema-migrations.md).
+
+## Transactional outbox
+
+`recall-admin outbox status` reports counts, active leases, and the oldest due
+age without printing captured content. A dead job is terminal until an
+operator runs `recall-admin outbox retry <job-id>`; the running Recall service
+then picks up the reset job on its next poll.
+
+Defaults are a 0.25-second poll interval, a 300-second lease, 10 attempts, and
+2-second exponential retry bounded at 300 seconds. Override them with
+`RECALL_OUTBOX_POLL_INTERVAL`, `RECALL_OUTBOX_LEASE_SECONDS`,
+`RECALL_OUTBOX_MAX_ATTEMPTS`, and `RECALL_OUTBOX_RETRY_BASE_SECONDS`.
+
+Stop Recall gracefully so in-flight work can finish. After an unclean exit,
+wait for the old lease to expire or use the documented backup/restore path;
+do not edit outbox rows manually.

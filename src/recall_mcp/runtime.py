@@ -141,6 +141,18 @@ class Settings:
     PROCESSING_QUEUE_LIMIT: int = field(
         default_factory=lambda: _integer("PROCESSING_QUEUE_LIMIT", 64)
     )
+    OUTBOX_POLL_INTERVAL: float = field(
+        default_factory=lambda: _number("OUTBOX_POLL_INTERVAL", 0.25)
+    )
+    OUTBOX_LEASE_SECONDS: float = field(
+        default_factory=lambda: _number("OUTBOX_LEASE_SECONDS", 300.0)
+    )
+    OUTBOX_MAX_ATTEMPTS: int = field(
+        default_factory=lambda: _integer("OUTBOX_MAX_ATTEMPTS", 10)
+    )
+    OUTBOX_RETRY_BASE_SECONDS: float = field(
+        default_factory=lambda: _number("OUTBOX_RETRY_BASE_SECONDS", 2.0)
+    )
 
     NATS_URL: str = field(
         default_factory=lambda: _text("NATS_URL", "nats://127.0.0.1:4222")
@@ -197,6 +209,10 @@ class Settings:
             raise ValueError("RECALL_CAPTURE_PROCESSING_TIMEOUT must be positive")
         if self.PROCESSING_QUEUE_LIMIT < self.OLLAMA_MAX_CONCURRENCY:
             raise ValueError("processing queue limit must cover worker concurrency")
+        if self.OUTBOX_POLL_INTERVAL <= 0 or self.OUTBOX_LEASE_SECONDS <= 0:
+            raise ValueError("outbox polling and lease durations must be positive")
+        if self.OUTBOX_MAX_ATTEMPTS < 1 or self.OUTBOX_RETRY_BASE_SECONDS <= 0:
+            raise ValueError("outbox retry settings must be positive")
         if self.OLLAMA_TIMEOUT_SECONDS <= 0:
             raise ValueError("RECALL_OLLAMA_TIMEOUT_SECONDS must be positive")
         if not self.OLLAMA_BASE_URL.startswith(("http://", "https://")):

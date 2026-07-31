@@ -399,11 +399,111 @@ def _migration_production_reliability(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_transactional_outbox(conn: sqlite3.Connection) -> None:
+    _add_columns(
+        conn,
+        "raw_captures",
+        {
+            "requested_category": "TEXT",
+            "requested_tier": "TEXT",
+            "gate_decision": "TEXT",
+            "gate_confidence": "REAL",
+            "gate_backend": "TEXT",
+            "gate_fallback_used": "INTEGER",
+        },
+    )
+    _add_columns(conn, "facts", {"derivation_key": "TEXT"})
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_derivation_key
+        ON facts(derivation_key) WHERE derivation_key IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outbox_jobs (
+            id TEXT PRIMARY KEY,
+            raw_capture_id TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL DEFAULT 'capture.process',
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'processing', 'retry', 'complete', 'dead')),
+            attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+            available_at REAL NOT NULL,
+            lease_expires_at REAL,
+            last_error TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            completed_at REAL,
+            FOREIGN KEY (raw_capture_id)
+                REFERENCES raw_captures(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_outbox_jobs_due
+        ON outbox_jobs(status, available_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_outbox_jobs_lease
+        ON outbox_jobs(status, lease_expires_at)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO outbox_jobs (
+            id, raw_capture_id, event_type, status, attempts,
+            available_at, created_at, updated_at
+        )
+        SELECT
+            'outbox_' || id, id, 'capture.process', 'pending', 0,
+            received_at, received_at, ?
+        FROM raw_captures
+        WHERE status = 'pending'
+        ON CONFLICT(raw_capture_id) DO NOTHING
+        """,
+        (time.time(),),
+    )
+    _require_columns(
+        conn,
+        "raw_captures",
+        {
+            "requested_category",
+            "requested_tier",
+            "gate_decision",
+            "gate_confidence",
+            "gate_backend",
+            "gate_fallback_used",
+        },
+    )
+    _require_columns(conn, "facts", {"derivation_key"})
+    _require_columns(
+        conn,
+        "outbox_jobs",
+        {
+            "id",
+            "raw_capture_id",
+            "event_type",
+            "status",
+            "attempts",
+            "available_at",
+            "lease_expires_at",
+            "last_error",
+            "created_at",
+            "updated_at",
+            "completed_at",
+        },
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_memory", _migration_core_memory),
     Migration(2, "memory_v2", _migration_memory_v2),
     Migration(3, "graph_and_facts", _migration_graph_and_facts),
     Migration(4, "production_reliability", _migration_production_reliability),
+    Migration(5, "transactional_outbox", _migration_transactional_outbox),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
 

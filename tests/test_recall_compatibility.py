@@ -222,6 +222,7 @@ def test_legacy_database_remains_visible_without_a_competing_database(monkeypatc
                 ("chunk_legacy", memory_id, "Legacy chunk"),
             )
 
+        legacy.close()
         Settings._instance = None
         _reset_warning_state()
         with pytest.warns(RecallCompatibilityWarning, match="existing Remembrance"):
@@ -239,6 +240,7 @@ def test_legacy_database_remains_visible_without_a_competing_database(monkeypatc
             recall.fact_store.get_current_fact(source_entity, "status")["claim_value"]
             == "preserved"
         )
+        recall.close()
         assert recall.store_v2.get_dream_log(log_id)["status"] == "ok"
         with closing(sqlite3.connect(recall.settings.DB_PATH)) as conn, conn:
             chunk = conn.execute(

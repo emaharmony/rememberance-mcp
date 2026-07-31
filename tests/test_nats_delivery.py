@@ -28,17 +28,20 @@ class _Store:
 
 
 class _Pipeline:
-    def __init__(self, settings, *, reserve=True, error=None):
+    def __init__(
+        self, settings, *, reserve=True, error=None, processing_status="complete"
+    ):
         self.settings = settings
         self.store = _Store(reserve)
         self.error = error
+        self.processing_status = processing_status
         self.captures = []
 
     def capture(self, content, **kwargs):
         self.captures.append((content, kwargs))
         if self.error:
             raise RuntimeError(self.error)
-        return {"id": "memory-1", "processing_status": "complete"}
+        return {"id": "memory-1", "processing_status": self.processing_status}
 
 
 class _Message:
@@ -104,6 +107,17 @@ def test_nats_acknowledges_only_after_event_completion(tmp_path):
     assert message.acked == 1
     assert message.naks == []
     assert subscriber.health()["processed"] == 1
+
+
+def test_nats_acknowledges_a_durably_pending_capture(tmp_path):
+    subscriber, pipeline = _subscriber(tmp_path, processing_status="pending")
+    message = _Message(b'{"event_id":"pending","content":"durable pending"}')
+
+    asyncio.run(subscriber._handle_message(_JetStream(), message))
+
+    assert pipeline.store.completed == [("pending", "memory-1")]
+    assert message.acked == 1
+    assert message.naks == []
 
 
 def test_duplicate_nats_event_is_acked_without_recapture(tmp_path):

@@ -25,7 +25,10 @@ def main() -> None:
     )
 
     pipeline = MemoryPipeline(settings=Settings())
-    start_rest_api(pipeline, host=args.host, port=args.port)
+    try:
+        start_rest_api(pipeline, host=args.host, port=args.port)
+    finally:
+        pipeline.close()
 
 
 if __name__ == "__main__":

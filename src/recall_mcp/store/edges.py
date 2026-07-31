@@ -255,6 +255,47 @@ class EntityStore:
 
         return self.update_entity(entity_id, timeline=new_timeline)
 
+    def record_memory_mention(
+        self,
+        memory_id: str,
+        entity_id: str,
+        entry: str,
+        *,
+        source: str = "",
+        confidence: float = 1.0,
+    ) -> bool:
+        """Atomically create one memory link and its timeline entry."""
+        now = time.time()
+        date_str = time.strftime("%Y-%m-%d", time.localtime(now))
+        formatted = f"- **{date_str}** | {entry}"
+        if source:
+            formatted += f" [Source: {source}]"
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            entity = conn.execute(
+                "SELECT timeline FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+            if entity is None:
+                return False
+            cursor = conn.execute(
+                """
+                INSERT INTO memory_entities (memory_id, entity_id, confidence)
+                VALUES (?, ?, ?)
+                ON CONFLICT(memory_id, entity_id) DO NOTHING
+                """,
+                (memory_id, entity_id, confidence),
+            )
+            if cursor.rowcount != 1:
+                return False
+            timeline = str(entity["timeline"] or "")
+            conn.execute(
+                """
+                UPDATE entities SET timeline = ?, updated_at = ? WHERE id = ?
+                """,
+                (formatted + "\n" + timeline, now, entity_id),
+            )
+        return True
+
     def find_entity(self, name: str) -> Optional[dict]:
         """
         Find an entity by name or alias (fuzzy matching).

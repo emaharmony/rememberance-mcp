@@ -64,6 +64,7 @@ def test_fresh_database_applies_all_migrations(tmp_path):
         "facts",
         "raw_captures",
         "ingest_events",
+        "outbox_jobs",
     }.issubset(_objects(db_path, "table"))
     assert {
         "project",
@@ -72,6 +73,12 @@ def test_fresh_database_applies_all_migrations(tmp_path):
         "embedding_status",
         "processing_status",
     }.issubset(_columns(db_path, "memories"))
+    assert {
+        "requested_category",
+        "requested_tier",
+        "gate_decision",
+    }.issubset(_columns(db_path, "raw_captures"))
+    assert "derivation_key" in _columns(db_path, "facts")
     assert {
         "entities_cleanup_relations",
         "entities_cleanup_facts",
@@ -89,9 +96,13 @@ def test_fresh_database_applies_all_migrations(tmp_path):
         ingest_event_parents = {
             row[2] for row in conn.execute("PRAGMA foreign_key_list(ingest_events)")
         }
+        outbox_parents = {
+            row[2] for row in conn.execute("PRAGMA foreign_key_list(outbox_jobs)")
+        }
     assert history == [(migration.version, migration.name) for migration in MIGRATIONS]
     assert memory_entity_parents == {"memories", "entities"}
     assert ingest_event_parents == {"memories", "raw_captures"}
+    assert outbox_parents == {"raw_captures"}
 
 
 def test_unversioned_legacy_database_preserves_rows(tmp_path):
@@ -163,7 +174,7 @@ def test_partially_migrated_database_resumes_in_order(tmp_path):
     resumed = run_migrations(db_path)
 
     assert resumed.from_version == 2
-    assert [migration.version for migration in resumed.applied] == [3, 4]
+    assert [migration.version for migration in resumed.applied] == [3, 4, 5]
     assert resumed.to_version == CURRENT_SCHEMA_VERSION
 
 
@@ -194,7 +205,7 @@ def test_concurrent_migration_attempts_serialize(tmp_path):
         history = conn.execute(
             "SELECT version, COUNT(*) FROM schema_migrations GROUP BY version"
         ).fetchall()
-    assert history == [(1, 1), (2, 1), (3, 1), (4, 1)]
+    assert history == [(migration.version, 1) for migration in MIGRATIONS]
 
 
 def test_failed_migration_rolls_back_schema_and_ledger(tmp_path):

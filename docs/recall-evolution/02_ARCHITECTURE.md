@@ -139,13 +139,13 @@ Derived data must be:
 ```text
 Capture candidate
     ↓
-Resolve identity and scope
+Resolve available scope
     ↓
-Ingestion gate
+Canonical raw capture + transactional outbox
     ↓
-Canonical memory transaction
+Ingestion gate with persisted result
     ↓
-Transactional outbox
+Accepted canonical memory
     ↓
 Extraction, embedding, chunking, graph, facts
     ↓
@@ -398,3 +398,19 @@ Store constructors and `recall-admin migrate` share this runner. Optional FTS5
 indexes remain outside the canonical ledger because they are derived and
 rebuildable. Rollback restores the matching pre-migration database backup and
 prior application artifact; Recall does not run down migrations.
+
+## 15. Transactional capture outbox boundary
+
+Recall Local commits a raw capture and its `capture.process` outbox job in one
+short `BEGIN IMMEDIATE` transaction. Model calls occur only after commit. The
+single-process dispatcher claims jobs with bounded concurrency and a
+time-limited lease; pending, retryable, or expired work survives restart.
+
+Delivery is at least once. Correctness therefore comes from persisted gate
+results, idempotent provisional memory creation, atomic entity-link/timeline
+updates, stable fact derivation keys, and repeatable embedding updates. Raw
+capture completion and outbox completion form one final transaction.
+
+Dead jobs and backlog age are observable. Operators may reset one dead job;
+Recall does not depend on Redis, NATS, or another service for local capture
+durability.

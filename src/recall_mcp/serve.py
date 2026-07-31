@@ -115,6 +115,7 @@ def main():
     finally:
         if nats_sub:
             nats_sub.stop()
+        pipeline.close()
 
 
 if __name__ == "__main__":

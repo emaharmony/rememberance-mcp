@@ -194,18 +194,21 @@ def command_init(settings: Settings, args: argparse.Namespace) -> int:
         _write_secret(token_file, secrets.token_urlsafe(48))
     from recall_mcp.pipeline import MemoryPipeline
 
-    MemoryPipeline(settings)
+    with MemoryPipeline(settings, start_outbox_worker=False):
+        pass
     print(json.dumps({"home": str(settings.BASE_DIR), "token_file": str(token_file)}))
     return 0
 
 
 def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
-    integrity = MemoryStore(settings.DB_PATH).integrity_report(quick=True)
+    store = MemoryStore(settings.DB_PATH)
+    integrity = store.integrity_report(quick=True)
     checks: dict[str, object] = {
         "version": VERSION,
         "home": str(settings.BASE_DIR),
         "database": str(settings.DB_PATH),
         "database_integrity": integrity,
+        "outbox": store.operational_stats()["outbox"],
     }
     token_file = args.token_file or settings.API_TOKEN_FILE
     checks["token_file"] = str(token_file) if token_file else None
@@ -425,10 +428,35 @@ def command_integrity(settings: Settings, _args: argparse.Namespace) -> int:
 def command_reembed(settings: Settings, args: argparse.Namespace) -> int:
     from recall_mcp.pipeline import MemoryPipeline
 
-    pipeline = MemoryPipeline(settings)
-    result = pipeline.dream(phases=["embed_stale"], dry_run=args.dry_run)
+    with MemoryPipeline(settings, start_outbox_worker=False) as pipeline:
+        result = pipeline.dream(phases=["embed_stale"], dry_run=args.dry_run)
     print(json.dumps(result, indent=2))
     return 0 if result["status"] in {"ok", "partial"} else 1
+
+
+def command_outbox(settings: Settings, args: argparse.Namespace) -> int:
+    """Inspect or retry durable capture-processing jobs."""
+    store = MemoryStore(settings.DB_PATH)
+    if args.action == "status":
+        operational = store.operational_stats()
+        print(
+            json.dumps(
+                {
+                    "database": str(settings.DB_PATH),
+                    "counts": operational["outbox"],
+                    "active_leases": operational["outbox_active_leases"],
+                    "oldest_due_seconds": operational["outbox_oldest_due_seconds"],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if not args.job_id:
+        print(json.dumps({"error": "outbox retry requires a job ID"}))
+        return 2
+    retried = store.retry_dead_outbox_job(args.job_id)
+    print(json.dumps({"job_id": args.job_id, "requeued": retried}))
+    return 0 if retried else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -440,6 +468,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init")
     subparsers.add_parser("doctor")
     subparsers.add_parser("migrate")
+    outbox = subparsers.add_parser("outbox")
+    outbox.add_argument("action", choices=["status", "retry"])
+    outbox.add_argument("job_id", nargs="?")
     models = subparsers.add_parser("models")
     models.add_argument("action", choices=["pull"])
     nats_parser = subparsers.add_parser("nats")
@@ -490,6 +521,8 @@ def main() -> None:
         code = command_nats_bootstrap(settings, args)
     elif args.command == "token":
         code = command_token_rotate(settings, args)
+    elif args.command == "outbox":
+        code = command_outbox(settings, args)
     elif args.command == "version":
         print(VERSION)
         code = 0

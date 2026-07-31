@@ -66,6 +66,26 @@ class Memory:
     expires_at: Optional[float]  # None = never expires (persist tier)
 
 
+@dataclass(frozen=True)
+class OutboxJob:
+    """One leased durable capture-processing job."""
+
+    id: str
+    raw_capture_id: str
+    event_type: str
+    attempts: int
+    content: str
+    source: str
+    project: str
+    agent: str
+    requested_category: Optional[str]
+    requested_tier: Optional[str]
+    gate_decision: Optional[str]
+    gate_confidence: Optional[float]
+    gate_backend: Optional[str]
+    gate_fallback_used: Optional[bool]
+
+
 class MemoryStore:
     """
     SQLite-backed memory store with TTL-based expiry.
@@ -112,6 +132,55 @@ class MemoryStore:
         run_migrations(self.db_path)
         logger.info("Memory store initialized at %s", self.db_path)
 
+    def enqueue_capture(
+        self,
+        content: str,
+        *,
+        source: str = "",
+        project: str = "",
+        agent: str = "",
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Atomically persist a raw capture and its processing job."""
+        now = time.time()
+        capture_id = f"mem_{int(now)}_{uuid.uuid4().hex[:6]}"
+        job_id = f"outbox_{uuid.uuid4().hex}"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO raw_captures (
+                    id, content, source, project, agent,
+                    requested_category, requested_tier,
+                    received_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    capture_id,
+                    content,
+                    source,
+                    project,
+                    agent,
+                    category,
+                    tier,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO outbox_jobs (
+                    id, raw_capture_id, event_type, status, attempts,
+                    available_at, created_at, updated_at
+                )
+                VALUES (?, ?, 'capture.process', 'pending', 0, ?, ?, ?)
+                """,
+                (job_id, capture_id, now, now, now),
+            )
+        return capture_id, job_id
+
     def persist_raw_capture(
         self,
         content: str,
@@ -120,24 +189,408 @@ class MemoryStore:
         project: str = "",
         agent: str = "",
     ) -> str:
-        """Persist an input before any model-dependent processing begins."""
-        now = time.time()
-        capture_id = f"mem_{int(now)}_{uuid.uuid4().hex[:6]}"
+        """Compatibility wrapper that now creates a durable outbox job."""
+        capture_id, _job_id = self.enqueue_capture(
+            content, source=source, project=project, agent=agent
+        )
+        return capture_id
+
+    def claim_outbox_job(
+        self,
+        *,
+        lease_seconds: float,
+        job_id: str | None = None,
+        now: float | None = None,
+    ) -> OutboxJob | None:
+        """Atomically claim one due or expired capture-processing job."""
+        claimed_at = time.time() if now is None else now
+        due = """
+            ((j.status IN ('pending', 'retry') AND j.available_at <= ?)
+             OR (j.status = 'processing' AND j.lease_expires_at <= ?))
+        """
+        params: list[object] = [claimed_at, claimed_at]
+        if job_id is not None:
+            due += " AND j.id = ?"
+            params.append(job_id)
         with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                f"""
+                SELECT j.id
+                FROM outbox_jobs j
+                WHERE {due}
+                ORDER BY j.available_at, j.created_at
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+            if row is None:
+                return None
+            selected_id = str(row["id"])
             conn.execute(
                 """
-                INSERT INTO raw_captures
-                    (id, content, source, project, agent, received_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                UPDATE outbox_jobs
+                SET status = 'processing', attempts = attempts + 1,
+                    lease_expires_at = ?, updated_at = ?
+                WHERE id = ?
                 """,
-                (capture_id, content, source, project, agent, now, now),
+                (claimed_at + lease_seconds, claimed_at, selected_id),
             )
-        return capture_id
+            conn.execute(
+                """
+                UPDATE raw_captures
+                SET status = 'processing', updated_at = ?
+                WHERE id = (
+                    SELECT raw_capture_id FROM outbox_jobs WHERE id = ?
+                )
+                """,
+                (claimed_at, selected_id),
+            )
+            claimed = conn.execute(
+                """
+                SELECT
+                    j.id, j.raw_capture_id, j.event_type, j.attempts,
+                    r.content, r.source, r.project, r.agent,
+                    r.requested_category, r.requested_tier,
+                    r.gate_decision, r.gate_confidence, r.gate_backend,
+                    r.gate_fallback_used
+                FROM outbox_jobs j
+                JOIN raw_captures r ON r.id = j.raw_capture_id
+                WHERE j.id = ?
+                """,
+                (selected_id,),
+            ).fetchone()
+        fallback = claimed["gate_fallback_used"]
+        return OutboxJob(
+            id=str(claimed["id"]),
+            raw_capture_id=str(claimed["raw_capture_id"]),
+            event_type=str(claimed["event_type"]),
+            attempts=int(claimed["attempts"]),
+            content=str(claimed["content"]),
+            source=str(claimed["source"]),
+            project=str(claimed["project"]),
+            agent=str(claimed["agent"]),
+            requested_category=claimed["requested_category"],
+            requested_tier=claimed["requested_tier"],
+            gate_decision=claimed["gate_decision"],
+            gate_confidence=claimed["gate_confidence"],
+            gate_backend=claimed["gate_backend"],
+            gate_fallback_used=None if fallback is None else bool(fallback),
+        )
+
+    def ensure_capture_memory(
+        self,
+        job: OutboxJob,
+        *,
+        gate_decision: str,
+        gate_confidence: float,
+        gate_backend: str,
+        gate_fallback_used: bool,
+        category: str,
+        tier: str,
+    ) -> str:
+        """Persist the accepted gate result and provisional memory idempotently."""
+        now = time.time()
+        ttl = self.ttl_config.get(tier, self.ttl_config["active"])
+        expires_at = None if ttl == -1 else now + ttl
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """
+                SELECT content, source, project, agent
+                FROM memories WHERE id = ?
+                """,
+                (job.raw_capture_id,),
+            ).fetchone()
+            expected = (job.content, job.source, job.project, job.agent)
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO memories (
+                        id, content, summary, category, tier, key_topics,
+                        source, embedding, created_at, accessed_at, expires_at,
+                        project, agent, processing_status
+                    )
+                    VALUES (?, ?, ?, ?, ?, '[]', ?, NULL, ?, ?, ?, ?, ?, 'pending')
+                    """,
+                    (
+                        job.raw_capture_id,
+                        job.content,
+                        job.content[:200],
+                        category,
+                        tier,
+                        job.source,
+                        now,
+                        now,
+                        expires_at,
+                        job.project,
+                        job.agent,
+                    ),
+                )
+            elif tuple(existing) != expected:
+                raise ValueError(f"canonical capture mismatch for {job.raw_capture_id}")
+            conn.execute(
+                """
+                UPDATE raw_captures
+                SET gate_decision = ?, gate_confidence = ?, gate_backend = ?,
+                    gate_fallback_used = ?, memory_id = ?, status = 'processing',
+                    error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    gate_decision,
+                    gate_confidence,
+                    gate_backend,
+                    int(gate_fallback_used),
+                    job.raw_capture_id,
+                    now,
+                    job.raw_capture_id,
+                ),
+            )
+        return job.raw_capture_id
+
+    def record_gate_result(
+        self,
+        job: OutboxJob,
+        *,
+        gate_decision: str,
+        gate_confidence: float,
+        gate_backend: str,
+        gate_fallback_used: bool,
+    ) -> tuple[str, float, str, bool]:
+        """Persist and return the canonical first gate result for a capture."""
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE raw_captures
+                SET gate_decision = ?, gate_confidence = ?, gate_backend = ?,
+                    gate_fallback_used = ?, error = '', updated_at = ?
+                WHERE id = ? AND gate_decision IS NULL
+                """,
+                (
+                    gate_decision,
+                    gate_confidence,
+                    gate_backend,
+                    int(gate_fallback_used),
+                    now,
+                    job.raw_capture_id,
+                ),
+            )
+            if cursor.rowcount not in (0, 1):
+                raise RuntimeError(
+                    f"unexpected gate-result update count for {job.raw_capture_id}"
+                )
+            canonical = conn.execute(
+                """
+                SELECT gate_decision, gate_confidence, gate_backend,
+                       gate_fallback_used
+                FROM raw_captures WHERE id = ?
+                """,
+                (job.raw_capture_id,),
+            ).fetchone()
+            if canonical is None or canonical[0] is None:
+                raise RuntimeError(
+                    f"gate result was not persisted for {job.raw_capture_id}"
+                )
+        return (
+            str(canonical[0]),
+            float(canonical[1]),
+            str(canonical[2]),
+            bool(canonical[3]),
+        )
+
+    def complete_skipped_outbox_job(
+        self,
+        job: OutboxJob,
+        *,
+        gate_decision: str,
+        gate_confidence: float,
+        gate_backend: str,
+        gate_fallback_used: bool,
+    ) -> None:
+        """Atomically persist a skip result and complete its outbox job."""
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE raw_captures
+                SET gate_decision = ?, gate_confidence = ?, gate_backend = ?,
+                    gate_fallback_used = ?, status = 'skipped', memory_id = NULL,
+                    error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    gate_decision,
+                    gate_confidence,
+                    gate_backend,
+                    int(gate_fallback_used),
+                    now,
+                    job.raw_capture_id,
+                ),
+            )
+            self._mark_outbox_complete(conn, job.id, now)
+
+    @staticmethod
+    def _mark_outbox_complete(
+        conn: sqlite3.Connection, job_id: str, now: float
+    ) -> None:
+        cursor = conn.execute(
+            """
+            UPDATE outbox_jobs
+            SET status = 'complete', lease_expires_at = NULL,
+                last_error = '', updated_at = ?, completed_at = ?
+            WHERE id = ? AND status = 'processing'
+            """,
+            (now, now, job_id),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"outbox lease lost before completion: {job_id}")
+
+    def complete_outbox_job(
+        self, job: OutboxJob, memory_id: str, *, status: str = "complete"
+    ) -> None:
+        """Atomically complete the durable job and its raw capture."""
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE raw_captures
+                SET status = ?, memory_id = ?, error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (status, memory_id, now, job.raw_capture_id),
+            )
+            self._mark_outbox_complete(conn, job.id, now)
+
+    def fail_outbox_job(
+        self,
+        job: OutboxJob,
+        error: str,
+        *,
+        max_attempts: int,
+        retry_base_seconds: float,
+        now: float | None = None,
+    ) -> tuple[str, float]:
+        """Schedule retry or atomically mark exhausted work dead."""
+        failed_at = time.time() if now is None else now
+        message = error[:1000]
+        terminal = job.attempts >= max_attempts
+        delay = (
+            0.0
+            if terminal
+            else min(300.0, retry_base_seconds * (2 ** max(0, job.attempts - 1)))
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if terminal:
+                cursor = conn.execute(
+                    """
+                    UPDATE outbox_jobs
+                    SET status = 'dead', lease_expires_at = NULL,
+                        last_error = ?, updated_at = ?, completed_at = ?
+                    WHERE id = ? AND status = 'processing'
+                    """,
+                    (message, failed_at, failed_at, job.id),
+                )
+                raw_status = "failed"
+                memory_status = "failed"
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE outbox_jobs
+                    SET status = 'retry', available_at = ?,
+                        lease_expires_at = NULL, last_error = ?,
+                        updated_at = ?, completed_at = NULL
+                    WHERE id = ? AND status = 'processing'
+                    """,
+                    (failed_at + delay, message, failed_at, job.id),
+                )
+                raw_status = "pending"
+                memory_status = "pending"
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"outbox lease lost after failure: {job.id}")
+            conn.execute(
+                """
+                UPDATE raw_captures
+                SET status = ?, error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (raw_status, message, failed_at, job.raw_capture_id),
+            )
+            conn.execute(
+                """
+                UPDATE memories
+                SET processing_status = ?, processing_error = ?
+                WHERE id = ?
+                """,
+                (memory_status, message, job.raw_capture_id),
+            )
+        return ("dead" if terminal else "retry", delay)
+
+    def retry_dead_outbox_job(self, job_id: str) -> bool:
+        """Reset one dead job for an operator-requested retry."""
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT raw_capture_id FROM outbox_jobs WHERE id = ? AND status = 'dead'",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            raw_capture_id = str(row[0])
+            conn.execute(
+                """
+                UPDATE outbox_jobs
+                SET status = 'pending', attempts = 0, available_at = ?,
+                    lease_expires_at = NULL, last_error = '',
+                    updated_at = ?, completed_at = NULL
+                WHERE id = ?
+                """,
+                (now, now, job_id),
+            )
+            conn.execute(
+                """
+                UPDATE raw_captures
+                SET status = 'pending', error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (now, raw_capture_id),
+            )
+            conn.execute(
+                """
+                UPDATE memories
+                SET processing_status = 'pending', processing_error = ''
+                WHERE id = ?
+                """,
+                (raw_capture_id,),
+            )
+        return True
+
+    def outbox_job(self, job_id: str) -> dict | None:
+        """Return non-content job metadata for diagnostics."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT id, raw_capture_id, event_type, status, attempts,
+                       available_at, lease_expires_at, last_error,
+                       created_at, updated_at, completed_at
+                FROM outbox_jobs WHERE id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def complete_raw_capture(
         self, capture_id: str, memory_id: str | None, *, status: str = "complete"
     ) -> None:
-        """Link a durable raw capture to its processed memory."""
+        """Compatibility helper for callers managing raw state directly."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -149,7 +602,7 @@ class MemoryStore:
             )
 
     def fail_raw_capture(self, capture_id: str, error: str) -> None:
-        """Record a processing failure without losing the original capture."""
+        """Compatibility helper for callers managing raw state directly."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -545,6 +998,7 @@ class MemoryStore:
         return results
 
     def operational_stats(self) -> dict:
+        now = time.time()
         with self._connect() as conn:
             embedding = {
                 row[0]: row[1]
@@ -564,10 +1018,40 @@ class MemoryStore:
                     "SELECT status, COUNT(*) FROM ingest_events GROUP BY status"
                 )
             }
+            outbox = {
+                row[0]: row[1]
+                for row in conn.execute(
+                    "SELECT status, COUNT(*) FROM outbox_jobs GROUP BY status"
+                )
+            }
+            oldest_due = conn.execute(
+                """
+                SELECT MIN(
+                    CASE WHEN status = 'processing'
+                         THEN lease_expires_at ELSE available_at END
+                )
+                FROM outbox_jobs
+                WHERE (status IN ('pending', 'retry') AND available_at <= ?)
+                   OR (status = 'processing' AND lease_expires_at <= ?)
+                """,
+                (now, now),
+            ).fetchone()[0]
+            active_leases = conn.execute(
+                """
+                SELECT COUNT(*) FROM outbox_jobs
+                WHERE status = 'processing' AND lease_expires_at > ?
+                """,
+                (now,),
+            ).fetchone()[0]
         return {
             "embeddings": embedding,
             "processing": processing,
             "ingest_events": events,
+            "outbox": outbox,
+            "outbox_oldest_due_seconds": (
+                max(0.0, now - float(oldest_due)) if oldest_due is not None else 0.0
+            ),
+            "outbox_active_leases": active_leases,
         }
 
     def integrity_report(self, *, quick: bool = False) -> dict:

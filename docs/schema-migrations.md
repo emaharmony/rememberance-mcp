@@ -1,7 +1,7 @@
 # Schema migrations
 
 Recall uses ordered, forward-only SQLite migrations for canonical schema
-changes. The current schema version is `4`.
+changes. The current schema version is `5`.
 
 ## Migration ledger
 
@@ -19,6 +19,7 @@ Current migrations are:
 | 2 | `memory_v2` | Compiled truth, timeline, dream metadata, and dream log |
 | 3 | `graph_and_facts` | Entities, edges, aliases, memory links, and facts |
 | 4 | `production_reliability` | Scope, embedding and processing metadata, raw captures, and ingestion events |
+| 5 | `transactional_outbox` | Durable capture jobs, leases, retries, persisted gate results, and fact derivation keys |
 
 FTS5 tables and triggers are not canonical migration state. They are derived
 indexes that Recall can rebuild from canonical memories.
@@ -36,12 +37,12 @@ The command returns structured JSON:
 ```json
 {
   "database": "C:\\Users\\example\\.recall\\memory.db",
-  "from_version": 3,
-  "to_version": 4,
+  "from_version": 4,
+  "to_version": 5,
   "applied": [
     {
-      "version": 4,
-      "name": "production_reliability"
+      "version": 5,
+      "name": "transactional_outbox"
     }
   ]
 }

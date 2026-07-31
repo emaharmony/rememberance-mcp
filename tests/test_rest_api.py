@@ -64,6 +64,8 @@ def api_server():
         }
 
         server.shutdown()
+        server.server_close()
+        pipeline.close()
 
 
 class TestHealthEndpoint:
@@ -72,6 +74,12 @@ class TestHealthEndpoint:
         data = json.loads(resp.read())
         assert data["status"] == "ok"
         assert data["version"] == "2.0.0"
+
+    def test_readiness_includes_outbox_worker(self, api_server):
+        resp = urllib.request.urlopen(f"{api_server['base_url']}/health/ready")
+        data = json.loads(resp.read())
+        assert data["status"] == "ready"
+        assert data["outbox_worker"]["thread_alive"] is True
 
 
 class TestClientDisconnectHandling:
@@ -102,6 +110,8 @@ class TestStatsEndpoint:
         data = json.loads(resp.read())
         assert "memories" in data
         assert "entities" in data
+        assert "outbox" in data["operational"]
+        assert data["outbox_worker"]["thread_alive"] is True
 
 
 class TestCaptureEndpoint:

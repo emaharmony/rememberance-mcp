@@ -47,7 +47,7 @@ Status: **In progress**
 Progress:
 
 - [x] Formal schema migrations
-- [ ] Transactional outbox
+- [x] Transactional outbox
 - [x] Foreign-key enforcement
 - [ ] Idempotent capture — database-backed NATS events exist; general capture keys remain
 - [ ] Structured errors — REST errors exist; shared application errors remain
@@ -61,14 +61,18 @@ Completed slice:
 - Auditable schema ledger and fail-closed version validation
 - Fresh, legacy, retry, rollback, and concurrent migration coverage
 - Structured `recall-admin migrate` reporting
+- Atomic raw-capture and outbox enqueue
+- Leased, retryable, restart-safe capture processing
+- Idempotent memory, graph, timeline, fact, and embedding retries
+- Outbox health, metrics, doctor, status, and manual retry operations
 
 Deferred:
 
-- Transactional outbox and all later Phase 0 work
+- General capture idempotency keys and all later Phase 0 work
 
 Next recommended slice:
 
-- Transactional outbox for retryable derived processing
+- General capture idempotency across REST, MCP, NATS, and library callers
 
 Exit gate:
 

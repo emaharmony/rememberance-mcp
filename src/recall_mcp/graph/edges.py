@@ -71,13 +71,6 @@ class GraphWiring:
 
             if existing:
                 entity_id = existing["id"]
-                # Add timeline entry about this mention
-                timeline_entry = f"Mentioned in memory {memory_id}"
-                if de.context:
-                    timeline_entry += f': "{de.context}"'
-                self.entity_store.add_timeline_entry(
-                    entity_id, timeline_entry, source=source
-                )
             else:
                 # Create new entity
                 entity_id = self.entity_store.create_entity(
@@ -88,12 +81,6 @@ class GraphWiring:
                     tier="active" if de.confidence >= 0.7 else "cold",
                 )
                 new_entities.append(entity_id)
-                # Add initial timeline entry
-                self.entity_store.add_timeline_entry(
-                    entity_id,
-                    f'Entity created from memory {memory_id}: "{de.context}"',
-                    source=source,
-                )
 
             entity_ids.append(entity_id)
 
@@ -124,10 +111,26 @@ class GraphWiring:
                         }
                     )
 
-        # Step 4: Link memory to entities
+        # Step 4: Link each entity and append its timeline exactly once.
         links = 0
-        for entity_id in entity_ids:
-            if self.entity_store.link_memory_entity(memory_id, entity_id):
+        new_entity_ids = set(new_entities)
+        for detected_entity, entity_id in zip(detected, entity_ids):
+            if entity_id in new_entity_ids:
+                timeline_entry = (
+                    f"Entity created from memory {memory_id}: "
+                    f'"{detected_entity.context}"'
+                )
+            else:
+                timeline_entry = f"Mentioned in memory {memory_id}"
+                if detected_entity.context:
+                    timeline_entry += f': "{detected_entity.context}"'
+            if self.entity_store.record_memory_mention(
+                memory_id,
+                entity_id,
+                timeline_entry,
+                source=source,
+                confidence=detected_entity.confidence,
+            ):
                 links += 1
 
         # Step 5: Always add "mentions" edges from each entity to the others
