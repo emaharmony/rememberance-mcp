@@ -203,12 +203,22 @@ def command_init(settings: Settings, args: argparse.Namespace) -> int:
 def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
     store = MemoryStore(settings.DB_PATH)
     integrity = store.integrity_report(quick=True)
+    operational = store.operational_stats()
     checks: dict[str, object] = {
         "version": VERSION,
         "home": str(settings.BASE_DIR),
         "database": str(settings.DB_PATH),
         "database_integrity": integrity,
-        "outbox": store.operational_stats()["outbox"],
+        "outbox": operational["outbox"],
+        "outbox_active_leases": operational["outbox_active_leases"],
+        "outbox_oldest_due_seconds": operational["outbox_oldest_due_seconds"],
+        "outbox_worker": {
+            "observed": False,
+            "running": False,
+            "thread_alive": False,
+            "inflight": 0,
+            "last_error": None,
+        },
     }
     token_file = args.token_file or settings.API_TOKEN_FILE
     checks["token_file"] = str(token_file) if token_file else None

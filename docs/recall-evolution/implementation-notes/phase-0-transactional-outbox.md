@@ -48,12 +48,19 @@ versioned outbox schema.
   idempotent for at-least-once execution.
 - Retryable failures use bounded exponential backoff. Exhausted work becomes
   `dead`, and the raw capture plus provisional memory become `failed`.
+- Failure text is sanitized before persistence or exposure. Outbox, raw,
+  memory, waiter, health, and log paths retain the exception class and a
+  generic message without the raw exception or captured content.
 - Job completion and raw-capture completion commit together.
 - Queue saturation leaves durable work pending instead of rejecting it.
 
 ## Operations
 
-- Health, stats, doctor output, and Prometheus metrics expose outbox state.
+- Health and stats expose stable five-state counts, due age, active leases,
+  live worker state, and the sanitized last dispatcher error. Prometheus uses
+  a boolean dispatcher-error gauge rather than error text.
+- Doctor remains workerless: it reports queue state and explicitly marks live
+  worker liveness/error as not observed.
 - `recall-admin outbox status` reports backlog without captured content.
 - `recall-admin outbox retry <job-id>` requeues one dead job.
 - Rollback restores the pre-migration backup and previous application
@@ -68,6 +75,8 @@ versioned outbox schema.
 - Synchronous and timeout/pending capture compatibility
 - NATS post-commit acknowledgment behavior
 - Worker health, metrics, admin status/retry, and graceful shutdown
+- Sanitized failures and retries after each memory, graph, fact, and embedding
+  write boundary
 - Full test, lint, format, type, compile, build, and clean-wheel checks
 
 ## Explicit non-goals
@@ -79,7 +88,7 @@ versioned outbox schema.
 - Redis, PostgreSQL, distributed locks, or multiple Recall writers
 - Exactly-once delivery
 
-## Completed checkpoint (2026-07-31)
+## Completed checkpoint (2026-08-01)
 
 The transactional-outbox slice is complete on
 `feature/recall-phase-0-transactional-outbox`. Phase 0 remains in progress;
@@ -87,12 +96,14 @@ no Phase 1 identity or task model was introduced.
 
 Validation evidence:
 
-- `pytest tests`: 212 passed, 2 skipped, 2 expected deprecation warnings.
+- Full branch-coverage suite: 220 passed, 2 skipped, 2 expected deprecation
+  warnings.
 - Branch coverage: 65% repository-wide; the new outbox module is 84% and the
   revised pipeline is 86%.
-- Transactional-outbox focus: 9 passed, including rollback, lease recovery,
-  persisted gate reuse, retry/dead-letter, restart, and partial-work
-  idempotency cases.
+- Transactional-outbox focus: 16 passed, including rollback, competing claims,
+  lease recovery, persisted gate reuse, capped backoff, retry/dead-letter,
+  restart, sanitized errors, clean shutdown, and idempotency after every
+  derived-write boundary.
 - Ruff format/check: clean across 62 files; mypy: no issues in 41 source
   files; `compileall`: clean.
 - Source distribution and wheel build succeeded. A clean, no-dependency wheel

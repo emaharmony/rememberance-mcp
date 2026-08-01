@@ -79,7 +79,36 @@ class TestHealthEndpoint:
         resp = urllib.request.urlopen(f"{api_server['base_url']}/health/ready")
         data = json.loads(resp.read())
         assert data["status"] == "ready"
+        assert data["outbox"] == {
+            "pending": 0,
+            "processing": 0,
+            "retry": 0,
+            "complete": 0,
+            "dead": 0,
+        }
+        assert data["outbox_active_leases"] == 0
+        assert data["outbox_oldest_due_seconds"] == 0
         assert data["outbox_worker"]["thread_alive"] is True
+
+    def test_readiness_sanitizes_dispatcher_error(self, api_server):
+        pipeline = api_server["pipeline"]
+        pipeline.outbox_dispatcher._record_error(
+            RuntimeError("customer-secret must not escape")
+        )
+
+        resp = urllib.request.urlopen(f"{api_server['base_url']}/health/ready")
+        data = json.loads(resp.read())
+
+        assert data["outbox_worker"]["last_error"] == (
+            "RuntimeError: capture processing failed"
+        )
+        assert "customer-secret" not in json.dumps(data)
+
+        metrics = (
+            urllib.request.urlopen(f"{api_server['base_url']}/metrics").read().decode()
+        )
+        assert "recall_outbox_dispatcher_error 1.0" in metrics
+        assert "customer-secret" not in metrics
 
 
 class TestClientDisconnectHandling:
@@ -111,6 +140,13 @@ class TestStatsEndpoint:
         assert "memories" in data
         assert "entities" in data
         assert "outbox" in data["operational"]
+        assert set(data["operational"]["outbox"]) == {
+            "pending",
+            "processing",
+            "retry",
+            "complete",
+            "dead",
+        }
         assert data["outbox_worker"]["thread_alive"] is True
 
 

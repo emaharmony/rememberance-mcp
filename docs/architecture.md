@@ -27,7 +27,7 @@ MCP normally uses a local stdio transport. REST is the externally proxied interf
 3. The first gate result is persisted. Rejected inputs retain an audited raw row and return `SKIP`; accepted inputs use the same stable ID for an idempotently created memory.
 4. Extraction updates summary, category, tier, and topics. Entity links/timeline events and conservative facts use stable derivation keys so retries do not duplicate derived state.
 5. When enabled, Ollama creates an `embeddinggemma` vector. Recall stores the model, dimensions, SHA-256 content hash, status, and timestamp.
-6. Processing returns within 15 seconds: `complete`, `pending`, or `failed`. Timed-out work continues durably; exhausted work becomes visible as a dead outbox job.
+6. Processing returns within 15 seconds: `complete`, `pending`, or `failed`. Timed-out work continues durably; exhausted work becomes visible as a dead outbox job. Durable and API-visible failures retain only an exception class plus a generic message, never raw exception or capture text.
 
 JetStream events add a database event reservation before capture. Recall acknowledges only after the raw capture and unique event status are committed. Invalid or exhausted events are published to the durable dead-letter subject.
 
@@ -53,6 +53,7 @@ SQLite runs in WAL mode with a five-second busy timeout. This design supports on
 - FTS drift: readiness fails and reports `fts_ok=false`.
 - Process crash during NATS work: an unacknowledged message is redelivered; stale processing reservations can be reclaimed.
 - Process crash during capture processing: expired outbox leases are reclaimed without duplicating memory, graph, timeline, or fact state.
+- Capture processing failure: sanitized failure metadata remains observable on the job, raw capture, provisional memory, worker health, and metrics without exposing captured content.
 - Corrupt backup: restore refuses it after `PRAGMA integrity_check`.
 - Missing authentication on a non-loopback bind: startup refuses to listen.
 

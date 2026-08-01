@@ -48,6 +48,8 @@ from recall_mcp.store.migrations import CURRENT_SCHEMA_VERSION, run_migrations
 
 logger = logging.getLogger(__name__)
 
+_OUTBOX_STATUSES = ("pending", "processing", "retry", "complete", "dead")
+
 
 @dataclass
 class Memory:
@@ -1018,12 +1020,15 @@ class MemoryStore:
                     "SELECT status, COUNT(*) FROM ingest_events GROUP BY status"
                 )
             }
-            outbox = {
-                row[0]: row[1]
-                for row in conn.execute(
-                    "SELECT status, COUNT(*) FROM outbox_jobs GROUP BY status"
-                )
-            }
+            outbox = dict.fromkeys(_OUTBOX_STATUSES, 0)
+            outbox.update(
+                {
+                    row[0]: row[1]
+                    for row in conn.execute(
+                        "SELECT status, COUNT(*) FROM outbox_jobs GROUP BY status"
+                    )
+                }
+            )
             oldest_due = conn.execute(
                 """
                 SELECT MIN(

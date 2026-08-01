@@ -203,6 +203,12 @@ class RecallHandler(BaseHTTPRequestHandler):
                 storage = self.pipeline.store.integrity_report(quick=True)
                 probe["storage"] = storage
                 ready = ready and bool(storage["ok"])
+                operations = self.pipeline.store.operational_stats()
+                probe["outbox"] = operations["outbox"]
+                probe["outbox_active_leases"] = operations["outbox_active_leases"]
+                probe["outbox_oldest_due_seconds"] = operations[
+                    "outbox_oldest_due_seconds"
+                ]
                 outbox_worker = self.pipeline.outbox_dispatcher.health()
                 probe["outbox_worker"] = outbox_worker
                 ready = ready and bool(
@@ -253,6 +259,10 @@ class RecallHandler(BaseHTTPRequestHandler):
                 self.service_metrics.set_gauge(
                     "recall_outbox_worker_alive",
                     1.0 if worker_health["thread_alive"] else 0.0,
+                )
+                self.service_metrics.set_gauge(
+                    "recall_outbox_dispatcher_error",
+                    1.0 if worker_health["last_error"] else 0.0,
                 )
                 nats_sub = getattr(self.pipeline, "nats_sub", None)
                 if nats_sub is not None:

@@ -15,6 +15,11 @@ from recall_mcp.store.store import MemoryStore, OutboxJob
 logger = logging.getLogger(__name__)
 
 
+def _sanitized_error(exc: BaseException) -> str:
+    """Return operator-safe failure text without exception or capture content."""
+    return f"{type(exc).__name__}: capture processing failed"
+
+
 @dataclass(frozen=True)
 class CaptureOutcome:
     """A processed capture ready for atomic outbox finalization."""
@@ -116,7 +121,7 @@ class CaptureOutboxDispatcher:
             except Exception as exc:
                 self.capacity.release()
                 self._record_error(exc)
-                logger.exception("Unable to claim an outbox job")
+                logger.error("Unable to claim an outbox job: %s", _sanitized_error(exc))
                 self._wait()
                 continue
             if job is None:
@@ -168,16 +173,21 @@ class CaptureOutboxDispatcher:
             self._schedule_failure(job, exc)
 
     def _schedule_failure(self, job: OutboxJob, exc: Exception) -> None:
+        safe_error = _sanitized_error(exc)
         try:
             status, delay = self.store.fail_outbox_job(
                 job,
-                str(exc),
+                safe_error,
                 max_attempts=self.max_attempts,
                 retry_base_seconds=self.retry_base_seconds,
             )
         except Exception as persistence_error:
             self._record_error(persistence_error)
-            logger.exception("Unable to persist outbox failure for %s", job.id)
+            logger.error(
+                "Unable to persist outbox failure for %s: %s",
+                job.id,
+                _sanitized_error(persistence_error),
+            )
             return
         if status == "dead":
             self._resolve(
@@ -193,7 +203,7 @@ class CaptureOutboxDispatcher:
                     "summary": job.content[:200],
                     "topics": [],
                     "processing_status": "failed",
-                    "processing_error": str(exc)[:1000],
+                    "processing_error": safe_error,
                 },
             )
             logger.error(
@@ -205,7 +215,7 @@ class CaptureOutboxDispatcher:
                 job.id,
                 job.attempts,
                 delay,
-                exc,
+                safe_error,
             )
         self.notify()
 
@@ -217,7 +227,7 @@ class CaptureOutboxDispatcher:
             future.result()
         except Exception as exc:  # pragma: no cover - _run_job contains failures
             self._record_error(exc)
-            logger.exception("Unhandled outbox worker failure")
+            logger.error("Unhandled outbox worker failure: %s", _sanitized_error(exc))
         self.notify()
 
     def _resolve(self, capture_id: str, result: dict) -> None:
@@ -233,4 +243,4 @@ class CaptureOutboxDispatcher:
 
     def _record_error(self, exc: Exception) -> None:
         with self._state_lock:
-            self._last_error = str(exc)[:1000]
+            self._last_error = _sanitized_error(exc)

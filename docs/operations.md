@@ -40,6 +40,14 @@ age without printing captured content. A dead job is terminal until an
 operator runs `recall-admin outbox retry <job-id>`; the running Recall service
 then picks up the reset job on its next poll.
 
+Outbox counts always include `pending`, `processing`, `retry`, `complete`, and
+`dead`, including zero values. `/stats` and `/health/ready` also report the
+oldest due age, active leases, worker liveness, in-flight work, and the last
+sanitized dispatcher error. Prometheus exports the same numeric queue state
+plus `recall_outbox_dispatcher_error` as a content-free `0|1` gauge. The
+one-shot `recall-admin doctor` command does not start or attach to a worker, so
+it reports queue state and marks worker liveness/error as not observed.
+
 Defaults are a 0.25-second poll interval, a 300-second lease, 10 attempts, and
 2-second exponential retry bounded at 300 seconds. Override them with
 `RECALL_OUTBOX_POLL_INTERVAL`, `RECALL_OUTBOX_LEASE_SECONDS`,
@@ -48,3 +56,8 @@ Defaults are a 0.25-second poll interval, a 300-second lease, 10 attempts, and
 Stop Recall gracefully so in-flight work can finish. After an unclean exit,
 wait for the old lease to expire or use the documented backup/restore path;
 do not edit outbox rows manually.
+
+Persisted processing errors contain only the exception type and the generic
+message `capture processing failed`. Consult protected service diagnostics for
+job IDs and retry state; raw exception messages and captured content are never
+written to outbox health or operator-facing status surfaces.

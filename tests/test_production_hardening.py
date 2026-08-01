@@ -249,6 +249,7 @@ def test_secured_rest_context_metrics_and_safe_errors(secured_server):
     assert "recall_memories" in metrics
     assert "recall_outbox_complete" in metrics
     assert "recall_outbox_worker_alive 1.0" in metrics
+    assert "recall_outbox_dispatcher_error 0.0" in metrics
 
     status, error = request_json(
         f"{base_url}/search?q=x&limit=100000",
