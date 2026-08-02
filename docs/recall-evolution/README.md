@@ -43,10 +43,10 @@ Implementation records:
 
 ## Current progress
 
-Phase 1 shared task and session continuity is complete on top of the verified
-transactional-outbox checkpoint. Phase 2 retrieval feedback and utility is the
-active implementation phase. Deferred Phase 0 refinements remain documented;
-they are not silently marked complete.
+Phase 1 shared task and session continuity and Phase 2 retrieval feedback and
+shadow utility scoring are complete on top of the verified transactional-outbox
+checkpoint. Phase 3 Context Pack V2 is the next recommended slice. Deferred
+Phase 0 refinements remain documented; they are not silently marked complete.
 
 ## One-line architecture
 

@@ -102,15 +102,17 @@ Exit gate:
 
 ## Phase 2 — Retrieval feedback and utility scoring
 
+Status: **Complete**
+
 Build:
 
-- Retrieval-run logging
-- Candidate versus selected results
-- Selected versus used results
-- Task-outcome feedback
-- Dynamic utility scoring
-- Priority recalibration
-- Cold demotion
+- [x] Retrieval-run logging
+- [x] Candidate versus selected results
+- [x] Selected versus used results
+- [x] Task-outcome feedback
+- [x] Explainable, versioned utility scoring
+- [x] Shadow priority recalibration with zero default influence
+- [x] Reversible cold demotion and audited restoration
 
 Exit gate:
 

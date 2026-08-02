@@ -30,5 +30,15 @@ All settings use the `RECALL_` prefix. Legacy `REMEMBRANCE_` names remain tempor
 | RECALL_NATS_STREAM | RECALL_AGENT_OUTPUT | JetStream name |
 | RECALL_NATS_CONSUMER | recall-capture-v1 | Durable consumer |
 | RECALL_NATS_DLQ_SUBJECT | recall.agent.output.dlq | Dead-letter subject |
+| RECALL_UTILITY_POLICY_VERSION | utility-v1 | Persisted utility scoring policy identifier |
+| RECALL_UTILITY_SHADOW_MODE | true | Calculate utility rank without changing production order |
+| RECALL_UTILITY_RANKING_WEIGHT | 0 | Utility contribution when shadow mode is disabled; range 0-0.1 |
+| RECALL_UTILITY_WEIGHTS | `{}` | JSON overrides for named utility components |
+| RECALL_RETENTION_SELECTION_SECONDS | 86400 | Expiry extension after selection |
+| RECALL_RETENTION_INJECTION_SECONDS | 259200 | Expiry extension after injection |
+| RECALL_RETENTION_EXPANSION_SECONDS | 1209600 | Expiry extension after explicit expansion |
+| RECALL_RETENTION_USE_SECONDS | 2592000 | Expiry extension after use |
+| RECALL_RETENTION_SUCCESS_SECONDS | 7776000 | Expiry extension after successful task use |
+| RECALL_RETENTION_REVIEW_SECONDS | 2592000 | Delay until the next retention review |
 
 A non-loopback `RECALL_HOST` requires a configured token. Container deployments use a non-loopback container bind but publish only to host loopback.
