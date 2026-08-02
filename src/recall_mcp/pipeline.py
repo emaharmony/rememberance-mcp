@@ -31,7 +31,14 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional
+
 from recall_mcp.config import Settings
+from recall_mcp.continuity import (
+    ContinuityError,
+    ContinuityStore,
+    SessionService,
+    TaskService,
+)
 from recall_mcp.gate import GateDecision
 from recall_mcp.registry import build_gate_chain
 from recall_mcp.extract import OllamaExtractor, StubExtractor, BaseExtractor
@@ -123,6 +130,9 @@ class MemoryPipeline:
             active_ttl=self.settings.ACTIVE_TTL,
             persist_ttl=self.settings.PERSIST_TTL,
         )
+        self.continuity_store = ContinuityStore(self.settings.DB_PATH)
+        self.task_service = TaskService(self.continuity_store)
+        self.session_service = SessionService(self.continuity_store, self.task_service)
 
         # ── V2: Entity Store + Knowledge Graph ─────────────────
         # Unified into the main DB (DB_PATH) so dream-cycle phases can join
@@ -203,15 +213,61 @@ class MemoryPipeline:
         tier: Optional[str] = None,
         project: Optional[str] = None,
         agent: Optional[str] = None,
+        user_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        repository_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> dict:
         """Durably enqueue a capture and wait briefly for derived processing."""
         if self._closed:
             raise RuntimeError("memory pipeline is closed")
+        formal_scope = any(
+            value is not None
+            for value in (
+                user_id,
+                workspace_id,
+                project_id,
+                repository_id,
+                task_id,
+                session_id,
+            )
+        )
+        if formal_scope and task_id is None:
+            raise ContinuityError("task_id is required for formally scoped capture")
+        if task_id is not None:
+            scoped_task = self.task_service.get_task(
+                task_id,
+                user_id=user_id,
+                project_id=project_id,
+                repository_id=repository_id,
+            )
+            if workspace_id is not None and workspace_id != scoped_task["workspace_id"]:
+                raise ContinuityError(
+                    "task is outside the requested scope", code="not_found"
+                )
+            user_id = scoped_task["user_id"]
+            workspace_id = scoped_task["workspace_id"]
+            project_id = scoped_task["project_id"]
+            repository_id = scoped_task["repository_id"]
+            if session_id is not None:
+                scoped_session = self.session_service.get_session(session_id)
+                if scoped_session["task_id"] != task_id:
+                    raise ContinuityError(
+                        "session is outside the requested task", code="scope_mismatch"
+                    )
         capture_id, _job_id = self.store.enqueue_capture(
             text,
             source=source,
             project=project or "",
             agent=agent or "",
+            user_id=user_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            repository_id=repository_id,
+            task_id=task_id,
+            session_id=session_id,
             category=category,
             tier=tier,
         )
@@ -435,6 +491,12 @@ class MemoryPipeline:
         mode: str = "balanced",
         project: Optional[str] = None,
         agent: Optional[str] = None,
+        user_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        repository_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> list[dict]:
         """Search memories with bounded keyword, vector, balanced, or deep retrieval."""
         if not isinstance(query, str) or not query.strip():
@@ -450,6 +512,12 @@ class MemoryPipeline:
             limit=bounded_limit,
             project=project,
             agent=agent,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            repository_id=repository_id,
+            task_id=task_id,
+            session_id=session_id,
         )
 
     def get(self, mem_id: str) -> Optional[dict]:
@@ -484,6 +552,15 @@ class MemoryPipeline:
         project: Optional[str] = None,
         agent: Optional[str] = None,
         limit: int = 10,
+        *,
+        user_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        repository_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        known_checkpoint_version: Optional[int] = None,
     ) -> dict:
         """
         Build context for a task using hybrid search + graph traversal.
@@ -491,9 +568,84 @@ class MemoryPipeline:
         This is what agents call before working on a task.
         Returns relevant memories, entities, and open threads.
         """
-        return self.hybrid_search.build_context(
-            query=task, project=project, agent=agent, limit=limit
+        active_task = None
+        latest_checkpoint = None
+        session_delta = None
+        warnings: list[str] = []
+        if task_id is not None:
+            active_task = self.task_service.get_task(
+                task_id,
+                user_id=user_id,
+                project_id=project_id,
+                repository_id=repository_id,
+            )
+            if workspace_id is not None and active_task["workspace_id"] != workspace_id:
+                raise ContinuityError(
+                    "task is outside the requested scope", code="not_found"
+                )
+            user_id = active_task["user_id"]
+            workspace_id = active_task["workspace_id"]
+            project_id = active_task["project_id"]
+            repository_id = active_task["repository_id"]
+            if not task.strip():
+                task = active_task["objective"]
+        if session_id is not None:
+            session = self.session_service.get_session(session_id)
+            if task_id is None:
+                task_id = session["task_id"]
+                active_task = self.task_service.get_task(
+                    task_id,
+                    user_id=user_id,
+                    project_id=project_id,
+                    repository_id=repository_id,
+                )
+                user_id = active_task["user_id"]
+                workspace_id = active_task["workspace_id"]
+                project_id = active_task["project_id"]
+                repository_id = active_task["repository_id"]
+                if not task.strip():
+                    task = active_task["objective"]
+            elif session["task_id"] != task_id:
+                raise ContinuityError(
+                    "session is outside the requested task", code="scope_mismatch"
+                )
+            latest_checkpoint = session.get("checkpoint")
+            if known_checkpoint_version is not None:
+                session_delta = self.session_service.get_delta(
+                    session_id,
+                    known_version=known_checkpoint_version,
+                    agent_id=agent_id,
+                )
+        if not task.strip():
+            raise ValueError("task must be a non-empty string")
+        context = self.hybrid_search.build_context(
+            query=task,
+            project=project,
+            agent=agent,
+            limit=limit,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            repository_id=repository_id,
+            task_id=task_id,
+            session_id=session_id,
         )
+        if active_task is not None:
+            context["active_task"] = active_task
+        if session_id is not None:
+            context["latest_checkpoint"] = latest_checkpoint
+            context["session_delta"] = session_delta
+            checkpoint = latest_checkpoint or {}
+            context["approved_decisions"] = checkpoint.get("approved_decisions", [])
+            context["critical_constraints"] = checkpoint.get("constraints", [])
+            context["open_blockers"] = checkpoint.get("blockers", [])
+            context["open_questions"] = checkpoint.get("open_questions", [])
+        if any((user_id, workspace_id, project_id, repository_id, task_id, session_id)):
+            warnings.append(
+                "Global graph synthesis is omitted for formally scoped context."
+            )
+        context["warnings"] = [*context.get("warnings", []), *warnings]
+        return context
 
     def graph_query(
         self, entity_name: str, depth: int = 1, edge_types: Optional[list[str]] = None

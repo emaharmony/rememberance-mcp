@@ -81,6 +81,20 @@ def _add_columns(
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _execute_statements(conn: sqlite3.Connection, script: str) -> None:
+    """Execute a multi-statement script without sqlite3.executescript auto-commit."""
+    pending = ""
+    for line in script.splitlines():
+        pending += line + "\n"
+        if sqlite3.complete_statement(pending):
+            statement = pending.strip()
+            if statement:
+                conn.execute(statement)
+            pending = ""
+    if pending.strip():
+        raise SchemaMigrationError("incomplete SQL statement in migration")
+
+
 def _migration_core_memory(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -498,12 +512,283 @@ def _migration_transactional_outbox(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_task_session_continuity(conn: sqlite3.Connection) -> None:
+    """Add provider-neutral scope, task, and append-only session continuity."""
+    _add_columns(
+        conn,
+        "memories",
+        {
+            "user_id": "TEXT",
+            "workspace_id": "TEXT",
+            "project_id": "TEXT",
+            "repository_id": "TEXT",
+            "task_id": "TEXT",
+            "session_id": "TEXT",
+        },
+    )
+    _add_columns(
+        conn,
+        "raw_captures",
+        {
+            "user_id": "TEXT",
+            "workspace_id": "TEXT",
+            "project_id": "TEXT",
+            "repository_id": "TEXT",
+            "task_id": "TEXT",
+            "session_id": "TEXT",
+        },
+    )
+    _execute_statements(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS agents (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            system_type TEXT NOT NULL DEFAULT 'other',
+            trust_level TEXT NOT NULL DEFAULT 'standard',
+            write_policy TEXT NOT NULL DEFAULT 'standard',
+            created_at REAL NOT NULL,
+            last_seen_at REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS workspaces (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(id, user_id),
+            UNIQUE(user_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active', 'archived')),
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(id, user_id, workspace_id),
+            UNIQUE(user_id, workspace_id, name),
+            FOREIGN KEY (workspace_id, user_id)
+                REFERENCES workspaces(id, user_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS repositories (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            canonical_path TEXT NOT NULL,
+            remote_url TEXT,
+            default_branch TEXT,
+            access_mode TEXT NOT NULL DEFAULT 'read_only'
+                CHECK(access_mode IN ('read_only')),
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(id, user_id, workspace_id, project_id),
+            UNIQUE(user_id, canonical_path),
+            FOREIGN KEY (project_id, user_id, workspace_id)
+                REFERENCES projects(id, user_id, workspace_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned'
+                CHECK(status IN (
+                    'planned', 'active', 'blocked', 'review',
+                    'completed', 'cancelled'
+                )),
+            created_by TEXT NOT NULL,
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            completed_at REAL,
+            UNIQUE(id, user_id, workspace_id, project_id, repository_id),
+            FOREIGN KEY (
+                repository_id, user_id, workspace_id, project_id
+            ) REFERENCES repositories(id, user_id, workspace_id, project_id),
+            FOREIGN KEY (created_by) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency
+        ON tasks(user_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            initiating_agent_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active', 'closed')),
+            started_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            closed_at REAL,
+            summary TEXT NOT NULL DEFAULT '',
+            version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+            next_event_sequence INTEGER NOT NULL DEFAULT 1
+                CHECK(next_event_sequence >= 1),
+            idempotency_key TEXT,
+            UNIQUE(id, task_id),
+            FOREIGN KEY (task_id) REFERENCES tasks(id),
+            FOREIGN KEY (initiating_agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_idempotency
+        ON sessions(task_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS session_participants (
+            session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'observer'
+                CHECK(role IN (
+                    'owner', 'orchestrator', 'implementer',
+                    'reviewer', 'observer'
+                )),
+            joined_at REAL NOT NULL,
+            last_seen_at REAL NOT NULL,
+            PRIMARY KEY (session_id, agent_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS session_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK(sequence >= 1),
+            event_type TEXT NOT NULL CHECK(event_type IN (
+                'session.started', 'session.closed', 'agent.joined',
+                'agent.left', 'task.updated', 'checkpoint.created',
+                'decision.proposed', 'decision.approved',
+                'blocker.reported', 'work.completed',
+                'validation.requested'
+            )),
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            UNIQUE(session_id, sequence),
+            FOREIGN KEY (session_id, task_id) REFERENCES sessions(id, task_id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_idempotency
+        ON session_events(session_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS session_checkpoints (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK(version >= 1),
+            objective TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            completed_json TEXT NOT NULL DEFAULT '[]',
+            remaining_json TEXT NOT NULL DEFAULT '[]',
+            constraints_json TEXT NOT NULL DEFAULT '[]',
+            approved_decisions_json TEXT NOT NULL DEFAULT '[]',
+            proposed_decisions_json TEXT NOT NULL DEFAULT '[]',
+            open_questions_json TEXT NOT NULL DEFAULT '[]',
+            blockers_json TEXT NOT NULL DEFAULT '[]',
+            important_files_json TEXT NOT NULL DEFAULT '[]',
+            known_failures_json TEXT NOT NULL DEFAULT '[]',
+            repository_json TEXT NOT NULL DEFAULT '{}',
+            source_agent_id TEXT NOT NULL,
+            source_event_id TEXT NOT NULL,
+            source_sequence INTEGER NOT NULL CHECK(source_sequence >= 1),
+            generated INTEGER NOT NULL DEFAULT 0 CHECK(generated IN (0, 1)),
+            created_at REAL NOT NULL,
+            UNIQUE(session_id, version),
+            FOREIGN KEY (session_id) REFERENCES sessions(id),
+            FOREIGN KEY (source_agent_id) REFERENCES agents(id),
+            FOREIGN KEY (source_event_id) REFERENCES session_events(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tasks_scope_status
+        ON tasks(user_id, project_id, repository_id, status);
+        CREATE INDEX IF NOT EXISTS idx_sessions_task_status
+        ON sessions(task_id, status);
+        CREATE INDEX IF NOT EXISTS idx_participants_agent_session
+        ON session_participants(agent_id, session_id);
+        CREATE INDEX IF NOT EXISTS idx_events_session_created
+        ON session_events(session_id, created_at, sequence);
+        CREATE INDEX IF NOT EXISTS idx_events_task_created
+        ON session_events(task_id, created_at, sequence);
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_session_version
+        ON session_checkpoints(session_id, version);
+        CREATE INDEX IF NOT EXISTS idx_repositories_project
+        ON repositories(project_id);
+        CREATE INDEX IF NOT EXISTS idx_memories_formal_scope
+        ON memories(user_id, workspace_id, project_id, repository_id, task_id);
+
+        CREATE TRIGGER IF NOT EXISTS session_events_no_update
+        BEFORE UPDATE ON session_events
+        BEGIN
+            SELECT RAISE(ABORT, 'session events are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS session_events_no_delete
+        BEFORE DELETE ON session_events
+        BEGIN
+            SELECT RAISE(ABORT, 'session events are append-only');
+        END;
+        """,
+    )
+    for table, columns in {
+        "agents": {"id", "name", "system_type", "last_seen_at"},
+        "workspaces": {"id", "user_id", "name"},
+        "projects": {"id", "user_id", "workspace_id", "name", "status"},
+        "repositories": {
+            "id",
+            "user_id",
+            "workspace_id",
+            "project_id",
+            "canonical_path",
+            "access_mode",
+        },
+        "tasks": {
+            "id",
+            "user_id",
+            "workspace_id",
+            "project_id",
+            "repository_id",
+            "status",
+        },
+        "sessions": {"id", "task_id", "status", "version"},
+        "session_participants": {"session_id", "agent_id", "role"},
+        "session_events": {
+            "id",
+            "session_id",
+            "task_id",
+            "sequence",
+            "event_type",
+            "payload_json",
+        },
+        "session_checkpoints": {
+            "id",
+            "session_id",
+            "version",
+            "objective",
+            "source_event_id",
+            "source_sequence",
+        },
+    }.items():
+        _require_columns(conn, table, columns)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_memory", _migration_core_memory),
     Migration(2, "memory_v2", _migration_memory_v2),
     Migration(3, "graph_and_facts", _migration_graph_and_facts),
     Migration(4, "production_reliability", _migration_production_reliability),
     Migration(5, "transactional_outbox", _migration_transactional_outbox),
+    Migration(6, "task_session_continuity", _migration_task_session_continuity),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
 

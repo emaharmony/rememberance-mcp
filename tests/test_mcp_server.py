@@ -12,6 +12,7 @@ package isn't installed.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -28,6 +29,11 @@ EXPECTED_TOOLS = {
     "memory_search",
     "memory_context_build",
     "memory_dream",
+    "recall_task_create",
+    "recall_session_start",
+    "recall_session_join",
+    "recall_session_checkpoint",
+    "recall_session_delta",
 }
 
 
@@ -49,11 +55,65 @@ def test_mcp_server_starts_and_lists_tools():
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
-                return {t.name for t in tools.tools}
+                task_result = await session.call_tool(
+                    "recall_task_create",
+                    {
+                        "user_id": "user-1",
+                        "workspace_id": "workspace-1",
+                        "project_id": "project-1",
+                        "repository_id": "repo-1",
+                        "title": "MCP handoff",
+                        "objective": "Share state",
+                        "agent_id": "claude-code",
+                        "canonical_path": "/work/recall",
+                        "idempotency_key": "mcp-task",
+                    },
+                )
+                task = json.loads(task_result.content[0].text)
+                session_result = await session.call_tool(
+                    "recall_session_start",
+                    {
+                        "task_id": task["id"],
+                        "agent_id": "claude-code",
+                        "idempotency_key": "mcp-session",
+                    },
+                )
+                shared_session = json.loads(session_result.content[0].text)
+                await session.call_tool(
+                    "recall_session_checkpoint",
+                    {
+                        "session_id": shared_session["id"],
+                        "agent_id": "claude-code",
+                        "summary": "Claude checkpoint",
+                        "completed": ["schema"],
+                        "remaining": ["API"],
+                        "constraints": ["no push"],
+                        "idempotency_key": "mcp-checkpoint",
+                    },
+                )
+                await session.call_tool(
+                    "recall_session_join",
+                    {
+                        "session_id": shared_session["id"],
+                        "agent_id": "codex",
+                    },
+                )
+                delta_result = await session.call_tool(
+                    "recall_session_delta",
+                    {
+                        "session_id": shared_session["id"],
+                        "known_version": 0,
+                        "agent_id": "codex",
+                    },
+                )
+                delta = json.loads(delta_result.content[0].text)
+                return {t.name for t in tools.tools}, delta
 
     try:
-        names = asyncio.run(asyncio.wait_for(_run(), timeout=60))
+        names, delta = asyncio.run(asyncio.wait_for(_run(), timeout=60))
     finally:
         shutil.rmtree(home, ignore_errors=True)
     assert EXPECTED_TOOLS.issubset(names), f"missing tools: {EXPECTED_TOOLS - names}"
     assert len(names) >= 11
+    assert delta["checkpoint"]["objective"] == "Share state"
+    assert delta["checkpoint"]["constraints"] == ["no push"]

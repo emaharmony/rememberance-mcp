@@ -80,6 +80,12 @@ class OutboxJob:
     source: str
     project: str
     agent: str
+    user_id: Optional[str]
+    workspace_id: Optional[str]
+    project_id: Optional[str]
+    repository_id: Optional[str]
+    task_id: Optional[str]
+    session_id: Optional[str]
     requested_category: Optional[str]
     requested_tier: Optional[str]
     gate_decision: Optional[str]
@@ -141,6 +147,12 @@ class MemoryStore:
         source: str = "",
         project: str = "",
         agent: str = "",
+        user_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        repository_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         category: Optional[str] = None,
         tier: Optional[str] = None,
     ) -> tuple[str, str]:
@@ -154,10 +166,12 @@ class MemoryStore:
                 """
                 INSERT INTO raw_captures (
                     id, content, source, project, agent,
+                    user_id, workspace_id, project_id, repository_id,
+                    task_id, session_id,
                     requested_category, requested_tier,
                     received_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     capture_id,
@@ -165,6 +179,12 @@ class MemoryStore:
                     source,
                     project,
                     agent,
+                    user_id,
+                    workspace_id,
+                    project_id,
+                    repository_id,
+                    task_id,
+                    session_id,
                     category,
                     tier,
                     now,
@@ -254,6 +274,8 @@ class MemoryStore:
                 SELECT
                     j.id, j.raw_capture_id, j.event_type, j.attempts,
                     r.content, r.source, r.project, r.agent,
+                    r.user_id, r.workspace_id, r.project_id, r.repository_id,
+                    r.task_id, r.session_id,
                     r.requested_category, r.requested_tier,
                     r.gate_decision, r.gate_confidence, r.gate_backend,
                     r.gate_fallback_used
@@ -273,6 +295,12 @@ class MemoryStore:
             source=str(claimed["source"]),
             project=str(claimed["project"]),
             agent=str(claimed["agent"]),
+            user_id=claimed["user_id"],
+            workspace_id=claimed["workspace_id"],
+            project_id=claimed["project_id"],
+            repository_id=claimed["repository_id"],
+            task_id=claimed["task_id"],
+            session_id=claimed["session_id"],
             requested_category=claimed["requested_category"],
             requested_tier=claimed["requested_tier"],
             gate_decision=claimed["gate_decision"],
@@ -300,21 +328,39 @@ class MemoryStore:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 """
-                SELECT content, source, project, agent
+                SELECT content, source, project, agent,
+                       user_id, workspace_id, project_id, repository_id,
+                       task_id, session_id
                 FROM memories WHERE id = ?
                 """,
                 (job.raw_capture_id,),
             ).fetchone()
-            expected = (job.content, job.source, job.project, job.agent)
+            expected = (
+                job.content,
+                job.source,
+                job.project,
+                job.agent,
+                job.user_id,
+                job.workspace_id,
+                job.project_id,
+                job.repository_id,
+                job.task_id,
+                job.session_id,
+            )
             if existing is None:
                 conn.execute(
                     """
                     INSERT INTO memories (
                         id, content, summary, category, tier, key_topics,
                         source, embedding, created_at, accessed_at, expires_at,
-                        project, agent, processing_status
+                        project, agent, processing_status,
+                        user_id, workspace_id, project_id, repository_id,
+                        task_id, session_id
                     )
-                    VALUES (?, ?, ?, ?, ?, '[]', ?, NULL, ?, ?, ?, ?, ?, 'pending')
+                    VALUES (
+                        ?, ?, ?, ?, ?, '[]', ?, NULL, ?, ?, ?, ?, ?, 'pending',
+                        ?, ?, ?, ?, ?, ?
+                    )
                     """,
                     (
                         job.raw_capture_id,
@@ -328,6 +374,12 @@ class MemoryStore:
                         expires_at,
                         job.project,
                         job.agent,
+                        job.user_id,
+                        job.workspace_id,
+                        job.project_id,
+                        job.repository_id,
+                        job.task_id,
+                        job.session_id,
                     ),
                 )
             elif tuple(existing) != expected:
@@ -698,6 +750,12 @@ class MemoryStore:
         embedding: Optional[bytes] = None,
         project: str = "",
         agent: str = "",
+        user_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        repository_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         processing_status: str = "complete",
         memory_id: str | None = None,
     ) -> str:
@@ -722,8 +780,10 @@ class MemoryStore:
                 """
                 INSERT INTO memories (id, content, summary, category, tier, key_topics,
                                       source, embedding, created_at, accessed_at, expires_at,
-                                      project, agent, processing_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      project, agent, processing_status,
+                                      user_id, workspace_id, project_id, repository_id,
+                                      task_id, session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     mem_id,
@@ -740,6 +800,12 @@ class MemoryStore:
                     project,
                     agent,
                     processing_status,
+                    user_id,
+                    workspace_id,
+                    project_id,
+                    repository_id,
+                    task_id,
+                    session_id,
                 ),
             )
 

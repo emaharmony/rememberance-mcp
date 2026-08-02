@@ -183,6 +183,146 @@ class TestCaptureEndpoint:
             assert e.code == 400
 
 
+class TestTaskSessionContinuityEndpoints:
+    @staticmethod
+    def request(base_url, path, body=None, method="POST"):
+        request = urllib.request.Request(
+            f"{base_url}{path}",
+            data=json.dumps(body).encode("utf-8") if body is not None else None,
+            headers={"Content-Type": "application/json"},
+            method=method,
+        )
+        response = urllib.request.urlopen(request)
+        return response.status, json.loads(response.read())
+
+    def test_cross_agent_handoff_and_scoped_context(self, api_server):
+        base = api_server["base_url"]
+        status, task = self.request(
+            base,
+            "/v2/tasks",
+            {
+                "user_id": "user-1",
+                "workspace_id": "workspace-1",
+                "project_id": "project-1",
+                "repository_id": "repo-1",
+                "title": "REST handoff",
+                "objective": "Share state",
+                "agent_id": "claude-code",
+                "agent_system_type": "claude_code",
+                "canonical_path": "/work/recall",
+                "default_branch": "feature/session",
+                "idempotency_key": "rest-task",
+            },
+        )
+        assert status == 201
+        status, fetched = self.request(base, f"/v2/tasks/{task['id']}", method="GET")
+        assert status == 200
+        assert fetched["objective"] == "Share state"
+        status, updated = self.request(
+            base,
+            f"/v2/tasks/{task['id']}",
+            {"status": "review"},
+            method="PATCH",
+        )
+        assert status == 200
+        assert updated["status"] == "review"
+
+        status, session = self.request(
+            base,
+            "/v2/sessions",
+            {
+                "task_id": task["id"],
+                "agent_id": "claude-code",
+                "idempotency_key": "rest-session",
+            },
+        )
+        assert status == 201
+        self.request(
+            base,
+            f"/v2/sessions/{session['id']}/events",
+            {
+                "agent_id": "claude-code",
+                "event_type": "task.updated",
+                "payload": {"constraint": "no push"},
+                "idempotency_key": "rest-event",
+            },
+        )
+        self.request(
+            base,
+            f"/v2/sessions/{session['id']}/checkpoint",
+            {
+                "agent_id": "claude-code",
+                "summary": "Claude checkpoint",
+                "completed": ["schema"],
+                "remaining": ["API"],
+                "constraints": ["no push"],
+                "idempotency_key": "rest-checkpoint",
+            },
+        )
+        self.request(
+            base,
+            f"/v2/sessions/{session['id']}/join",
+            {"agent_id": "codex", "role": "implementer"},
+        )
+        status, delta = self.request(
+            base,
+            f"/v2/sessions/{session['id']}/delta?known_version=0&agent_id=codex",
+            method="GET",
+        )
+        assert status == 200
+        assert delta["checkpoint"]["objective"] == "Share state"
+        assert delta["checkpoint"]["constraints"] == ["no push"]
+
+        status, context = self.request(
+            base,
+            "/context/build",
+            {
+                "task_id": task["id"],
+                "session_id": session["id"],
+                "agent_id": "codex",
+                "known_checkpoint_version": 0,
+                "user_id": "user-1",
+                "project_id": "project-1",
+                "repository_id": "repo-1",
+            },
+        )
+        assert status == 200
+        assert context["active_task"]["id"] == task["id"]
+        assert context["latest_checkpoint"]["version"] == 1
+        assert context["critical_constraints"] == ["no push"]
+
+    def test_invalid_repository_scope_is_a_conflict(self, api_server):
+        base = api_server["base_url"]
+        self.request(
+            base,
+            "/v2/tasks",
+            {
+                "user_id": "user-1",
+                "workspace_id": "workspace-1",
+                "project_id": "project-1",
+                "repository_id": "shared-repo",
+                "title": "First",
+                "objective": "First",
+                "agent_id": "claude-code",
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            self.request(
+                base,
+                "/v2/tasks",
+                {
+                    "user_id": "user-1",
+                    "workspace_id": "workspace-1",
+                    "project_id": "project-2",
+                    "repository_id": "shared-repo",
+                    "title": "Cross-scope",
+                    "objective": "Reject",
+                    "agent_id": "claude-code",
+                },
+            )
+        assert error.value.code == 409
+
+
 class TestSearchEndpoint:
     def test_search(self, api_server):
         # First capture something

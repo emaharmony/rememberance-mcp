@@ -82,14 +82,17 @@ Exit gate:
 
 ## Phase 1 — Identity, tasks, and sessions
 
+Status: **Complete**
+
 Build:
 
-- User/workspace/project/repository/task/session model
-- Agent registry
-- Session participants
-- Session events
-- Task checkpoints
-- Cross-agent session lookup
+- [x] User/workspace/project/repository/task/session model
+- [x] Agent registry
+- [x] Session participants
+- [x] Append-only session events
+- [x] Deterministic checkpoints and ordered deltas
+- [x] Cross-agent session lookup through REST, MCP, and context building
+- [x] Scope-before-ranking enforcement for formal memory scope
 
 Exit gate:
 

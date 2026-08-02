@@ -578,20 +578,30 @@ class EntityStore:
                 results.append(d)
             return results
 
-    def get_entity_memories(self, entity_id: str, limit: int = 20) -> list[dict]:
+    def get_entity_memories(
+        self,
+        entity_id: str,
+        limit: int = 20,
+        formal_scope: dict[str, str] | None = None,
+    ) -> list[dict]:
         """Get all memories linked to an entity."""
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """
+            sql = """
                 SELECT m.*
                 FROM memory_entities me
                 JOIN memories m ON me.memory_id = m.id
                 WHERE me.entity_id = ?
-                ORDER BY m.created_at DESC
-                LIMIT ?
-            """,
-                (entity_id, limit),
+            """
+            params: list[object] = [entity_id]
+            for column, value in (formal_scope or {}).items():
+                sql += f" AND m.{column} = ?"
+                params.append(value)
+            sql += " ORDER BY m.created_at DESC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(
+                sql,
+                params,
             ).fetchall()
             return [dict(r) for r in rows]
 

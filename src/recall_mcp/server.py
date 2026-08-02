@@ -59,6 +59,22 @@ def create_server():
     server.settings = settings  # type: ignore[attr-defined]
     server.recall_pipeline = pipeline  # type: ignore[attr-defined]
 
+    def continuity_tool(
+        name: str,
+        description: str,
+        required: list[str],
+        properties: dict,
+    ):
+        return Tool(
+            name=name,
+            description=description,
+            inputSchema={
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        )
+
     @server.list_tools()
     async def list_tools():
         """
@@ -350,8 +366,146 @@ def create_server():
                             "description": "Max memories to return (default: 10)",
                             "default": 10,
                         },
+                        "user_id": {"type": "string"},
+                        "workspace_id": {"type": "string"},
+                        "project_id": {"type": "string"},
+                        "repository_id": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "session_id": {"type": "string"},
+                        "agent_id": {"type": "string"},
+                        "known_checkpoint_version": {
+                            "type": "integer",
+                            "minimum": 0,
+                        },
                     },
-                    "required": ["task"],
+                    "anyOf": [{"required": ["task"]}, {"required": ["task_id"]}],
+                },
+            ),
+            continuity_tool(
+                "recall_task_create",
+                "Create an agent-neutral task in a validated repository scope.",
+                [
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "title",
+                    "objective",
+                    "agent_id",
+                ],
+                {
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "agent_system_type": {"type": "string", "default": "other"},
+                    "status": {"type": "string", "default": "active"},
+                    "idempotency_key": {"type": "string"},
+                    "canonical_path": {"type": "string"},
+                    "remote_url": {"type": "string"},
+                    "default_branch": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_task_get",
+                "Read a task and optionally verify its scope.",
+                ["task_id"],
+                {
+                    "task_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_task_update",
+                "Update task title, objective, or lifecycle status.",
+                ["task_id"],
+                {
+                    "task_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_start",
+                "Start a shared task session and join its initiating agent.",
+                ["task_id", "agent_id"],
+                {
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "role": {"type": "string", "default": "owner"},
+                    "agent_system_type": {"type": "string", "default": "other"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_join",
+                "Join another agent to an existing shared session.",
+                ["session_id", "agent_id"],
+                {
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "role": {"type": "string", "default": "implementer"},
+                    "agent_system_type": {"type": "string", "default": "other"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_event",
+                "Append one ordered, attributed event to a session.",
+                ["session_id", "agent_id", "event_type"],
+                {
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "event_type": {"type": "string"},
+                    "payload": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_checkpoint",
+                "Create a deterministic structured session checkpoint.",
+                ["session_id", "agent_id"],
+                {
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "completed": {"type": "array"},
+                    "remaining": {"type": "array"},
+                    "constraints": {"type": "array"},
+                    "approved_decisions": {"type": "array"},
+                    "proposed_decisions": {"type": "array"},
+                    "open_questions": {"type": "array"},
+                    "blockers": {"type": "array"},
+                    "important_files": {"type": "array"},
+                    "known_failures": {"type": "array"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_delta",
+                "Return ordered session changes after a known checkpoint version.",
+                ["session_id", "known_version"],
+                {
+                    "session_id": {"type": "string"},
+                    "known_version": {"type": "integer", "minimum": 0},
+                    "agent_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_close",
+                "Close a session without deleting its events or checkpoints.",
+                ["session_id", "agent_id"],
+                {
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
                 },
             ),
         ]
@@ -367,7 +521,124 @@ def create_server():
         try:
             if not isinstance(arguments, dict):
                 raise ValueError("arguments must be an object")
-            if name == "memory_capture":
+
+            def result_json(result: object):
+                return [
+                    TextContent(
+                        type="text", text=json.dumps(result, indent=2, default=str)
+                    )
+                ]
+
+            if name == "recall_task_create":
+                result = pipeline.task_service.create_task(
+                    user_id=arguments["user_id"],
+                    workspace_id=arguments["workspace_id"],
+                    project_id=arguments["project_id"],
+                    repository_id=arguments["repository_id"],
+                    title=arguments["title"],
+                    objective=arguments["objective"],
+                    created_by=arguments["agent_id"],
+                    status=arguments.get("status", "active"),
+                    idempotency_key=arguments.get("idempotency_key"),
+                    agent_system_type=arguments.get("agent_system_type", "other"),
+                    canonical_path=arguments.get("canonical_path"),
+                    remote_url=arguments.get("remote_url"),
+                    default_branch=arguments.get("default_branch"),
+                )
+                return result_json(result)
+
+            elif name == "recall_task_get":
+                return result_json(
+                    pipeline.task_service.get_task(
+                        arguments["task_id"],
+                        user_id=arguments.get("user_id"),
+                        project_id=arguments.get("project_id"),
+                        repository_id=arguments.get("repository_id"),
+                    )
+                )
+
+            elif name == "recall_task_update":
+                return result_json(
+                    pipeline.task_service.update_task(
+                        arguments["task_id"],
+                        title=arguments.get("title"),
+                        objective=arguments.get("objective"),
+                        status=arguments.get("status"),
+                    )
+                )
+
+            elif name == "recall_session_start":
+                return result_json(
+                    pipeline.session_service.start_session(
+                        task_id=arguments["task_id"],
+                        agent_id=arguments["agent_id"],
+                        role=arguments.get("role", "owner"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                        agent_system_type=arguments.get("agent_system_type", "other"),
+                    )
+                )
+
+            elif name == "recall_session_join":
+                return result_json(
+                    pipeline.session_service.join_session(
+                        arguments["session_id"],
+                        agent_id=arguments["agent_id"],
+                        role=arguments.get("role", "implementer"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                        agent_system_type=arguments.get("agent_system_type", "other"),
+                    )
+                )
+
+            elif name == "recall_session_event":
+                return result_json(
+                    pipeline.session_service.append_event(
+                        arguments["session_id"],
+                        agent_id=arguments["agent_id"],
+                        event_type=arguments["event_type"],
+                        payload=arguments.get("payload"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_session_checkpoint":
+                return result_json(
+                    pipeline.session_service.create_checkpoint(
+                        arguments["session_id"],
+                        agent_id=arguments["agent_id"],
+                        summary=arguments.get("summary", ""),
+                        completed=arguments.get("completed"),
+                        remaining=arguments.get("remaining"),
+                        constraints=arguments.get("constraints"),
+                        approved_decisions=arguments.get("approved_decisions"),
+                        proposed_decisions=arguments.get("proposed_decisions"),
+                        open_questions=arguments.get("open_questions"),
+                        blockers=arguments.get("blockers"),
+                        important_files=arguments.get("important_files"),
+                        known_failures=arguments.get("known_failures"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_session_delta":
+                return result_json(
+                    pipeline.session_service.get_delta(
+                        arguments["session_id"],
+                        known_version=int(arguments["known_version"]),
+                        agent_id=arguments.get("agent_id"),
+                    )
+                )
+
+            elif name == "recall_session_close":
+                return result_json(
+                    pipeline.session_service.close_session(
+                        arguments["session_id"],
+                        agent_id=arguments["agent_id"],
+                        summary=arguments.get("summary"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "memory_capture":
                 text = arguments["text"]
                 if not isinstance(text, str) or not text.strip():
                     raise ValueError("text must be a non-empty string")
@@ -380,6 +651,12 @@ def create_server():
                     tier=arguments.get("tier"),
                     project=arguments.get("project"),
                     agent=arguments.get("agent"),
+                    user_id=arguments.get("user_id"),
+                    workspace_id=arguments.get("workspace_id"),
+                    project_id=arguments.get("project_id"),
+                    repository_id=arguments.get("repository_id"),
+                    task_id=arguments.get("task_id"),
+                    session_id=arguments.get("session_id"),
                 )
                 if result["decision"] == "SKIP":
                     return [
@@ -547,7 +824,7 @@ def create_server():
 
             elif name == "memory_context_build":
                 result = pipeline.build_context(
-                    task=arguments["task"],
+                    task=arguments.get("task", ""),
                     project=arguments.get("project"),
                     agent=arguments.get("agent"),
                     limit=max(
@@ -557,6 +834,14 @@ def create_server():
                             pipeline.settings.MAX_RESULTS,
                         ),
                     ),
+                    user_id=arguments.get("user_id"),
+                    workspace_id=arguments.get("workspace_id"),
+                    project_id=arguments.get("project_id"),
+                    repository_id=arguments.get("repository_id"),
+                    task_id=arguments.get("task_id"),
+                    session_id=arguments.get("session_id"),
+                    agent_id=arguments.get("agent_id"),
+                    known_checkpoint_version=arguments.get("known_checkpoint_version"),
                 )
                 return [
                     TextContent(

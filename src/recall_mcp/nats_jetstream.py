@@ -232,6 +232,12 @@ class DurableNatsSubscriber:
                 source=f"nats:{payload.get('agent', 'unknown')}",
                 project=str(payload.get("project") or ""),
                 agent=str(payload.get("agent") or ""),
+                user_id=payload.get("user_id"),
+                workspace_id=payload.get("workspace_id"),
+                project_id=payload.get("project_id"),
+                repository_id=payload.get("repository_id"),
+                task_id=payload.get("task_id"),
+                session_id=payload.get("session_id"),
             )
             self.pipeline.store.complete_event(event_id, result.get("id"))
             await message.ack()

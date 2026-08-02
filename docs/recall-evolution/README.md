@@ -43,9 +43,10 @@ Implementation records:
 
 ## Current progress
 
-Phase 0 is in progress. Formal schema migrations, the transactional outbox,
-foreign-key enforcement, and backup/restore are complete. General capture
-idempotency is the next recommended slice.
+Phase 1 shared task and session continuity is complete on top of the verified
+transactional-outbox checkpoint. Phase 2 retrieval feedback and utility is the
+active implementation phase. Deferred Phase 0 refinements remain documented;
+they are not silently marked complete.
 
 ## One-line architecture
 

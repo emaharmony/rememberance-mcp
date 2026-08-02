@@ -45,6 +45,7 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional
 
 from recall_mcp.pipeline import MemoryPipeline
+from recall_mcp.continuity import ContinuityError
 from recall_mcp.api.security import (
     ServiceMetrics,
     SlidingWindowRateLimiter,
@@ -92,10 +93,48 @@ def _build_context_pack(
     memories = ctx.get("memories", []) or []
     entities = ctx.get("entities", []) or []
     threads = ctx.get("open_threads", []) or []
+    active_task = ctx.get("active_task")
+    checkpoint = ctx.get("latest_checkpoint")
+    delta = ctx.get("session_delta")
 
     lines: list[str] = []
     selected_ids: list[str] = []
     mem_details: list[dict] = []
+
+    if active_task:
+        lines.extend(
+            [
+                "## Active Task",
+                f"- **{active_task.get('title', '')}**: {active_task.get('objective', '')}",
+                f"- Status: {active_task.get('status', '')}",
+                "",
+            ]
+        )
+
+    if checkpoint:
+        lines.append(f"## Session Checkpoint v{checkpoint.get('version', 0)}")
+        if checkpoint.get("summary"):
+            lines.append(f"- {checkpoint['summary']}")
+        for label, key in (
+            ("Constraints", "constraints"),
+            ("Blockers", "blockers"),
+            ("Open questions", "open_questions"),
+        ):
+            values = checkpoint.get(key, []) or []
+            if values:
+                lines.append(f"- {label}: " + "; ".join(str(value) for value in values))
+        lines.append("")
+
+    if delta and not delta.get("no_change"):
+        lines.append(
+            f"## Session Delta v{delta.get('from_version')}→v{delta.get('to_version')}"
+        )
+        for event in delta.get("events", []):
+            lines.append(
+                f"- {event.get('event_type')} by {event.get('agent_id')}: "
+                f"{json.dumps(event.get('payload', {}), sort_keys=True)}"
+            )
+        lines.append("")
 
     if memories:
         lines.append("## Relevant Memory")
@@ -155,8 +194,15 @@ def _build_context_pack(
             "task": task,
             "selected_memories": mem_details,
             "total_memories": len(mem_details),
+            "active_task": active_task,
+            "latest_checkpoint": checkpoint,
+            "session_delta": delta,
+            "approved_decisions": ctx.get("approved_decisions", []),
+            "critical_constraints": ctx.get("critical_constraints", []),
+            "open_blockers": ctx.get("open_blockers", []),
+            "open_questions": ctx.get("open_questions", []),
         },
-        "warnings": [],
+        "warnings": ctx.get("warnings", []),
         "token_count": token_count,
     }
 
@@ -165,6 +211,23 @@ class APIError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status
+
+
+def _continuity_status(error: ContinuityError) -> int:
+    if error.code == "not_found":
+        return 404
+    if error.code in {"idempotency_conflict", "scope_mismatch"}:
+        return 409
+    return 400
+
+
+def _required_text(body: dict, name: str, *, alias: str | None = None) -> str:
+    value = body.get(name)
+    if value is None and alias is not None:
+        value = body.get(alias)
+    if not isinstance(value, str) or not value.strip():
+        raise APIError(f"Missing '{name}' field")
+    return value.strip()
 
 
 class RecallHandler(BaseHTTPRequestHandler):
@@ -280,6 +343,38 @@ class RecallHandler(BaseHTTPRequestHandler):
                 stats = self.pipeline.stats()
                 self._json_response(stats)
 
+            elif path.startswith("/v2/tasks/") and len(path.split("/")) == 4:
+                task_id = path.split("/")[3]
+                task_result = self.pipeline.task_service.get_task(
+                    task_id,
+                    user_id=params.get("user_id", [None])[0],
+                    project_id=params.get("project_id", [None])[0],
+                    repository_id=params.get("repository_id", [None])[0],
+                )
+                self._json_response(task_result)
+
+            elif path.startswith("/v2/sessions/") and path.endswith("/delta"):
+                session_id = path.split("/")[3]
+                known_version = self._bounded_int(
+                    params.get("known_version", ["0"])[0],
+                    default=0,
+                    minimum=0,
+                    maximum=2_147_483_647,
+                    name="known_version",
+                )
+                delta = self.pipeline.session_service.get_delta(
+                    session_id,
+                    known_version=known_version,
+                    agent_id=params.get("agent_id", [None])[0],
+                )
+                self._json_response(delta)
+
+            elif path.startswith("/v2/sessions/") and len(path.split("/")) == 4:
+                session_id = path.split("/")[3]
+                self._json_response(
+                    self.pipeline.session_service.get_session(session_id)
+                )
+
             elif path == "/search":
                 query = params.get("q", [""])[0]
                 mode = params.get("mode", ["balanced"])[0]
@@ -287,6 +382,8 @@ class RecallHandler(BaseHTTPRequestHandler):
                 tier = params.get("tier", [None])[0]
                 project = params.get("project", [None])[0]
                 agent = params.get("agent", [None])[0]
+                search_task_id = params.get("task_id", [None])[0]
+                search_session_id = params.get("session_id", [None])[0]
                 limit = self._bounded_int(
                     params.get("limit", ["10"])[0],
                     default=10,
@@ -309,6 +406,12 @@ class RecallHandler(BaseHTTPRequestHandler):
                     limit=limit,
                     project=project,
                     agent=agent,
+                    user_id=params.get("user_id", [None])[0],
+                    workspace_id=params.get("workspace_id", [None])[0],
+                    project_id=params.get("project_id", [None])[0],
+                    repository_id=params.get("repository_id", [None])[0],
+                    task_id=search_task_id,
+                    session_id=search_session_id,
                 )
                 self._json_response({"results": results, "count": len(results)})
 
@@ -360,9 +463,11 @@ class RecallHandler(BaseHTTPRequestHandler):
                 self._json_response(result)
 
             elif path == "/context/build":
-                task = params.get("task", [""])[0]
+                task_query = params.get("task", [""])[0]
                 project = params.get("project", [None])[0]
                 agent = params.get("agent", [None])[0]
+                context_task_id = params.get("task_id", [None])[0]
+                context_session_id = params.get("session_id", [None])[0]
                 limit = self._bounded_int(
                     params.get("limit", ["10"])[0],
                     default=10,
@@ -371,14 +476,35 @@ class RecallHandler(BaseHTTPRequestHandler):
                     name="limit",
                 )
 
-                if not task:
+                if not task_query and not context_task_id:
                     self._json_response(
                         {"error": "Missing query parameter 'task'"}, status=400
                     )
                     return
 
                 context = self.pipeline.build_context(
-                    task=task, project=project, agent=agent, limit=limit
+                    task=task_query,
+                    project=project,
+                    agent=agent,
+                    limit=limit,
+                    user_id=params.get("user_id", [None])[0],
+                    workspace_id=params.get("workspace_id", [None])[0],
+                    project_id=params.get("project_id", [None])[0],
+                    repository_id=params.get("repository_id", [None])[0],
+                    task_id=context_task_id,
+                    session_id=context_session_id,
+                    agent_id=params.get("agent_id", [None])[0],
+                    known_checkpoint_version=(
+                        self._bounded_int(
+                            params["known_checkpoint_version"][0],
+                            default=0,
+                            minimum=0,
+                            maximum=2_147_483_647,
+                            name="known_checkpoint_version",
+                        )
+                        if "known_checkpoint_version" in params
+                        else None
+                    ),
                 )
                 self._json_response(context)
 
@@ -387,11 +513,45 @@ class RecallHandler(BaseHTTPRequestHandler):
 
         except APIError as error:
             self._safe_json_response({"error": str(error)}, status=error.status)
+        except ContinuityError as error:
+            self._safe_json_response(
+                {"error": str(error), "code": error.code},
+                status=_continuity_status(error),
+            )
         except Exception as e:
             if _is_client_disconnect(e):
                 logger.debug(f"GET {path} client disconnected before response was sent")
                 return
             logger.error(f"GET {path} error: {e}", exc_info=True)
+            self._safe_json_response({"error": "Internal server error"}, status=500)
+
+    def do_PATCH(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        if not self._guard_request("write", path):
+            return
+        try:
+            body = self._read_body()
+            if path.startswith("/v2/tasks/") and len(path.split("/")) == 4:
+                task_id = path.split("/")[3]
+                result = self.pipeline.task_service.update_task(
+                    task_id,
+                    title=body.get("title"),
+                    objective=body.get("objective"),
+                    status=body.get("status"),
+                )
+                self._json_response(result)
+            else:
+                self._json_response({"error": "Not found"}, status=404)
+        except ContinuityError as error:
+            self._safe_json_response(
+                {"error": str(error), "code": error.code},
+                status=_continuity_status(error),
+            )
+        except APIError as error:
+            self._safe_json_response({"error": str(error)}, status=error.status)
+        except Exception:
+            logger.exception("PATCH %s error", path)
             self._safe_json_response({"error": "Internal server error"}, status=500)
 
     def do_POST(self):
@@ -403,7 +563,93 @@ class RecallHandler(BaseHTTPRequestHandler):
         try:
             body = self._read_body()
 
-            if path == "/capture":
+            if path == "/v2/tasks":
+                result = self.pipeline.task_service.create_task(
+                    user_id=_required_text(body, "user_id"),
+                    workspace_id=_required_text(body, "workspace_id"),
+                    project_id=_required_text(body, "project_id"),
+                    repository_id=_required_text(body, "repository_id"),
+                    title=_required_text(body, "title"),
+                    objective=_required_text(body, "objective"),
+                    created_by=_required_text(body, "created_by", alias="agent_id"),
+                    status=body.get("status", "active"),
+                    idempotency_key=body.get("idempotency_key"),
+                    agent_name=body.get("agent_name"),
+                    agent_system_type=body.get("agent_system_type", "other"),
+                    workspace_name=body.get("workspace_name"),
+                    project_name=body.get("project_name"),
+                    repository_name=body.get("repository_name"),
+                    canonical_path=body.get("canonical_path"),
+                    remote_url=body.get("remote_url"),
+                    default_branch=body.get("default_branch"),
+                )
+                self._json_response(result, status=201)
+
+            elif path == "/v2/sessions":
+                result = self.pipeline.session_service.start_session(
+                    task_id=_required_text(body, "task_id"),
+                    agent_id=_required_text(body, "agent_id"),
+                    role=body.get("role", "owner"),
+                    idempotency_key=body.get("idempotency_key"),
+                    agent_name=body.get("agent_name"),
+                    agent_system_type=body.get("agent_system_type", "other"),
+                )
+                self._json_response(result, status=201)
+
+            elif path.startswith("/v2/sessions/") and path.endswith("/join"):
+                session_id = path.split("/")[3]
+                result = self.pipeline.session_service.join_session(
+                    session_id,
+                    agent_id=_required_text(body, "agent_id"),
+                    role=body.get("role", "implementer"),
+                    idempotency_key=body.get("idempotency_key"),
+                    agent_name=body.get("agent_name"),
+                    agent_system_type=body.get("agent_system_type", "other"),
+                )
+                self._json_response(result)
+
+            elif path.startswith("/v2/sessions/") and path.endswith("/events"):
+                session_id = path.split("/")[3]
+                result = self.pipeline.session_service.append_event(
+                    session_id,
+                    agent_id=_required_text(body, "agent_id"),
+                    event_type=_required_text(body, "event_type"),
+                    payload=body.get("payload"),
+                    idempotency_key=body.get("idempotency_key"),
+                )
+                self._json_response(result, status=201)
+
+            elif path.startswith("/v2/sessions/") and path.endswith("/checkpoint"):
+                session_id = path.split("/")[3]
+                result = self.pipeline.session_service.create_checkpoint(
+                    session_id,
+                    agent_id=_required_text(body, "agent_id"),
+                    summary=body.get("summary", ""),
+                    completed=body.get("completed"),
+                    remaining=body.get("remaining"),
+                    constraints=body.get("constraints"),
+                    approved_decisions=body.get("approved_decisions"),
+                    proposed_decisions=body.get("proposed_decisions"),
+                    open_questions=body.get("open_questions"),
+                    blockers=body.get("blockers"),
+                    important_files=body.get("important_files"),
+                    known_failures=body.get("known_failures"),
+                    idempotency_key=body.get("idempotency_key"),
+                    generated=bool(body.get("generated", False)),
+                )
+                self._json_response(result, status=201)
+
+            elif path.startswith("/v2/sessions/") and path.endswith("/close"):
+                session_id = path.split("/")[3]
+                result = self.pipeline.session_service.close_session(
+                    session_id,
+                    agent_id=_required_text(body, "agent_id"),
+                    summary=body.get("summary"),
+                    idempotency_key=body.get("idempotency_key"),
+                )
+                self._json_response(result)
+
+            elif path == "/capture":
                 text = body.get("text", "")
                 source = body.get("source", "api")
                 category = body.get("category")
@@ -426,6 +672,12 @@ class RecallHandler(BaseHTTPRequestHandler):
                     tier=tier,
                     project=project,
                     agent=agent,
+                    user_id=body.get("user_id"),
+                    workspace_id=body.get("workspace_id"),
+                    project_id=body.get("project_id"),
+                    repository_id=body.get("repository_id"),
+                    task_id=body.get("task_id"),
+                    session_id=body.get("session_id"),
                 )
                 self._json_response(result, status=201)
 
@@ -433,6 +685,7 @@ class RecallHandler(BaseHTTPRequestHandler):
                 task = body.get("task", "")
                 project = body.get("project")
                 agent = body.get("agent")
+                task_id = body.get("task_id")
                 limit = self._bounded_int(
                     body.get("limit"),
                     default=10,
@@ -440,10 +693,21 @@ class RecallHandler(BaseHTTPRequestHandler):
                     maximum=self.pipeline.settings.MAX_RESULTS,
                     name="limit",
                 )
-                if not task:
+                if not task and not task_id:
                     raise APIError("Missing 'task' field")
                 context = self.pipeline.build_context(
-                    task=task, project=project, agent=agent, limit=limit
+                    task=task,
+                    project=project,
+                    agent=agent,
+                    limit=limit,
+                    user_id=body.get("user_id"),
+                    workspace_id=body.get("workspace_id"),
+                    project_id=body.get("project_id"),
+                    repository_id=body.get("repository_id"),
+                    task_id=task_id,
+                    session_id=body.get("session_id"),
+                    agent_id=body.get("agent_id"),
+                    known_checkpoint_version=body.get("known_checkpoint_version"),
                 )
                 self._json_response(context)
             elif path in ("/dream", "/v1/dream"):
@@ -509,11 +773,23 @@ class RecallHandler(BaseHTTPRequestHandler):
                     maximum=self.pipeline.settings.MAX_RESULTS,
                     name="limit",
                 )
-                if not task:
+                task_id = body.get("task_id")
+                if not task and not task_id:
                     self._json_response({"error": "Missing 'task' field"}, status=400)
                     return
                 ctx = self.pipeline.build_context(
-                    task=task, project=project, agent=agent, limit=limit
+                    task=task,
+                    project=project,
+                    agent=agent,
+                    limit=limit,
+                    user_id=body.get("user_id"),
+                    workspace_id=body.get("workspace_id"),
+                    project_id=body.get("project_id") if task_id else None,
+                    repository_id=body.get("repository_id"),
+                    task_id=task_id,
+                    session_id=body.get("session_id"),
+                    agent_id=body.get("formal_agent_id") or body.get("agent_id"),
+                    known_checkpoint_version=body.get("known_checkpoint_version"),
                 )
                 self._json_response(
                     _build_context_pack(ctx, task, project, agent, max_tokens)
@@ -524,6 +800,11 @@ class RecallHandler(BaseHTTPRequestHandler):
 
         except APIError as error:
             self._safe_json_response({"error": str(error)}, status=error.status)
+        except ContinuityError as error:
+            self._safe_json_response(
+                {"error": str(error), "code": error.code},
+                status=_continuity_status(error),
+            )
         except Exception as e:
             if _is_client_disconnect(e):
                 logger.debug(
@@ -559,7 +840,9 @@ class RecallHandler(BaseHTTPRequestHandler):
             return
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header(
+            "Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS"
+        )
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
         self.send_header("Vary", "Origin")

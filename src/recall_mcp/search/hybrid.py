@@ -109,6 +109,41 @@ class HybridSearch:
             row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()
         }
 
+    @staticmethod
+    def _formal_scope(
+        user_id: Optional[str],
+        workspace_id: Optional[str],
+        project_id: Optional[str],
+        repository_id: Optional[str],
+        task_id: Optional[str],
+        session_id: Optional[str],
+    ) -> dict[str, str]:
+        return {
+            key: value
+            for key, value in {
+                "user_id": user_id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "repository_id": repository_id,
+                "task_id": task_id,
+                "session_id": session_id,
+            }.items()
+            if value is not None
+        }
+
+    @staticmethod
+    def _append_scope_sql(
+        sql: str,
+        params: list[object],
+        scope: dict[str, str],
+        *,
+        prefix: str = "",
+    ) -> str:
+        for column, value in scope.items():
+            sql += f" AND {prefix}{column} = ?"
+            params.append(value)
+        return sql
+
     def search(
         self,
         query: str,
@@ -118,6 +153,12 @@ class HybridSearch:
         limit: int = 10,
         project: Optional[str] = None,
         agent: Optional[str] = None,
+        user_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        repository_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> list[dict]:
         """
         Search memories using hybrid retrieval.
@@ -130,16 +171,29 @@ class HybridSearch:
 
         Returns list of result dicts sorted by fused score.
         """
+        scope = self._formal_scope(
+            user_id, workspace_id, project_id, repository_id, task_id, session_id
+        )
         if mode == "keyword":
-            return self._search_keyword(query, category, tier, limit, project, agent)
+            return self._search_keyword(
+                query, category, tier, limit, project, agent, scope
+            )
         elif mode == "vector":
-            return self._search_vector(query, category, limit, tier, project, agent)
+            return self._search_vector(
+                query, category, limit, tier, project, agent, scope
+            )
         elif mode == "balanced":
-            return self._search_balanced(query, category, tier, limit, project, agent)
+            return self._search_balanced(
+                query, category, tier, limit, project, agent, scope
+            )
         elif mode == "deep":
-            return self._search_deep(query, category, tier, limit, project, agent)
+            return self._search_deep(
+                query, category, tier, limit, project, agent, scope
+            )
         else:
-            return self._search_balanced(query, category, tier, limit, project, agent)
+            return self._search_balanced(
+                query, category, tier, limit, project, agent, scope
+            )
 
     def _search_keyword(
         self,
@@ -149,6 +203,7 @@ class HybridSearch:
         limit: int = 10,
         project: Optional[str] = None,
         agent: Optional[str] = None,
+        formal_scope: Optional[dict[str, str]] = None,
     ) -> list[dict]:
         """FTS5 full-text search only."""
         results = []
@@ -179,6 +234,9 @@ class HybridSearch:
                 if agent and "agent" in scope_columns:
                     sql += " AND (m.agent = ? OR m.agent = '')"
                     params.append(agent)
+                sql = self._append_scope_sql(
+                    sql, params, formal_scope or {}, prefix="m."
+                )
                 now = time.time()
                 sql += " AND (m.expires_at IS NULL OR m.expires_at > ?)"
                 params.append(now)
@@ -222,6 +280,7 @@ class HybridSearch:
                 if agent and "agent" in scope_columns:
                     sql += " AND (agent = ? OR agent = '')"
                     params.append(agent)
+                sql = self._append_scope_sql(sql, params, formal_scope or {})
                 now = time.time()
                 sql += " AND (expires_at IS NULL OR expires_at > ?)"
                 params.append(now)
@@ -246,6 +305,7 @@ class HybridSearch:
         tier: Optional[str] = None,
         project: Optional[str] = None,
         agent: Optional[str] = None,
+        formal_scope: Optional[dict[str, str]] = None,
     ) -> list[dict]:
         """
         Vector similarity search using cosine similarity on embedding BLOBs.
@@ -256,18 +316,23 @@ class HybridSearch:
         # Query embeddings come from the configured provider.
         # Keyword fallback keeps retrieval available during provider outages.
         if self.embedding_provider is None:
-            return self._search_keyword(query, category, tier, limit, project, agent)
+            return self._search_keyword(
+                query, category, tier, limit, project, agent, formal_scope
+            )
         try:
             embedded = self.embedding_provider.embed(query)
         except EmbeddingError as exc:
             logger.info("Vector query unavailable; using keyword search: %s", exc)
-            return self._search_keyword(query, category, tier, limit, project, agent)
+            return self._search_keyword(
+                query, category, tier, limit, project, agent, formal_scope
+            )
         return self.search_with_embedding(
             embedded.to_bytes(),
             category=category,
             tier=tier,
             project=project,
             agent=agent,
+            formal_scope=formal_scope,
             limit=limit,
         )
 
@@ -279,6 +344,7 @@ class HybridSearch:
         tier: Optional[str] = None,
         project: Optional[str] = None,
         agent: Optional[str] = None,
+        formal_scope: Optional[dict[str, str]] = None,
     ) -> list[dict]:
         """
         Search using a pre-computed embedding vector.
@@ -323,6 +389,7 @@ class HybridSearch:
             if agent and "agent" in scope_columns:
                 where_sql += " AND (agent = ? OR agent = '')"
                 params.append(agent)
+            where_sql = self._append_scope_sql(where_sql, params, formal_scope or {})
 
             rows = None
             sqlite_vec_enabled = False
@@ -390,6 +457,7 @@ class HybridSearch:
         limit: int = 10,
         project: Optional[str] = None,
         agent: Optional[str] = None,
+        formal_scope: Optional[dict[str, str]] = None,
     ) -> list[dict]:
         """Expand recognized entities and fuse the resulting hybrid searches."""
         expanded_terms: list[str] = []
@@ -412,7 +480,13 @@ class HybridSearch:
 
         result_sets = [
             self._search_balanced(
-                candidate, category, tier, max(limit, 30), project, agent
+                candidate,
+                category,
+                tier,
+                max(limit, 30),
+                project,
+                agent,
+                formal_scope,
             )
             for candidate in queries
         ]
@@ -427,6 +501,7 @@ class HybridSearch:
         limit: int = 10,
         project: Optional[str] = None,
         agent: Optional[str] = None,
+        formal_scope: Optional[dict[str, str]] = None,
     ) -> list[dict]:
         """
         Balanced hybrid search: FTS5 + vector + tier boost + graph + RRF.
@@ -440,17 +515,23 @@ class HybridSearch:
         6. Deduplicate and return top N
         """
         # Step 1: FTS5 search
-        fts_results = self._search_keyword(query, category, tier, 30, project, agent)
+        fts_results = self._search_keyword(
+            query, category, tier, 30, project, agent, formal_scope
+        )
 
         # Step 2: semantic vector retrieval with keyword fallback
-        vec_results = self._search_vector(query, category, 30, tier, project, agent)
+        vec_results = self._search_vector(
+            query, category, 30, tier, project, agent, formal_scope
+        )
 
         # Step 3+4: RRF fusion
         fused = self._rrf_fuse(fts_results, vec_results)
 
         # Step 5: Graph augmentation
         if self.entity_store:
-            augmented = self._graph_augment(query, fused, limit=5)
+            augmented = self._graph_augment(
+                query, fused, limit=5, formal_scope=formal_scope
+            )
             fused = self._merge_augmented(fused, augmented)
 
         # Step 6: Deduplicate and return top N
@@ -512,7 +593,11 @@ class HybridSearch:
         return fused
 
     def _graph_augment(
-        self, query: str, base_results: list[dict], limit: int = 5
+        self,
+        query: str,
+        base_results: list[dict],
+        limit: int = 5,
+        formal_scope: Optional[dict[str, str]] = None,
     ) -> list[dict]:
         """
         Augment search results by following entity edges.
@@ -543,7 +628,7 @@ class HybridSearch:
                 for entity in neighbors.get("entities", []):
                     # Get memories linked to this entity
                     linked = self.entity_store.get_entity_memories(
-                        entity["id"], limit=5
+                        entity["id"], limit=5, formal_scope=formal_scope
                     )
                     for mem in linked:
                         if mem["id"] not in seen_ids:
@@ -633,6 +718,12 @@ class HybridSearch:
         project: Optional[str] = None,
         agent: Optional[str] = None,
         limit: int = 10,
+        user_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        repository_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> dict:
         """
         Build a context response for a task query.
@@ -640,8 +731,21 @@ class HybridSearch:
         This is what Prism calls via `GET /context/build`.
         Returns structured context including memories, entities, and open threads.
         """
+        formal_scope = self._formal_scope(
+            user_id, workspace_id, project_id, repository_id, task_id, session_id
+        )
         results = self.search(
-            query, mode="balanced", project=project, agent=agent, limit=limit
+            query,
+            mode="balanced",
+            project=project,
+            agent=agent,
+            limit=limit,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            repository_id=repository_id,
+            task_id=task_id,
+            session_id=session_id,
         )
 
         # Gather entity context from results
@@ -651,7 +755,7 @@ class HybridSearch:
                 all_entity_ids.add(eid)
 
         entity_context = []
-        for eid in all_entity_ids:
+        for eid in all_entity_ids if not formal_scope else ():
             entity = self.entity_store.get_entity(eid)
             if entity:
                 entity_context.append(
@@ -682,6 +786,7 @@ class HybridSearch:
             "query": query,
             "project": project,
             "agent": agent,
+            "scope": formal_scope,
             "memories": results,
             "entities": entity_context,
             "open_threads": open_threads,

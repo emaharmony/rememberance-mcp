@@ -174,7 +174,7 @@ def test_partially_migrated_database_resumes_in_order(tmp_path):
     resumed = run_migrations(db_path)
 
     assert resumed.from_version == 2
-    assert [migration.version for migration in resumed.applied] == [3, 4, 5]
+    assert [migration.version for migration in resumed.applied] == [3, 4, 5, 6]
     assert resumed.to_version == CURRENT_SCHEMA_VERSION
 
 
