@@ -338,10 +338,13 @@ class RetrievalFeedbackService:
         )
 
         w = self.weights
+        strong_reuse = min(counts["used"] + counts["expanded"], 3)
+        small_reuse = (
+            min(counts["selected"], 3) * 0.1 + min(counts["injected"], 3) * 0.15
+        )
         components = UtilityComponents(
             initial_importance=admission * w["initial_importance"],
-            successful_reuse=min(counts["used"] + counts["expanded"], 3)
-            * w["successful_reuse"],
+            successful_reuse=(strong_reuse + small_reuse) * w["successful_reuse"],
             cross_session_reuse=max(0, min(len(sessions) - 1, 3))
             * w["cross_session_reuse"],
             cross_agent_reuse=max(0, min(len(agents) - 1, 3)) * w["cross_agent_reuse"],
@@ -351,7 +354,9 @@ class RetrievalFeedbackService:
             pinned=(1.0 if memory["pinned"] else 0.0) * w["pinned"],
             staleness_penalty=stale_raw * w["staleness_penalty"],
             duplicate_penalty=min(duplicate_count, 3) * w["duplicate_penalty"],
-            ignored_penalty=max(0, counts["ignored"] - counts["used"])
+            ignored_penalty=(
+                max(0, counts["ignored"] - counts["used"]) + counts["rejected"] * 2
+            )
             * w["ignored_penalty"],
             correction_penalty=correction_count * w["correction_penalty"],
             contradiction_penalty=(contradiction_count + rework_count)

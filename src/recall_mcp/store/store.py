@@ -839,6 +839,7 @@ class MemoryStore:
         now = time.time()
         ttl = self.ttl_config.get(tier, self.ttl_config["active"])
         expires_at = None if ttl == -1 else now + ttl
+        retention_review_at = now + self.ttl_config["active"]
         lifecycle_state = {
             "cold": "ephemeral",
             "active": "active",
@@ -852,6 +853,7 @@ class MemoryStore:
                     expires_at = ?,
                     lifecycle_state = CASE
                         WHEN pinned = 1 THEN lifecycle_state ELSE ? END,
+                    retention_review_at = ?,
                     processing_status = ?, processing_error = ?
                 WHERE id = ?
                 """,
@@ -862,6 +864,7 @@ class MemoryStore:
                     json.dumps(key_topics),
                     expires_at,
                     lifecycle_state,
+                    retention_review_at,
                     processing_status,
                     processing_error[:1000],
                     mem_id,

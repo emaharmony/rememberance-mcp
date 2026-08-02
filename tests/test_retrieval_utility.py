@@ -189,6 +189,7 @@ def test_context_pack_cannot_change_retrieval_scope(utility_env):
 
 def test_context_selection_and_injection_are_distinct(utility_env):
     memory_id = make_memory(utility_env)
+    initial_score, _ = utility_env["feedback"].calculate_utility(memory_id)
     with sqlite3.connect(utility_env["settings"].DB_PATH) as conn:
         conn.execute(
             "UPDATE memories SET expires_at = ? WHERE id = ?",
@@ -196,12 +197,16 @@ def test_context_selection_and_injection_are_distinct(utility_env):
         )
     run_id, pack_id, _results = make_pack(utility_env, [memory_id])
     selected = memory_row(utility_env, memory_id)
+    selected_score, _ = utility_env["feedback"].calculate_utility(memory_id)
     assert selected["last_selected_at"] is not None
     assert selected["last_injected_at"] is None
     assert selected["expires_at"] > time.time() + 80000
+    assert selected_score > initial_score
     utility_env["feedback"].mark_context_injected(pack_id, agent_id="claude-code")
     injected = memory_row(utility_env, memory_id)
+    injected_score, _ = utility_env["feedback"].calculate_utility(memory_id)
     assert injected["last_injected_at"] is not None
+    assert injected_score > selected_score
     with sqlite3.connect(utility_env["settings"].DB_PATH) as conn:
         flags = conn.execute(
             "SELECT selected, injected, used FROM retrieval_results WHERE retrieval_run_id = ?",
@@ -336,6 +341,54 @@ def test_repeated_ignores_and_contradiction_reduce_utility(utility_env):
     assert after < before
     assert components.ignored_penalty > 0
     assert components.contradiction_penalty > 0
+
+
+def test_rejection_is_a_stronger_negative_than_one_ignore(utility_env):
+    ignored_memory = make_memory(utility_env, text="ignored")
+    rejected_memory = make_memory(utility_env, text="rejected")
+    _run, pack_id, _results = make_pack(utility_env, [ignored_memory, rejected_memory])
+    utility_env["feedback"].record_context_usage(
+        context_pack_id=pack_id,
+        memory_id=ignored_memory,
+        agent_id="codex",
+        usage_type="ignored",
+    )
+    utility_env["feedback"].record_context_usage(
+        context_pack_id=pack_id,
+        memory_id=rejected_memory,
+        agent_id="codex",
+        usage_type="rejected",
+    )
+    ignored_score, ignored_components = utility_env["feedback"].calculate_utility(
+        ignored_memory
+    )
+    rejected_score, rejected_components = utility_env["feedback"].calculate_utility(
+        rejected_memory
+    )
+    assert rejected_score < ignored_score
+    assert rejected_components.ignored_penalty > ignored_components.ignored_penalty
+
+
+def test_canonical_update_refreshes_expiry_and_retention_review(utility_env):
+    memory_id = make_memory(utility_env)
+    with sqlite3.connect(utility_env["settings"].DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE memories SET expires_at = ?, retention_review_at = NULL
+            WHERE id = ?
+            """,
+            (time.time() + 1, memory_id),
+        )
+    utility_env["store"].update_enrichment(
+        memory_id,
+        summary="trusted update",
+        category="project",
+        tier="active",
+        key_topics=["updated"],
+    )
+    updated = memory_row(utility_env, memory_id)
+    assert updated["expires_at"] > time.time() + 29 * 86400
+    assert updated["retention_review_at"] > time.time() + 29 * 86400
 
 
 def test_task_outcome_records_success_and_extends_expiry(utility_env):
