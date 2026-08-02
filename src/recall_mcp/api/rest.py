@@ -204,6 +204,8 @@ def _build_context_pack(
         },
         "warnings": ctx.get("warnings", []),
         "token_count": token_count,
+        "retrieval_run_id": ctx.get("retrieval_run_id"),
+        "context_pack_id": ctx.get("context_pack_id"),
     }
 
 
@@ -274,6 +276,9 @@ class RecallHandler(BaseHTTPRequestHandler):
                 ]
                 outbox_worker = self.pipeline.outbox_dispatcher.health()
                 probe["outbox_worker"] = outbox_worker
+                probe["retrieval_feedback"] = (
+                    self.pipeline.feedback_service.telemetry_stats()
+                )
                 ready = ready and bool(
                     outbox_worker["running"] and outbox_worker["thread_alive"]
                 )
@@ -327,6 +332,30 @@ class RecallHandler(BaseHTTPRequestHandler):
                     "recall_outbox_dispatcher_error",
                     1.0 if worker_health["last_error"] else 0.0,
                 )
+                feedback = self.pipeline.feedback_service.telemetry_stats()
+                for name in (
+                    "retrieval_runs",
+                    "retrieval_results",
+                    "context_packs",
+                    "task_outcomes",
+                    "utility_history",
+                    "memory_lifecycle_audit",
+                ):
+                    self.service_metrics.set_gauge(
+                        f"recall_{name}", float(str(feedback[name]))
+                    )
+                self.service_metrics.set_gauge(
+                    "recall_retrieval_feedback_errors",
+                    float(str(feedback["error_count"])),
+                )
+                self.service_metrics.set_gauge(
+                    "recall_utility_shadow_mode",
+                    1.0 if feedback["shadow_mode"] else 0.0,
+                )
+                self.service_metrics.set_gauge(
+                    "recall_utility_ranking_weight",
+                    float(str(feedback["ranking_weight"])),
+                )
                 nats_sub = getattr(self.pipeline, "nats_sub", None)
                 if nats_sub is not None:
                     nats_health = nats_sub.health()
@@ -375,6 +404,47 @@ class RecallHandler(BaseHTTPRequestHandler):
                     self.pipeline.session_service.get_session(session_id)
                 )
 
+            elif path.startswith("/v2/memories/") and path.endswith("/utility/history"):
+                memory_id = path.split("/")[3]
+                scope: dict[str, str] = {
+                    key: params[key][0]
+                    for key in ("user_id", "project_id", "repository_id", "task_id")
+                    if key in params
+                }
+                self._json_response(
+                    {
+                        "memory_id": memory_id,
+                        "history": self.pipeline.feedback_service.utility_history(
+                            memory_id, scope=scope
+                        ),
+                    }
+                )
+
+            elif path.startswith("/v2/memories/") and path.endswith("/utility"):
+                memory_id = path.split("/")[3]
+                scope = {
+                    key: params[key][0]
+                    for key in ("user_id", "project_id", "repository_id", "task_id")
+                    if key in params
+                }
+                self._json_response(
+                    self.pipeline.feedback_service.explain_utility(
+                        memory_id, scope=scope
+                    )
+                )
+
+            elif path == "/v2/admin/utility/shadow-report":
+                limit = self._bounded_int(
+                    params.get("limit", ["100"])[0],
+                    default=100,
+                    minimum=1,
+                    maximum=1000,
+                    name="limit",
+                )
+                self._json_response(
+                    self.pipeline.feedback_service.shadow_report(limit=limit)
+                )
+
             elif path == "/search":
                 query = params.get("q", [""])[0]
                 mode = params.get("mode", ["balanced"])[0]
@@ -398,8 +468,8 @@ class RecallHandler(BaseHTTPRequestHandler):
                     )
                     return
 
-                results = self.pipeline.hybrid_search.search(
-                    query,
+                results = self.pipeline.search(
+                    query=query,
                     mode=mode,
                     category=category,
                     tier=tier,
@@ -412,6 +482,10 @@ class RecallHandler(BaseHTTPRequestHandler):
                     repository_id=params.get("repository_id", [None])[0],
                     task_id=search_task_id,
                     session_id=search_session_id,
+                    agent_id=params.get("agent_id", [None])[0],
+                    include_cold=params.get("include_cold", ["false"])[0].lower()
+                    in {"1", "true", "yes"},
+                    retrieval_idempotency_key=params.get("idempotency_key", [None])[0],
                 )
                 self._json_response({"results": results, "count": len(results)})
 
@@ -505,6 +579,20 @@ class RecallHandler(BaseHTTPRequestHandler):
                         if "known_checkpoint_version" in params
                         else None
                     ),
+                    token_budget=(
+                        self._bounded_int(
+                            params["token_budget"][0],
+                            default=2500,
+                            minimum=1,
+                            maximum=100_000,
+                            name="token_budget",
+                        )
+                        if "token_budget" in params
+                        else None
+                    ),
+                    include_cold=params.get("include_cold", ["false"])[0].lower()
+                    in {"1", "true", "yes"},
+                    retrieval_idempotency_key=params.get("idempotency_key", [None])[0],
                 )
                 self._json_response(context)
 
@@ -649,6 +737,79 @@ class RecallHandler(BaseHTTPRequestHandler):
                 )
                 self._json_response(result)
 
+            elif path.startswith("/v2/context/") and path.endswith("/feedback"):
+                context_pack_id = path.split("/")[3]
+                feedback_result = self.pipeline.feedback_service.record_feedback(
+                    context_pack_id=context_pack_id,
+                    agent_id=body.get("agent_id"),
+                    used_memory_ids=body.get("used_memory_ids", []),
+                    ignored_memory_ids=body.get("ignored_memory_ids", []),
+                    expanded_memory_ids=body.get("expanded_memory_ids", []),
+                    corrected_memory_ids=body.get("corrected_memory_ids", []),
+                    rejected_memory_ids=body.get("rejected_memory_ids", []),
+                    idempotency_key=body.get("idempotency_key"),
+                )
+                self._json_response({"feedback": feedback_result}, status=201)
+
+            elif path.startswith("/v2/retrieval/") and path.endswith("/feedback"):
+                retrieval_run_id = path.split("/")[3]
+                context_pack_id = self.pipeline.feedback_service.context_pack_for_run(
+                    retrieval_run_id
+                )
+                feedback_result = self.pipeline.feedback_service.record_feedback(
+                    context_pack_id=context_pack_id,
+                    agent_id=body.get("agent_id"),
+                    used_memory_ids=body.get("used_memory_ids", []),
+                    ignored_memory_ids=body.get("ignored_memory_ids", []),
+                    expanded_memory_ids=body.get("expanded_memory_ids", []),
+                    corrected_memory_ids=body.get("corrected_memory_ids", []),
+                    rejected_memory_ids=body.get("rejected_memory_ids", []),
+                    idempotency_key=body.get("idempotency_key"),
+                )
+                self._json_response({"feedback": feedback_result}, status=201)
+
+            elif path.startswith("/v2/tasks/") and path.endswith("/outcome"):
+                outcome_task_id = path.split("/")[3]
+                outcome_result = self.pipeline.feedback_service.record_task_outcome(
+                    task_id=outcome_task_id,
+                    session_id=body.get("session_id"),
+                    status=body.get("status", "completed"),
+                    successful=bool(body.get("successful", False)),
+                    agent_id=body.get("agent_id"),
+                    user_correction_count=int(body.get("user_correction_count", 0)),
+                    rework_required=bool(body.get("rework_required", False)),
+                    metadata=body.get("metadata"),
+                    idempotency_key=body.get("idempotency_key"),
+                )
+                self._json_response(outcome_result, status=201)
+
+            elif path.startswith("/v2/memories/") and "/utility/" in path:
+                parts = path.split("/")
+                memory_id = parts[3]
+                action = parts[5]
+                actor_id = body.get("actor_id")
+                if action == "cold":
+                    lifecycle_result = self.pipeline.feedback_service.demote_to_cold(
+                        memory_id,
+                        reason=body.get("reason", "manual"),
+                        actor_id=actor_id,
+                    )
+                elif action == "restore":
+                    lifecycle_result = self.pipeline.feedback_service.restore_from_cold(
+                        memory_id, actor_id=actor_id
+                    )
+                elif action == "pin":
+                    lifecycle_result = self.pipeline.feedback_service.pin(
+                        memory_id, actor_id=actor_id
+                    )
+                elif action == "unpin":
+                    lifecycle_result = self.pipeline.feedback_service.unpin(
+                        memory_id, actor_id=actor_id
+                    )
+                else:
+                    raise ContinuityError("unsupported utility action")
+                self._json_response(lifecycle_result)
+
             elif path == "/capture":
                 text = body.get("text", "")
                 source = body.get("source", "api")
@@ -685,7 +846,7 @@ class RecallHandler(BaseHTTPRequestHandler):
                 task = body.get("task", "")
                 project = body.get("project")
                 agent = body.get("agent")
-                task_id = body.get("task_id")
+                context_task_id = body.get("task_id")
                 limit = self._bounded_int(
                     body.get("limit"),
                     default=10,
@@ -693,7 +854,7 @@ class RecallHandler(BaseHTTPRequestHandler):
                     maximum=self.pipeline.settings.MAX_RESULTS,
                     name="limit",
                 )
-                if not task and not task_id:
+                if not task and not context_task_id:
                     raise APIError("Missing 'task' field")
                 context = self.pipeline.build_context(
                     task=task,
@@ -704,10 +865,13 @@ class RecallHandler(BaseHTTPRequestHandler):
                     workspace_id=body.get("workspace_id"),
                     project_id=body.get("project_id"),
                     repository_id=body.get("repository_id"),
-                    task_id=task_id,
+                    task_id=context_task_id,
                     session_id=body.get("session_id"),
                     agent_id=body.get("agent_id"),
                     known_checkpoint_version=body.get("known_checkpoint_version"),
+                    token_budget=body.get("token_budget"),
+                    include_cold=bool(body.get("include_cold", False)),
+                    retrieval_idempotency_key=body.get("idempotency_key"),
                 )
                 self._json_response(context)
             elif path in ("/dream", "/v1/dream"):
@@ -773,8 +937,8 @@ class RecallHandler(BaseHTTPRequestHandler):
                     maximum=self.pipeline.settings.MAX_RESULTS,
                     name="limit",
                 )
-                task_id = body.get("task_id")
-                if not task and not task_id:
+                prism_task_id = body.get("task_id")
+                if not task and not prism_task_id:
                     self._json_response({"error": "Missing 'task' field"}, status=400)
                     return
                 ctx = self.pipeline.build_context(
@@ -784,16 +948,22 @@ class RecallHandler(BaseHTTPRequestHandler):
                     limit=limit,
                     user_id=body.get("user_id"),
                     workspace_id=body.get("workspace_id"),
-                    project_id=body.get("project_id") if task_id else None,
+                    project_id=body.get("project_id") if prism_task_id else None,
                     repository_id=body.get("repository_id"),
-                    task_id=task_id,
+                    task_id=prism_task_id,
                     session_id=body.get("session_id"),
                     agent_id=body.get("formal_agent_id") or body.get("agent_id"),
                     known_checkpoint_version=body.get("known_checkpoint_version"),
+                    token_budget=max_tokens,
+                    include_cold=bool(body.get("include_cold", False)),
+                    retrieval_idempotency_key=body.get("idempotency_key"),
                 )
-                self._json_response(
-                    _build_context_pack(ctx, task, project, agent, max_tokens)
-                )
+                response = _build_context_pack(ctx, task, project, agent, max_tokens)
+                if ctx.get("context_pack_id"):
+                    self.pipeline.feedback_service.mark_context_injected(
+                        str(ctx["context_pack_id"]), agent_id=agent
+                    )
+                self._json_response(response)
 
             else:
                 self._json_response({"error": "Not found"}, status=404)

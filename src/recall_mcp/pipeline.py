@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional
 
@@ -53,6 +54,7 @@ from recall_mcp.graph.traversal import GraphTraversal
 from recall_mcp.search.hybrid import HybridSearch
 from recall_mcp.embeddings import EmbeddingError, OllamaEmbeddingProvider
 from recall_mcp.dream.cycle import DreamCycle
+from recall_mcp.feedback import RetrievalFeedbackService
 from recall_mcp.gate_backends import GateMetrics
 from recall_mcp.outbox import CaptureOutcome, CaptureOutboxDispatcher
 from recall_mcp.store.store import OutboxJob
@@ -133,6 +135,9 @@ class MemoryPipeline:
         self.continuity_store = ContinuityStore(self.settings.DB_PATH)
         self.task_service = TaskService(self.continuity_store)
         self.session_service = SessionService(self.continuity_store, self.task_service)
+        self.feedback_service = RetrievalFeedbackService(
+            self.settings.DB_PATH, self.settings
+        )
 
         # ── V2: Entity Store + Knowledge Graph ─────────────────
         # Unified into the main DB (DB_PATH) so dream-cycle phases can join
@@ -497,14 +502,58 @@ class MemoryPipeline:
         repository_id: Optional[str] = None,
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        include_cold: bool = False,
+        retrieval_idempotency_key: Optional[str] = None,
     ) -> list[dict]:
         """Search memories with bounded keyword, vector, balanced, or deep retrieval."""
+        results, _run_id = self._search_with_telemetry(
+            query=query,
+            category=category,
+            tier=tier,
+            limit=limit,
+            mode=mode,
+            project=project,
+            agent=agent,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            repository_id=repository_id,
+            task_id=task_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            include_cold=include_cold,
+            retrieval_idempotency_key=retrieval_idempotency_key,
+        )
+        return results
+
+    def _search_with_telemetry(
+        self,
+        *,
+        query: str,
+        category: Optional[str],
+        tier: Optional[str],
+        limit: int,
+        mode: str,
+        project: Optional[str],
+        agent: Optional[str],
+        user_id: Optional[str],
+        workspace_id: Optional[str],
+        project_id: Optional[str],
+        repository_id: Optional[str],
+        task_id: Optional[str],
+        session_id: Optional[str],
+        agent_id: Optional[str],
+        include_cold: bool,
+        retrieval_idempotency_key: Optional[str],
+    ) -> tuple[list[dict], str | None]:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
         if mode not in {"keyword", "vector", "balanced", "deep"}:
             raise ValueError("unsupported search mode")
         bounded_limit = max(1, min(int(limit), self.settings.MAX_RESULTS))
-        return self.hybrid_search.search(
+        started = time.perf_counter()
+        results = self.hybrid_search.search(
             query,
             mode=mode,
             category=category,
@@ -518,7 +567,47 @@ class MemoryPipeline:
             repository_id=repository_id,
             task_id=task_id,
             session_id=session_id,
+            include_cold=include_cold,
         )
+        if (
+            not self.settings.UTILITY_SHADOW_MODE
+            and self.settings.UTILITY_RANKING_WEIGHT > 0
+            and results
+        ):
+            weight = self.settings.UTILITY_RANKING_WEIGHT
+            utility = self.feedback_service.current_utility_scores(
+                [str(result["id"]) for result in results]
+            )
+            for result in results:
+                base_score = float(result.get("score", 0.0) or 0.0)
+                result["base_score"] = base_score
+                result["score"] = (
+                    base_score * (1.0 - weight)
+                    + utility.get(str(result["id"]), 0.0) * weight
+                )
+            results.sort(key=lambda item: float(item["score"]), reverse=True)
+        latency_ms = (time.perf_counter() - started) * 1000.0
+        run_id: str | None = None
+        try:
+            run_id = self.feedback_service.record_retrieval_run(
+                query=query,
+                mode=mode,
+                requested_limit=bounded_limit,
+                latency_ms=latency_ms,
+                results=results,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                repository_id=repository_id,
+                task_id=task_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                idempotency_key=retrieval_idempotency_key,
+            )
+        except Exception as exc:
+            self.feedback_service.record_error(exc)
+            logger.exception("Retrieval telemetry failed")
+        return results, run_id
 
     def get(self, mem_id: str) -> Optional[dict]:
         """Get a specific memory by ID."""
@@ -561,6 +650,9 @@ class MemoryPipeline:
         session_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         known_checkpoint_version: Optional[int] = None,
+        token_budget: Optional[int] = None,
+        include_cold: bool = False,
+        retrieval_idempotency_key: Optional[str] = None,
     ) -> dict:
         """
         Build context for a task using hybrid search + graph traversal.
@@ -618,6 +710,24 @@ class MemoryPipeline:
                 )
         if not task.strip():
             raise ValueError("task must be a non-empty string")
+        results, retrieval_run_id = self._search_with_telemetry(
+            query=task,
+            category=None,
+            tier=None,
+            limit=limit,
+            mode="balanced",
+            project=project,
+            agent=agent,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            repository_id=repository_id,
+            task_id=task_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            include_cold=include_cold,
+            retrieval_idempotency_key=retrieval_idempotency_key,
+        )
         context = self.hybrid_search.build_context(
             query=task,
             project=project,
@@ -629,7 +739,28 @@ class MemoryPipeline:
             repository_id=repository_id,
             task_id=task_id,
             session_id=session_id,
+            include_cold=include_cold,
+            results=results,
         )
+        context["retrieval_run_id"] = retrieval_run_id
+        context["context_pack_id"] = None
+        if retrieval_run_id is not None:
+            try:
+                estimated_tokens = sum(
+                    len(str(result.get("summary") or result.get("content") or "")) // 4
+                    for result in results
+                )
+                context["context_pack_id"] = self.feedback_service.create_context_pack(
+                    retrieval_run_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    token_budget=token_budget,
+                    estimated_tokens=estimated_tokens,
+                )
+            except Exception as exc:
+                self.feedback_service.record_error(exc)
+                logger.exception("Context-pack telemetry failed")
         if active_task is not None:
             context["active_task"] = active_task
         if session_id is not None:
@@ -689,6 +820,7 @@ class MemoryPipeline:
             "memories": self.store.count(),
             "operational": self.store.operational_stats(),
             "outbox_worker": self.outbox_dispatcher.health(),
+            "retrieval_feedback": self.feedback_service.telemetry_stats(),
             "entities": self.entity_store.stats(),
             "facts": self.fact_store.stats(),
             "v2": self.store_v2.v2_stats(),

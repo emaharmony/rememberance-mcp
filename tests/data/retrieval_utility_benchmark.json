@@ -1,0 +1,15 @@
+{
+  "query": "deployment safety",
+  "project_id": "project-recall",
+  "k": 3,
+  "memories": [
+    {"id": "relevant", "project_id": "project-recall", "base_score": 0.90, "utility": 0.60, "relevant": true},
+    {"id": "near-duplicate", "project_id": "project-recall", "base_score": 0.85, "utility": 0.10, "relevant": false},
+    {"id": "stale", "project_id": "project-recall", "base_score": 0.82, "utility": 0.00, "relevant": false},
+    {"id": "contradictory", "project_id": "project-recall", "base_score": 0.80, "utility": 0.00, "relevant": false},
+    {"id": "corrected", "project_id": "project-recall", "base_score": 0.79, "utility": 0.00, "relevant": false},
+    {"id": "frequently-reused", "project_id": "project-recall", "base_score": 0.78, "utility": 1.00, "relevant": true},
+    {"id": "pinned-constraint", "project_id": "project-recall", "base_score": 0.70, "utility": 1.00, "relevant": true},
+    {"id": "cross-project-distractor", "project_id": "project-other", "base_score": 0.99, "utility": 1.00, "relevant": false}
+  ]
+}

@@ -131,7 +131,8 @@ def test_consolidation_requires_five_explicit_accesses(tmp_path):
     assert store.consolidate()["promoted"] == 0
     for _ in range(5):
         assert store.get(memory_id) is not None
-    assert store.consolidate()["promoted"] == 1
+    # Retrieval count alone does not change durable importance in Phase 2.
+    assert store.consolidate()["promoted"] == 0
 
 
 def test_scoped_search_includes_global_but_not_other_scope(tmp_path):

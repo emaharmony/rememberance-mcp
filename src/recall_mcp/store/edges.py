@@ -583,6 +583,7 @@ class EntityStore:
         entity_id: str,
         limit: int = 20,
         formal_scope: dict[str, str] | None = None,
+        include_cold: bool = False,
     ) -> list[dict]:
         """Get all memories linked to an entity."""
         with self._connect() as conn:
@@ -597,6 +598,18 @@ class EntityStore:
             for column, value in (formal_scope or {}).items():
                 sql += f" AND m.{column} = ?"
                 params.append(value)
+            now = time.time()
+            if include_cold:
+                sql += """
+                    AND ((m.expires_at IS NULL OR m.expires_at > ?)
+                         OR m.lifecycle_state = 'cold')
+                """
+            else:
+                sql += """
+                    AND m.lifecycle_state NOT IN ('cold', 'archived')
+                    AND (m.expires_at IS NULL OR m.expires_at > ?)
+                """
+            params.append(now)
             sql += " ORDER BY m.created_at DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(

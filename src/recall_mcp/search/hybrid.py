@@ -144,6 +144,32 @@ class HybridSearch:
             params.append(value)
         return sql
 
+    @staticmethod
+    def _append_eligibility_sql(
+        sql: str,
+        params: list[object],
+        columns: set[str],
+        *,
+        prefix: str = "",
+        include_cold: bool = False,
+    ) -> str:
+        now = time.time()
+        if "lifecycle_state" not in columns:
+            sql += f" AND ({prefix}expires_at IS NULL OR {prefix}expires_at > ?)"
+            params.append(now)
+            return sql
+        if include_cold:
+            sql += (
+                f" AND (({prefix}expires_at IS NULL OR {prefix}expires_at > ?)"
+                f" OR {prefix}lifecycle_state = 'cold')"
+            )
+            params.append(now)
+        else:
+            sql += f" AND {prefix}lifecycle_state NOT IN ('cold', 'archived')"
+            sql += f" AND ({prefix}expires_at IS NULL OR {prefix}expires_at > ?)"
+            params.append(now)
+        return sql
+
     def search(
         self,
         query: str,
@@ -159,6 +185,7 @@ class HybridSearch:
         repository_id: Optional[str] = None,
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        include_cold: bool = False,
     ) -> list[dict]:
         """
         Search memories using hybrid retrieval.
@@ -176,23 +203,30 @@ class HybridSearch:
         )
         if mode == "keyword":
             return self._search_keyword(
-                query, category, tier, limit, project, agent, scope
+                query, category, tier, limit, project, agent, scope, include_cold
             )
         elif mode == "vector":
             return self._search_vector(
-                query, category, limit, tier, project, agent, scope
+                query, category, limit, tier, project, agent, scope, include_cold
             )
         elif mode == "balanced":
             return self._search_balanced(
-                query, category, tier, limit, project, agent, scope
+                query, category, tier, limit, project, agent, scope, include_cold
             )
         elif mode == "deep":
             return self._search_deep(
-                query, category, tier, limit, project, agent, scope
+                query,
+                category,
+                tier,
+                limit,
+                project,
+                agent,
+                scope,
+                include_cold,
             )
         else:
             return self._search_balanced(
-                query, category, tier, limit, project, agent, scope
+                query, category, tier, limit, project, agent, scope, include_cold
             )
 
     def _search_keyword(
@@ -204,6 +238,7 @@ class HybridSearch:
         project: Optional[str] = None,
         agent: Optional[str] = None,
         formal_scope: Optional[dict[str, str]] = None,
+        include_cold: bool = False,
     ) -> list[dict]:
         """FTS5 full-text search only."""
         results = []
@@ -237,9 +272,13 @@ class HybridSearch:
                 sql = self._append_scope_sql(
                     sql, params, formal_scope or {}, prefix="m."
                 )
-                now = time.time()
-                sql += " AND (m.expires_at IS NULL OR m.expires_at > ?)"
-                params.append(now)
+                sql = self._append_eligibility_sql(
+                    sql,
+                    params,
+                    scope_columns,
+                    prefix="m.",
+                    include_cold=include_cold,
+                )
 
                 sql += " ORDER BY fts.rank LIMIT ?"
                 params.append(limit)
@@ -250,6 +289,7 @@ class HybridSearch:
                     d["score"] = 1.0 / (
                         1.0 + abs(d.pop("fts_rank", 0))
                     )  # FTS rank is negative (lower = better)
+                    d["keyword_score"] = d["score"]
                     d["sources"] = ["fts5"]
                     results.append(d)
             except Exception as e:
@@ -281,9 +321,9 @@ class HybridSearch:
                     sql += " AND (agent = ? OR agent = '')"
                     params.append(agent)
                 sql = self._append_scope_sql(sql, params, formal_scope or {})
-                now = time.time()
-                sql += " AND (expires_at IS NULL OR expires_at > ?)"
-                params.append(now)
+                sql = self._append_eligibility_sql(
+                    sql, params, scope_columns, include_cold=include_cold
+                )
 
                 sql += " ORDER BY accessed_at DESC LIMIT ?"
                 params.append(limit)
@@ -292,6 +332,7 @@ class HybridSearch:
                 for r in rows:
                     d = dict(r)
                     d["score"] = 0.5  # Lower than FTS5 matches
+                    d["keyword_score"] = d["score"]
                     d["sources"] = ["like"]
                     results.append(d)
 
@@ -306,6 +347,7 @@ class HybridSearch:
         project: Optional[str] = None,
         agent: Optional[str] = None,
         formal_scope: Optional[dict[str, str]] = None,
+        include_cold: bool = False,
     ) -> list[dict]:
         """
         Vector similarity search using cosine similarity on embedding BLOBs.
@@ -317,14 +359,28 @@ class HybridSearch:
         # Keyword fallback keeps retrieval available during provider outages.
         if self.embedding_provider is None:
             return self._search_keyword(
-                query, category, tier, limit, project, agent, formal_scope
+                query,
+                category,
+                tier,
+                limit,
+                project,
+                agent,
+                formal_scope,
+                include_cold,
             )
         try:
             embedded = self.embedding_provider.embed(query)
         except EmbeddingError as exc:
             logger.info("Vector query unavailable; using keyword search: %s", exc)
             return self._search_keyword(
-                query, category, tier, limit, project, agent, formal_scope
+                query,
+                category,
+                tier,
+                limit,
+                project,
+                agent,
+                formal_scope,
+                include_cold,
             )
         return self.search_with_embedding(
             embedded.to_bytes(),
@@ -333,6 +389,7 @@ class HybridSearch:
             project=project,
             agent=agent,
             formal_scope=formal_scope,
+            include_cold=include_cold,
             limit=limit,
         )
 
@@ -345,6 +402,7 @@ class HybridSearch:
         project: Optional[str] = None,
         agent: Optional[str] = None,
         formal_scope: Optional[dict[str, str]] = None,
+        include_cold: bool = False,
     ) -> list[dict]:
         """
         Search using a pre-computed embedding vector.
@@ -364,14 +422,12 @@ class HybridSearch:
         candidates = []
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            now = time.time()
             scope_columns = self._scope_columns(conn)
             where_sql = """
                 FROM memories
                 WHERE embedding IS NOT NULL
-                AND (expires_at IS NULL OR expires_at > ?)
             """
-            params: list[object] = [now]
+            params: list[object] = []
             if "embedding_dimensions" in scope_columns:
                 where_sql += (
                     " AND (embedding_dimensions IS NULL OR embedding_dimensions = ?)"
@@ -390,6 +446,9 @@ class HybridSearch:
                 where_sql += " AND (agent = ? OR agent = '')"
                 params.append(agent)
             where_sql = self._append_scope_sql(where_sql, params, formal_scope or {})
+            where_sql = self._append_eligibility_sql(
+                where_sql, params, scope_columns, include_cold=include_cold
+            )
 
             rows = None
             sqlite_vec_enabled = False
@@ -442,6 +501,8 @@ class HybridSearch:
                         "category": row["category"],
                         "tier": row["tier"],
                         "score": boosted_score,
+                        "vector_score": similarity,
+                        "tier_boost": tier_boost,
                         "sources": [source],
                     }
                 )
@@ -458,6 +519,7 @@ class HybridSearch:
         project: Optional[str] = None,
         agent: Optional[str] = None,
         formal_scope: Optional[dict[str, str]] = None,
+        include_cold: bool = False,
     ) -> list[dict]:
         """Expand recognized entities and fuse the resulting hybrid searches."""
         expanded_terms: list[str] = []
@@ -487,6 +549,7 @@ class HybridSearch:
                 project,
                 agent,
                 formal_scope,
+                include_cold,
             )
             for candidate in queries
         ]
@@ -502,6 +565,7 @@ class HybridSearch:
         project: Optional[str] = None,
         agent: Optional[str] = None,
         formal_scope: Optional[dict[str, str]] = None,
+        include_cold: bool = False,
     ) -> list[dict]:
         """
         Balanced hybrid search: FTS5 + vector + tier boost + graph + RRF.
@@ -516,12 +580,26 @@ class HybridSearch:
         """
         # Step 1: FTS5 search
         fts_results = self._search_keyword(
-            query, category, tier, 30, project, agent, formal_scope
+            query,
+            category,
+            tier,
+            30,
+            project,
+            agent,
+            formal_scope,
+            include_cold,
         )
 
         # Step 2: semantic vector retrieval with keyword fallback
         vec_results = self._search_vector(
-            query, category, 30, tier, project, agent, formal_scope
+            query,
+            category,
+            30,
+            tier,
+            project,
+            agent,
+            formal_scope,
+            include_cold,
         )
 
         # Step 3+4: RRF fusion
@@ -530,7 +608,11 @@ class HybridSearch:
         # Step 5: Graph augmentation
         if self.entity_store:
             augmented = self._graph_augment(
-                query, fused, limit=5, formal_scope=formal_scope
+                query,
+                fused,
+                limit=5,
+                formal_scope=formal_scope,
+                include_cold=include_cold,
             )
             fused = self._merge_augmented(fused, augmented)
 
@@ -574,11 +656,23 @@ class HybridSearch:
                 if mem_id in scores:
                     scores[mem_id]["score"] += rrf_score
                     scores[mem_id]["sources"].extend(result.get("sources", []))
+                    for component in ("keyword_score", "vector_score", "graph_score"):
+                        if result.get(component) is not None:
+                            scores[mem_id]["components"][component] = result[component]
                 else:
                     scores[mem_id] = {
                         "score": rrf_score,
                         "result": result,
                         "sources": list(result.get("sources", [])),
+                        "components": {
+                            component: result[component]
+                            for component in (
+                                "keyword_score",
+                                "vector_score",
+                                "graph_score",
+                            )
+                            if result.get(component) is not None
+                        },
                     }
 
         # Sort by fused score
@@ -587,6 +681,8 @@ class HybridSearch:
             result = data["result"].copy()
             result["score"] = data["score"]
             result["sources"] = list(set(data["sources"]))  # deduplicate
+            result.update(data["components"])
+            result["tier_boost"] = TIER_BOOST.get(result.get("tier", "active"), 1.0)
             fused.append(result)
 
         fused.sort(key=lambda x: x["score"], reverse=True)
@@ -598,6 +694,7 @@ class HybridSearch:
         base_results: list[dict],
         limit: int = 5,
         formal_scope: Optional[dict[str, str]] = None,
+        include_cold: bool = False,
     ) -> list[dict]:
         """
         Augment search results by following entity edges.
@@ -628,11 +725,15 @@ class HybridSearch:
                 for entity in neighbors.get("entities", []):
                     # Get memories linked to this entity
                     linked = self.entity_store.get_entity_memories(
-                        entity["id"], limit=5, formal_scope=formal_scope
+                        entity["id"],
+                        limit=5,
+                        formal_scope=formal_scope,
+                        include_cold=include_cold,
                     )
                     for mem in linked:
                         if mem["id"] not in seen_ids:
                             mem["score"] = graph_score
+                            mem["graph_score"] = graph_score
                             mem["sources"] = ["graph"]
                             augmented.append(mem)
                             seen_ids.add(mem["id"])
@@ -724,6 +825,8 @@ class HybridSearch:
         repository_id: Optional[str] = None,
         task_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        include_cold: bool = False,
+        results: Optional[list[dict]] = None,
     ) -> dict:
         """
         Build a context response for a task query.
@@ -734,19 +837,21 @@ class HybridSearch:
         formal_scope = self._formal_scope(
             user_id, workspace_id, project_id, repository_id, task_id, session_id
         )
-        results = self.search(
-            query,
-            mode="balanced",
-            project=project,
-            agent=agent,
-            limit=limit,
-            user_id=user_id,
-            workspace_id=workspace_id,
-            project_id=project_id,
-            repository_id=repository_id,
-            task_id=task_id,
-            session_id=session_id,
-        )
+        if results is None:
+            results = self.search(
+                query,
+                mode="balanced",
+                project=project,
+                agent=agent,
+                limit=limit,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                repository_id=repository_id,
+                task_id=task_id,
+                session_id=session_id,
+                include_cold=include_cold,
+            )
 
         # Gather entity context from results
         all_entity_ids = set()

@@ -6,3 +6,4 @@ recursive-include integrations *.cmd *.json *.md *.ps1 *.py *.vbs
 include deploy/ubuntu/Dockerfile
 recursive-include deploy *.conf *.ps1 *.sh *.template *.yaml
 recursive-include scripts *.sh
+recursive-include tests/data *.json

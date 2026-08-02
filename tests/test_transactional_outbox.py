@@ -90,7 +90,7 @@ def test_migration_backfills_only_pending_raw_captures(tmp_path):
 
     result = run_migrations(db_path)
 
-    assert [migration.version for migration in result.applied] == [5, 6]
+    assert [migration.version for migration in result.applied] == [5, 6, 7]
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT raw_capture_id, status FROM outbox_jobs").fetchall()
     assert rows == [("pending", "pending")]
@@ -523,6 +523,9 @@ def test_doctor_reports_workerless_outbox_observability(tmp_path, capsys, monkey
         "inflight": 0,
         "last_error": None,
     }
+    assert result["retrieval_feedback"]["policy_version"] == "utility-v1"
+    assert result["retrieval_feedback"]["retrieval_runs"] == 0
+    assert result["retrieval_feedback"]["last_error"] == ""
 
 
 def test_pipeline_close_is_idempotent_and_stops_dispatcher(tmp_path):

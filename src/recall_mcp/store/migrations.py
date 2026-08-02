@@ -782,6 +782,239 @@ def _migration_task_session_continuity(conn: sqlite3.Connection) -> None:
         _require_columns(conn, table, columns)
 
 
+def _migration_retrieval_utility(conn: sqlite3.Connection) -> None:
+    """Add retrieval telemetry and reversible, explainable utility lifecycle."""
+    _add_columns(
+        conn,
+        "memories",
+        {
+            "utility_score": "REAL NOT NULL DEFAULT 0.0",
+            "utility_policy_version": "TEXT NOT NULL DEFAULT 'utility-v1'",
+            "lifecycle_state": "TEXT NOT NULL DEFAULT 'active'",
+            "pinned": "INTEGER NOT NULL DEFAULT 0",
+            "last_retrieved_at": "REAL",
+            "last_selected_at": "REAL",
+            "last_injected_at": "REAL",
+            "last_expanded_at": "REAL",
+            "last_used_at": "REAL",
+            "last_successful_use_at": "REAL",
+            "retention_review_at": "REAL",
+        },
+    )
+    conn.execute(
+        """
+        UPDATE memories
+        SET lifecycle_state = CASE
+            WHEN tier = 'persist' THEN 'stable'
+            WHEN tier = 'cold' THEN 'ephemeral'
+            ELSE 'active'
+        END
+        WHERE lifecycle_state = 'active'
+        """
+    )
+    _execute_statements(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS retrieval_runs (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            workspace_id TEXT,
+            project_id TEXT,
+            repository_id TEXT,
+            task_id TEXT,
+            session_id TEXT,
+            agent_id TEXT,
+            query TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            requested_limit INTEGER NOT NULL CHECK(requested_limit > 0),
+            created_at REAL NOT NULL,
+            latency_ms REAL NOT NULL CHECK(latency_ms >= 0),
+            idempotency_key TEXT,
+            FOREIGN KEY (task_id) REFERENCES tasks(id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_retrieval_runs_idempotency
+        ON retrieval_runs(agent_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS retrieval_results (
+            retrieval_run_id TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            rank INTEGER NOT NULL CHECK(rank >= 1),
+            shadow_rank INTEGER CHECK(shadow_rank >= 1),
+            keyword_score REAL,
+            vector_score REAL,
+            graph_score REAL,
+            tier_boost REAL,
+            utility_score REAL NOT NULL,
+            final_score REAL NOT NULL,
+            shadow_score REAL NOT NULL,
+            selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0, 1)),
+            injected INTEGER NOT NULL DEFAULT 0 CHECK(injected IN (0, 1)),
+            used INTEGER NOT NULL DEFAULT 0 CHECK(used IN (0, 1)),
+            scoring_policy_version TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (retrieval_run_id, memory_id),
+            UNIQUE(retrieval_run_id, rank),
+            FOREIGN KEY (retrieval_run_id) REFERENCES retrieval_runs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS context_packs (
+            id TEXT PRIMARY KEY,
+            retrieval_run_id TEXT NOT NULL UNIQUE,
+            task_id TEXT,
+            session_id TEXT,
+            agent_id TEXT,
+            token_budget INTEGER,
+            estimated_tokens INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (retrieval_run_id) REFERENCES retrieval_runs(id),
+            FOREIGN KEY (task_id) REFERENCES tasks(id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS context_usage (
+            id TEXT PRIMARY KEY,
+            context_pack_id TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            agent_id TEXT,
+            usage_type TEXT NOT NULL CHECK(usage_type IN (
+                'returned', 'selected', 'injected', 'expanded', 'used',
+                'ignored', 'corrected', 'rejected'
+            )),
+            created_at REAL NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT,
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id),
+            FOREIGN KEY (memory_id) REFERENCES memories(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_context_usage_idempotency
+        ON context_usage(context_pack_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS task_outcomes (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            session_id TEXT,
+            agent_id TEXT,
+            status TEXT NOT NULL,
+            successful INTEGER NOT NULL CHECK(successful IN (0, 1)),
+            user_correction_count INTEGER NOT NULL DEFAULT 0
+                CHECK(user_correction_count >= 0),
+            rework_required INTEGER NOT NULL DEFAULT 0
+                CHECK(rework_required IN (0, 1)),
+            completed_at REAL NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT,
+            FOREIGN KEY (task_id) REFERENCES tasks(id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_outcomes_idempotency
+        ON task_outcomes(task_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS utility_history (
+            id TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL,
+            previous_score REAL NOT NULL,
+            new_score REAL NOT NULL,
+            reason TEXT NOT NULL,
+            components_json TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_lifecycle_audit (
+            id TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL,
+            previous_state TEXT NOT NULL,
+            new_state TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            actor_id TEXT,
+            policy_version TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (memory_id) REFERENCES memories(id),
+            FOREIGN KEY (actor_id) REFERENCES agents(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_retrieval_runs_scope_created
+        ON retrieval_runs(user_id, project_id, repository_id, task_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_results_memory
+        ON retrieval_results(memory_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_context_usage_memory_type
+        ON context_usage(memory_id, usage_type, created_at);
+        CREATE INDEX IF NOT EXISTS idx_task_outcomes_task
+        ON task_outcomes(task_id, completed_at);
+        CREATE INDEX IF NOT EXISTS idx_utility_history_memory
+        ON utility_history(memory_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_lifecycle_audit_memory
+        ON memory_lifecycle_audit(memory_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_memories_lifecycle_utility
+        ON memories(lifecycle_state, pinned, utility_score);
+        CREATE INDEX IF NOT EXISTS idx_memories_retention_review
+        ON memories(retention_review_at)
+        WHERE retention_review_at IS NOT NULL;
+        """,
+    )
+    _require_columns(
+        conn,
+        "memories",
+        {
+            "utility_score",
+            "utility_policy_version",
+            "lifecycle_state",
+            "pinned",
+            "last_retrieved_at",
+            "last_selected_at",
+            "last_injected_at",
+            "last_expanded_at",
+            "last_used_at",
+            "last_successful_use_at",
+            "retention_review_at",
+        },
+    )
+    for table, columns in {
+        "retrieval_runs": {"id", "query", "mode", "latency_ms"},
+        "retrieval_results": {
+            "retrieval_run_id",
+            "memory_id",
+            "rank",
+            "utility_score",
+            "final_score",
+        },
+        "context_packs": {"id", "retrieval_run_id", "estimated_tokens"},
+        "context_usage": {"id", "context_pack_id", "memory_id", "usage_type"},
+        "task_outcomes": {
+            "id",
+            "task_id",
+            "agent_id",
+            "successful",
+            "rework_required",
+        },
+        "utility_history": {
+            "id",
+            "memory_id",
+            "previous_score",
+            "new_score",
+            "components_json",
+        },
+        "memory_lifecycle_audit": {
+            "id",
+            "memory_id",
+            "previous_state",
+            "new_state",
+        },
+    }.items():
+        _require_columns(conn, table, columns)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_memory", _migration_core_memory),
     Migration(2, "memory_v2", _migration_memory_v2),
@@ -789,6 +1022,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "production_reliability", _migration_production_reliability),
     Migration(5, "transactional_outbox", _migration_transactional_outbox),
     Migration(6, "task_session_continuity", _migration_task_session_continuity),
+    Migration(7, "retrieval_utility", _migration_retrieval_utility),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
 

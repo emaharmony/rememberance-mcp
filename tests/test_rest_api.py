@@ -89,6 +89,9 @@ class TestHealthEndpoint:
         assert data["outbox_active_leases"] == 0
         assert data["outbox_oldest_due_seconds"] == 0
         assert data["outbox_worker"]["thread_alive"] is True
+        assert data["retrieval_feedback"]["policy_version"] == "utility-v1"
+        assert data["retrieval_feedback"]["shadow_mode"] is True
+        assert data["retrieval_feedback"]["error_count"] == 0
 
     def test_readiness_sanitizes_dispatcher_error(self, api_server):
         pipeline = api_server["pipeline"]
@@ -109,6 +112,28 @@ class TestHealthEndpoint:
         )
         assert "recall_outbox_dispatcher_error 1.0" in metrics
         assert "customer-secret" not in metrics
+
+    def test_feedback_observability_is_content_free(self, api_server):
+        pipeline = api_server["pipeline"]
+        pipeline.feedback_service.record_error(
+            RuntimeError("captured-content must not escape")
+        )
+
+        readiness = json.loads(
+            urllib.request.urlopen(f"{api_server['base_url']}/health/ready").read()
+        )
+        feedback = readiness["retrieval_feedback"]
+        assert feedback["error_count"] == 1
+        assert feedback["last_error"] == "RuntimeError: telemetry operation failed"
+        assert readiness["status"] == "ready"
+
+        metrics = (
+            urllib.request.urlopen(f"{api_server['base_url']}/metrics").read().decode()
+        )
+        assert "recall_retrieval_feedback_errors 1.0" in metrics
+        assert "recall_utility_shadow_mode 1.0" in metrics
+        assert "captured-content" not in json.dumps(readiness)
+        assert "captured-content" not in metrics
 
 
 class TestClientDisconnectHandling:
@@ -148,6 +173,8 @@ class TestStatsEndpoint:
             "dead",
         }
         assert data["outbox_worker"]["thread_alive"] is True
+        assert data["retrieval_feedback"]["retrieval_runs"] == 0
+        assert data["retrieval_feedback"]["shadow_mode"] is True
 
 
 class TestCaptureEndpoint:
@@ -321,6 +348,132 @@ class TestTaskSessionContinuityEndpoints:
                 },
             )
         assert error.value.code == 409
+
+
+class TestRetrievalFeedbackEndpoints:
+    request = staticmethod(TestTaskSessionContinuityEndpoints.request)
+
+    def test_feedback_utility_shadow_and_cold_lifecycle(self, api_server):
+        pipeline = api_server["pipeline"]
+        base = api_server["base_url"]
+        task = pipeline.task_service.create_task(
+            user_id="user-feedback",
+            workspace_id="workspace-feedback",
+            project_id="project-feedback",
+            repository_id="repo-feedback",
+            title="Feedback API",
+            objective="Measure useful context",
+            created_by="claude-code",
+            canonical_path="/work/feedback",
+        )
+        session = pipeline.session_service.start_session(
+            task_id=task["id"], agent_id="claude-code"
+        )
+        memory_id = pipeline.store.store(
+            "telemetry marker constraint",
+            "telemetry marker constraint",
+            "project",
+            "active",
+            [],
+            agent="claude-code",
+            user_id=task["user_id"],
+            workspace_id=task["workspace_id"],
+            project_id=task["project_id"],
+            repository_id=task["repository_id"],
+            task_id=task["id"],
+            session_id=session["id"],
+        )
+        status, context = self.request(
+            base,
+            "/context/build",
+            {
+                "task": "telemetry marker",
+                "user_id": task["user_id"],
+                "workspace_id": task["workspace_id"],
+                "project_id": task["project_id"],
+                "repository_id": task["repository_id"],
+                "task_id": task["id"],
+                "session_id": session["id"],
+                "agent_id": "claude-code",
+                "idempotency_key": "rest-feedback-run",
+            },
+        )
+        assert status == 200
+        assert context["retrieval_run_id"]
+        assert context["context_pack_id"]
+        assert context["memories"][0]["id"] == memory_id
+        status, feedback = self.request(
+            base,
+            f"/v2/context/{context['context_pack_id']}/feedback",
+            {
+                "agent_id": "claude-code",
+                "used_memory_ids": [memory_id],
+                "idempotency_key": "rest-use",
+            },
+        )
+        assert status == 201
+        assert feedback["feedback"][0]["usage_type"] == "used"
+        status, outcome = self.request(
+            base,
+            f"/v2/tasks/{task['id']}/outcome",
+            {
+                "session_id": session["id"],
+                "status": "completed",
+                "successful": True,
+                "agent_id": "claude-code",
+                "idempotency_key": "rest-outcome",
+            },
+        )
+        assert status == 201
+        assert outcome["successful"] is True
+        assert outcome["agent_id"] == "claude-code"
+
+        scope = (
+            f"?user_id={task['user_id']}&project_id={task['project_id']}"
+            f"&repository_id={task['repository_id']}&task_id={task['id']}"
+        )
+        status, explanation = self.request(
+            base, f"/v2/memories/{memory_id}/utility{scope}", method="GET"
+        )
+        assert status == 200
+        assert explanation["policy_version"] == "utility-v1"
+        status, history = self.request(
+            base, f"/v2/memories/{memory_id}/utility/history{scope}", method="GET"
+        )
+        assert status == 200
+        assert history["history"]
+        with pytest.raises(urllib.error.HTTPError) as error:
+            self.request(
+                base,
+                f"/v2/memories/{memory_id}/utility?project_id=other",
+                method="GET",
+            )
+        assert error.value.code == 404
+
+        status, report = self.request(
+            base, "/v2/admin/utility/shadow-report", method="GET"
+        )
+        assert status == 200
+        assert report["production_ranking_changed"] is False
+
+        self.request(
+            base,
+            f"/v2/memories/{memory_id}/utility/cold",
+            {"reason": "test"},
+        )
+        status, normal = self.request(
+            base, "/search?q=telemetry+marker&mode=keyword", method="GET"
+        )
+        assert status == 200
+        assert normal["results"] == []
+        status, explicit = self.request(
+            base,
+            "/search?q=telemetry+marker&mode=keyword&include_cold=true",
+            method="GET",
+        )
+        assert status == 200
+        assert explicit["results"][0]["id"] == memory_id
+        self.request(base, f"/v2/memories/{memory_id}/utility/restore", {})
 
 
 class TestSearchEndpoint:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,6 +49,21 @@ def _path(name: str) -> Path | None:
 def _csv(name: str) -> tuple[str, ...]:
     value = get_env(name, "") or ""
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _number_mapping(name: str) -> dict[str, float]:
+    value = get_env(name)
+    if not value:
+        return {}
+    decoded = json.loads(value)
+    if not isinstance(decoded, dict):
+        raise ValueError(f"RECALL_{name} must be a JSON object")
+    result: dict[str, float] = {}
+    for key, weight in decoded.items():
+        if not isinstance(key, str) or not isinstance(weight, (int, float)):
+            raise ValueError(f"RECALL_{name} values must be numeric")
+        result[key] = float(weight)
+    return result
 
 
 def _is_loopback(host: str) -> bool:
@@ -154,6 +170,37 @@ class Settings:
         default_factory=lambda: _number("OUTBOX_RETRY_BASE_SECONDS", 2.0)
     )
 
+    UTILITY_POLICY_VERSION: str = field(
+        default_factory=lambda: _text("UTILITY_POLICY_VERSION", "utility-v1")
+    )
+    UTILITY_SHADOW_MODE: bool = field(
+        default_factory=lambda: _boolean("UTILITY_SHADOW_MODE", True)
+    )
+    UTILITY_RANKING_WEIGHT: float = field(
+        default_factory=lambda: _number("UTILITY_RANKING_WEIGHT", 0.0)
+    )
+    UTILITY_WEIGHTS: dict[str, float] = field(
+        default_factory=lambda: _number_mapping("UTILITY_WEIGHTS")
+    )
+    RETENTION_SELECTION_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_SELECTION_SECONDS", 86400)
+    )
+    RETENTION_INJECTION_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_INJECTION_SECONDS", 3 * 86400)
+    )
+    RETENTION_EXPANSION_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_EXPANSION_SECONDS", 14 * 86400)
+    )
+    RETENTION_USE_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_USE_SECONDS", 30 * 86400)
+    )
+    RETENTION_SUCCESS_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_SUCCESS_SECONDS", 90 * 86400)
+    )
+    RETENTION_REVIEW_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_REVIEW_SECONDS", 30 * 86400)
+    )
+
     NATS_URL: str = field(
         default_factory=lambda: _text("NATS_URL", "nats://127.0.0.1:4222")
     )
@@ -213,6 +260,20 @@ class Settings:
             raise ValueError("outbox polling and lease durations must be positive")
         if self.OUTBOX_MAX_ATTEMPTS < 1 or self.OUTBOX_RETRY_BASE_SECONDS <= 0:
             raise ValueError("outbox retry settings must be positive")
+        if not 0 <= self.UTILITY_RANKING_WEIGHT <= 0.1:
+            raise ValueError("RECALL_UTILITY_RANKING_WEIGHT must be between 0 and 0.1")
+        if not self.UTILITY_POLICY_VERSION.strip():
+            raise ValueError("RECALL_UTILITY_POLICY_VERSION must not be empty")
+        retention_windows = (
+            self.RETENTION_SELECTION_SECONDS,
+            self.RETENTION_INJECTION_SECONDS,
+            self.RETENTION_EXPANSION_SECONDS,
+            self.RETENTION_USE_SECONDS,
+            self.RETENTION_SUCCESS_SECONDS,
+            self.RETENTION_REVIEW_SECONDS,
+        )
+        if any(window < 0 for window in retention_windows):
+            raise ValueError("retention windows must not be negative")
         if self.OLLAMA_TIMEOUT_SECONDS <= 0:
             raise ValueError("RECALL_OLLAMA_TIMEOUT_SECONDS must be positive")
         if not self.OLLAMA_BASE_URL.startswith(("http://", "https://")):

@@ -34,6 +34,9 @@ EXPECTED_TOOLS = {
     "recall_session_join",
     "recall_session_checkpoint",
     "recall_session_delta",
+    "recall_context_feedback",
+    "recall_task_outcome",
+    "recall_memory_utility",
 }
 
 
@@ -107,13 +110,27 @@ def test_mcp_server_starts_and_lists_tools():
                     },
                 )
                 delta = json.loads(delta_result.content[0].text)
-                return {t.name for t in tools.tools}, delta
+                outcome_result = await session.call_tool(
+                    "recall_task_outcome",
+                    {
+                        "task_id": task["id"],
+                        "session_id": shared_session["id"],
+                        "status": "completed",
+                        "successful": True,
+                        "agent_id": "codex",
+                        "idempotency_key": "mcp-outcome",
+                    },
+                )
+                outcome = json.loads(outcome_result.content[0].text)
+                return {t.name for t in tools.tools}, delta, outcome
 
     try:
-        names, delta = asyncio.run(asyncio.wait_for(_run(), timeout=60))
+        names, delta, outcome = asyncio.run(asyncio.wait_for(_run(), timeout=60))
     finally:
         shutil.rmtree(home, ignore_errors=True)
     assert EXPECTED_TOOLS.issubset(names), f"missing tools: {EXPECTED_TOOLS - names}"
     assert len(names) >= 11
     assert delta["checkpoint"]["objective"] == "Share state"
     assert delta["checkpoint"]["constraints"] == ["no push"]
+    assert outcome["successful"] is True
+    assert outcome["agent_id"] == "codex"

@@ -324,6 +324,11 @@ class MemoryStore:
         now = time.time()
         ttl = self.ttl_config.get(tier, self.ttl_config["active"])
         expires_at = None if ttl == -1 else now + ttl
+        lifecycle_state = {
+            "cold": "ephemeral",
+            "active": "active",
+            "persist": "stable",
+        }.get(tier, "active")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
@@ -355,11 +360,11 @@ class MemoryStore:
                         source, embedding, created_at, accessed_at, expires_at,
                         project, agent, processing_status,
                         user_id, workspace_id, project_id, repository_id,
-                        task_id, session_id
+                        task_id, session_id, lifecycle_state
                     )
                     VALUES (
                         ?, ?, ?, ?, ?, '[]', ?, NULL, ?, ?, ?, ?, ?, 'pending',
-                        ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -380,6 +385,7 @@ class MemoryStore:
                         job.repository_id,
                         job.task_id,
                         job.session_id,
+                        lifecycle_state,
                     ),
                 )
             elif tuple(existing) != expected:
@@ -774,6 +780,11 @@ class MemoryStore:
         # Calculate expiry based on tier
         ttl = self.ttl_config.get(tier, self.ttl_config["active"])
         expires_at = None if ttl == -1 else now + ttl
+        lifecycle_state = {
+            "cold": "ephemeral",
+            "active": "active",
+            "persist": "stable",
+        }.get(tier, "active")
 
         with self._connect() as conn:
             conn.execute(
@@ -782,8 +793,8 @@ class MemoryStore:
                                       source, embedding, created_at, accessed_at, expires_at,
                                       project, agent, processing_status,
                                       user_id, workspace_id, project_id, repository_id,
-                                      task_id, session_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      task_id, session_id, lifecycle_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     mem_id,
@@ -806,6 +817,7 @@ class MemoryStore:
                     repository_id,
                     task_id,
                     session_id,
+                    lifecycle_state,
                 ),
             )
 
@@ -827,12 +839,20 @@ class MemoryStore:
         now = time.time()
         ttl = self.ttl_config.get(tier, self.ttl_config["active"])
         expires_at = None if ttl == -1 else now + ttl
+        lifecycle_state = {
+            "cold": "ephemeral",
+            "active": "active",
+            "persist": "stable",
+        }.get(tier, "active")
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE memories
                 SET summary = ?, category = ?, tier = ?, key_topics = ?,
-                    expires_at = ?, processing_status = ?, processing_error = ?
+                    expires_at = ?,
+                    lifecycle_state = CASE
+                        WHEN pinned = 1 THEN lifecycle_state ELSE ? END,
+                    processing_status = ?, processing_error = ?
                 WHERE id = ?
                 """,
                 (
@@ -841,6 +861,7 @@ class MemoryStore:
                     tier,
                     json.dumps(key_topics),
                     expires_at,
+                    lifecycle_state,
                     processing_status,
                     processing_error[:1000],
                     mem_id,
@@ -942,6 +963,7 @@ class MemoryStore:
         project: Optional[str] = None,
         agent: Optional[str] = None,
         limit: int = 10,
+        include_cold: bool = False,
     ) -> list[dict]:
         """
         Search memories by text match and metadata filters.
@@ -975,7 +997,16 @@ class MemoryStore:
                 params.append(agent)
             # Filter out expired memories
             now = time.time()
-            sql += " AND (expires_at IS NULL OR expires_at > ?)"
+            if include_cold:
+                sql += """
+                    AND ((expires_at IS NULL OR expires_at > ?)
+                         OR lifecycle_state = 'cold')
+                """
+            else:
+                sql += """
+                    AND lifecycle_state NOT IN ('cold', 'archived')
+                    AND (expires_at IS NULL OR expires_at > ?)
+                """
             params.append(now)
 
             sql += " ORDER BY accessed_at DESC LIMIT ?"
@@ -1007,60 +1038,54 @@ class MemoryStore:
             return cursor.rowcount > 0
 
     def consolidate(self) -> dict:
-        """
-        Run the decay/promotion cycle.
-
-        CONSOLIDATION LOGIC:
-        1. Delete expired cold memories (past their TTL)
-        2. Promote frequently-accessed active memories to persist
-        3. Demote rarely-accessed persist memories to active
-
-        This is like garbage collection in programming languages:
-        - JVM has GC for memory
-        - We have consolidation for memories
-        - Both clean up unused resources automatically
-        """
+        """Demote expired memories reversibly; never delete automatically."""
         now = time.time()
-        results = {"expired_deleted": 0, "promoted": 0, "demoted": 0}
+        results = {
+            "expired_deleted": 0,
+            "expired_demoted": 0,
+            "promoted": 0,
+            "demoted": 0,
+        }
 
         with self._connect() as conn:
-            # 1. Delete expired cold memories
-            cursor = conn.execute(
-                "DELETE FROM memories WHERE tier = 'cold' AND expires_at IS NOT NULL AND expires_at < ?",
+            expired = conn.execute(
+                """
+                SELECT id, lifecycle_state FROM memories
+                WHERE pinned = 0
+                  AND lifecycle_state NOT IN ('cold', 'archived')
+                  AND expires_at IS NOT NULL AND expires_at < ?
+                ORDER BY id
+                """,
                 (now,),
-            )
-            results["expired_deleted"] = cursor.rowcount
-
-            # 2. Promote active → persist if accessed 5+ times in last 7 days
-            #    (heuristic: if you keep coming back to a memory, it's important)
-            seven_days_ago = now - (7 * 86400)
-            cursor = conn.execute(
-                """
-                UPDATE memories SET tier = 'persist', expires_at = NULL
-                WHERE tier = 'active'
-                AND accessed_at > ?
-                AND access_count >= 5
-                AND (expires_at IS NULL OR expires_at > ?)
-                AND id IN (
-                    SELECT id FROM memories WHERE tier = 'active'
-                    GROUP BY id HAVING COUNT(*) >= 1
+            ).fetchall()
+            for memory in expired:
+                conn.execute(
+                    """
+                    INSERT INTO memory_lifecycle_audit (
+                        id, memory_id, previous_state, new_state, reason,
+                        actor_id, policy_version, created_at
+                    ) VALUES (?, ?, ?, 'cold', 'retention_review',
+                              NULL, 'utility-v1', ?)
+                    """,
+                    (
+                        f"lifecycle_{uuid.uuid4().hex}",
+                        memory[0],
+                        memory[1],
+                        now,
+                    ),
                 )
-            """,
-                (seven_days_ago, now),
-            )
-            results["promoted"] = cursor.rowcount
-
-            # 3. Demote persist → active if not accessed in 90 days
-            #    (if you haven't touched it in 3 months, it's not "persist" important)
-            ninety_days_ago = now - (90 * 86400)
             cursor = conn.execute(
                 """
-                UPDATE memories SET tier = 'active', expires_at = ?
-                WHERE tier = 'persist' AND accessed_at < ?
-            """,
-                (now + self.ttl_config["active"], ninety_days_ago),
+                UPDATE memories
+                SET lifecycle_state = 'cold', retention_review_at = ?
+                WHERE pinned = 0
+                  AND lifecycle_state NOT IN ('cold', 'archived')
+                  AND expires_at IS NOT NULL AND expires_at < ?
+                """,
+                (now, now),
             )
-            results["demoted"] = cursor.rowcount
+            results["expired_demoted"] = cursor.rowcount
+            conn.execute("UPDATE memories SET expires_at = NULL WHERE pinned = 1")
 
         logger.info(f"Consolidation: {results}")
         return results

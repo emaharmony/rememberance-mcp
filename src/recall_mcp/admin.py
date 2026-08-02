@@ -201,6 +201,8 @@ def command_init(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
+    from recall_mcp.feedback import RetrievalFeedbackService
+
     store = MemoryStore(settings.DB_PATH)
     integrity = store.integrity_report(quick=True)
     operational = store.operational_stats()
@@ -219,6 +221,9 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
             "inflight": 0,
             "last_error": None,
         },
+        "retrieval_feedback": RetrievalFeedbackService(
+            settings.DB_PATH, settings
+        ).telemetry_stats(),
     }
     token_file = args.token_file or settings.API_TOKEN_FILE
     checks["token_file"] = str(token_file) if token_file else None
@@ -469,6 +474,35 @@ def command_outbox(settings: Settings, args: argparse.Namespace) -> int:
     return 0 if retried else 1
 
 
+def command_utility(settings: Settings, args: argparse.Namespace) -> int:
+    """Inspect shadow utility and perform audited, reversible lifecycle actions."""
+    from recall_mcp.feedback import RetrievalFeedbackService
+
+    service = RetrievalFeedbackService(settings.DB_PATH, settings)
+    if args.action == "shadow-report":
+        result = service.shadow_report(limit=args.limit)
+    else:
+        if not args.memory_id:
+            print(json.dumps({"error": f"utility {args.action} requires a memory ID"}))
+            return 2
+        if args.action == "inspect":
+            result = service.explain_utility(args.memory_id)
+        elif args.action == "cold":
+            result = service.demote_to_cold(
+                args.memory_id, reason=args.reason or "manual"
+            )
+        elif args.action == "restore":
+            result = service.restore_from_cold(args.memory_id)
+        elif args.action == "pin":
+            result = service.pin(args.memory_id)
+        elif args.action == "unpin":
+            result = service.unpin(args.memory_id)
+        else:  # pragma: no cover - argparse enforces the choices
+            raise ValueError("unsupported utility action")
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="recall-admin")
     parser.add_argument("--home", type=Path)
@@ -481,6 +515,14 @@ def build_parser() -> argparse.ArgumentParser:
     outbox = subparsers.add_parser("outbox")
     outbox.add_argument("action", choices=["status", "retry"])
     outbox.add_argument("job_id", nargs="?")
+    utility = subparsers.add_parser("utility")
+    utility.add_argument(
+        "action",
+        choices=["shadow-report", "inspect", "cold", "restore", "pin", "unpin"],
+    )
+    utility.add_argument("memory_id", nargs="?")
+    utility.add_argument("--reason")
+    utility.add_argument("--limit", type=int, default=100)
     models = subparsers.add_parser("models")
     models.add_argument("action", choices=["pull"])
     nats_parser = subparsers.add_parser("nats")
@@ -533,6 +575,8 @@ def main() -> None:
         code = command_token_rotate(settings, args)
     elif args.command == "outbox":
         code = command_outbox(settings, args)
+    elif args.command == "utility":
+        code = command_utility(settings, args)
     elif args.command == "version":
         print(VERSION)
         code = 0

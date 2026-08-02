@@ -508,6 +508,49 @@ def create_server():
                     "idempotency_key": {"type": "string"},
                 },
             ),
+            continuity_tool(
+                "recall_context_feedback",
+                "Record attributed retrieval and context usage feedback.",
+                ["context_pack_id"],
+                {
+                    "context_pack_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "used_memory_ids": {"type": "array"},
+                    "ignored_memory_ids": {"type": "array"},
+                    "expanded_memory_ids": {"type": "array"},
+                    "corrected_memory_ids": {"type": "array"},
+                    "rejected_memory_ids": {"type": "array"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_task_outcome",
+                "Record a task outcome for context the task actually used.",
+                ["task_id", "status", "successful"],
+                {
+                    "task_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "successful": {"type": "boolean"},
+                    "agent_id": {"type": "string"},
+                    "user_correction_count": {"type": "integer", "minimum": 0},
+                    "rework_required": {"type": "boolean"},
+                    "metadata": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_memory_utility",
+                "Explain a memory's versioned utility components.",
+                ["memory_id"],
+                {
+                    "memory_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -635,6 +678,49 @@ def create_server():
                         agent_id=arguments["agent_id"],
                         summary=arguments.get("summary"),
                         idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_context_feedback":
+                return result_json(
+                    pipeline.feedback_service.record_feedback(
+                        context_pack_id=arguments["context_pack_id"],
+                        agent_id=arguments.get("agent_id"),
+                        used_memory_ids=arguments.get("used_memory_ids", []),
+                        ignored_memory_ids=arguments.get("ignored_memory_ids", []),
+                        expanded_memory_ids=arguments.get("expanded_memory_ids", []),
+                        corrected_memory_ids=arguments.get("corrected_memory_ids", []),
+                        rejected_memory_ids=arguments.get("rejected_memory_ids", []),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_task_outcome":
+                return result_json(
+                    pipeline.feedback_service.record_task_outcome(
+                        task_id=arguments["task_id"],
+                        session_id=arguments.get("session_id"),
+                        status=arguments["status"],
+                        successful=bool(arguments["successful"]),
+                        agent_id=arguments.get("agent_id"),
+                        user_correction_count=int(
+                            arguments.get("user_correction_count", 0)
+                        ),
+                        rework_required=bool(arguments.get("rework_required", False)),
+                        metadata=arguments.get("metadata"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_memory_utility":
+                scope = {
+                    key: arguments[key]
+                    for key in ("user_id", "project_id", "repository_id", "task_id")
+                    if arguments.get(key) is not None
+                }
+                return result_json(
+                    pipeline.feedback_service.explain_utility(
+                        arguments["memory_id"], scope=scope
                     )
                 )
 
@@ -842,7 +928,15 @@ def create_server():
                     session_id=arguments.get("session_id"),
                     agent_id=arguments.get("agent_id"),
                     known_checkpoint_version=arguments.get("known_checkpoint_version"),
+                    token_budget=arguments.get("token_budget"),
+                    include_cold=bool(arguments.get("include_cold", False)),
+                    retrieval_idempotency_key=arguments.get("idempotency_key"),
                 )
+                if result.get("context_pack_id"):
+                    pipeline.feedback_service.mark_context_injected(
+                        str(result["context_pack_id"]),
+                        agent_id=arguments.get("agent_id") or arguments.get("agent"),
+                    )
                 return [
                     TextContent(
                         type="text",
