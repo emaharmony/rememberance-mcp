@@ -50,6 +50,8 @@ def create_server():
     from mcp.server import Server
     from mcp.types import Tool, TextContent
     from recall_mcp.config import Settings
+    from recall_mcp.continuity import ContinuityError
+    from recall_mcp.context import ContextPackRequest
     from recall_mcp.pipeline import MemoryPipeline
 
     settings = Settings()
@@ -509,11 +511,118 @@ def create_server():
                 },
             ),
             continuity_tool(
+                "recall_context_build",
+                "Build and persist a scope-safe provider-neutral Context Pack V2.",
+                [
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                    "agent_id",
+                ],
+                {
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "max_tokens": {"type": "integer", "minimum": 1},
+                    "known_checkpoint_version": {"type": "integer", "minimum": 0},
+                    "known_context_pack_id": {"type": "string"},
+                    "branch": {"type": "string"},
+                    "commit_sha": {"type": "string"},
+                    "requested_sections": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "client_capabilities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "idempotency_key": {"type": "string"},
+                    "retrieval_limit": {"type": "integer", "minimum": 1},
+                    "schema_version": {"type": "integer", "default": 2},
+                },
+            ),
+            continuity_tool(
+                "recall_context_get",
+                "Fetch a persisted Context Pack V2 in its validated scope.",
+                [
+                    "context_pack_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                ],
+                {
+                    "context_pack_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_explain",
+                "Explain scope filters, inclusion, omission, and token allocation.",
+                [
+                    "context_pack_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                ],
+                {
+                    "context_pack_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_expand_reference",
+                "Expand one Context Pack V2 evidence reference and record expansion.",
+                [
+                    "context_pack_id",
+                    "reference_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                ],
+                {
+                    "context_pack_id": {"type": "string"},
+                    "reference_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
                 "recall_context_feedback",
                 "Record attributed retrieval and context usage feedback.",
                 ["context_pack_id"],
                 {
                     "context_pack_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
                     "agent_id": {"type": "string"},
                     "used_memory_ids": {"type": "array"},
                     "ignored_memory_ids": {"type": "array"},
@@ -571,6 +680,18 @@ def create_server():
                         type="text", text=json.dumps(result, indent=2, default=str)
                     )
                 ]
+
+            def context_scope() -> dict[str, str | None]:
+                return {
+                    key: arguments.get(key)
+                    for key in (
+                        "user_id",
+                        "workspace_id",
+                        "project_id",
+                        "repository_id",
+                        "task_id",
+                    )
+                }
 
             if name == "recall_task_create":
                 result = pipeline.task_service.create_task(
@@ -681,10 +802,70 @@ def create_server():
                     )
                 )
 
+            elif name == "recall_context_build":
+                return result_json(
+                    pipeline.build_context_v2(
+                        ContextPackRequest(
+                            user_id=arguments.get("user_id"),
+                            workspace_id=arguments.get("workspace_id"),
+                            project_id=arguments.get("project_id"),
+                            repository_id=arguments.get("repository_id"),
+                            task_id=arguments.get("task_id"),
+                            session_id=arguments.get("session_id"),
+                            agent_id=arguments.get("agent_id"),
+                            objective=arguments.get("objective"),
+                            max_tokens=arguments.get("max_tokens"),
+                            known_checkpoint_version=arguments.get(
+                                "known_checkpoint_version"
+                            ),
+                            known_context_pack_id=arguments.get(
+                                "known_context_pack_id"
+                            ),
+                            branch=arguments.get("branch"),
+                            commit_sha=arguments.get("commit_sha"),
+                            requested_sections=tuple(
+                                arguments.get("requested_sections", [])
+                            ),
+                            client_capabilities=tuple(
+                                arguments.get("client_capabilities", [])
+                            ),
+                            idempotency_key=arguments.get("idempotency_key"),
+                            retrieval_limit=int(arguments.get("retrieval_limit", 10)),
+                            schema_version=int(arguments.get("schema_version", 2)),
+                        )
+                    )
+                )
+
+            elif name == "recall_context_get":
+                return result_json(
+                    pipeline.context_service.get(
+                        arguments["context_pack_id"], context_scope()
+                    )
+                )
+
+            elif name == "recall_context_explain":
+                return result_json(
+                    pipeline.context_service.explain(
+                        arguments["context_pack_id"], context_scope()
+                    )
+                )
+
+            elif name == "recall_context_expand_reference":
+                return result_json(
+                    pipeline.context_service.expand_reference(
+                        arguments["context_pack_id"],
+                        arguments["reference_id"],
+                        context_scope(),
+                        agent_id=arguments.get("agent_id"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
             elif name == "recall_context_feedback":
                 return result_json(
-                    pipeline.feedback_service.record_feedback(
+                    pipeline.context_service.record_feedback(
                         context_pack_id=arguments["context_pack_id"],
+                        scope=context_scope(),
                         agent_id=arguments.get("agent_id"),
                         used_memory_ids=arguments.get("used_memory_ids", []),
                         ignored_memory_ids=arguments.get("ignored_memory_ids", []),
@@ -932,11 +1113,6 @@ def create_server():
                     include_cold=bool(arguments.get("include_cold", False)),
                     retrieval_idempotency_key=arguments.get("idempotency_key"),
                 )
-                if result.get("context_pack_id"):
-                    pipeline.feedback_service.mark_context_injected(
-                        str(result["context_pack_id"]),
-                        agent_id=arguments.get("agent_id") or arguments.get("agent"),
-                    )
                 return [
                     TextContent(
                         type="text",
@@ -947,6 +1123,9 @@ def create_server():
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
+        except ContinuityError as exc:
+            logger.info("Context or continuity request rejected for %s: %s", name, exc)
+            return result_json({"error": str(exc), "code": exc.code})
         except (KeyError, TypeError, ValueError) as exc:
             logger.info("Invalid tool request for %s: %s", name, exc)
             return [TextContent(type="text", text=f"Invalid request: {exc}")]

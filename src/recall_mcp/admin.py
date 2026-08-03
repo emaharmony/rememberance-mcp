@@ -201,11 +201,25 @@ def command_init(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
+    from recall_mcp.context import ContextPackService
+    from recall_mcp.continuity import ContinuityStore, SessionService, TaskService
     from recall_mcp.feedback import RetrievalFeedbackService
 
     store = MemoryStore(settings.DB_PATH)
     integrity = store.integrity_report(quick=True)
     operational = store.operational_stats()
+    feedback = RetrievalFeedbackService(settings.DB_PATH, settings)
+    continuity = ContinuityStore(settings.DB_PATH)
+    tasks = TaskService(continuity)
+    sessions = SessionService(continuity, tasks)
+    context_service = ContextPackService(
+        settings.DB_PATH,
+        settings,
+        tasks,
+        sessions,
+        feedback,
+        search=lambda **_kwargs: ([], "doctor-probe"),
+    )
     checks: dict[str, object] = {
         "version": VERSION,
         "home": str(settings.BASE_DIR),
@@ -221,9 +235,8 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
             "inflight": 0,
             "last_error": None,
         },
-        "retrieval_feedback": RetrievalFeedbackService(
-            settings.DB_PATH, settings
-        ).telemetry_stats(),
+        "retrieval_feedback": feedback.telemetry_stats(),
+        "context_service": context_service.health(),
     }
     token_file = args.token_file or settings.API_TOKEN_FILE
     checks["token_file"] = str(token_file) if token_file else None
@@ -503,6 +516,35 @@ def command_utility(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def command_context(settings: Settings, args: argparse.Namespace) -> int:
+    """Inspect persisted context-pack metadata without starting a worker."""
+    from recall_mcp.context import ContextPackService
+    from recall_mcp.continuity import (
+        ContinuityError,
+        ContinuityStore,
+        SessionService,
+        TaskService,
+    )
+    from recall_mcp.feedback import RetrievalFeedbackService
+
+    continuity = ContinuityStore(settings.DB_PATH)
+    tasks = TaskService(continuity)
+    service = ContextPackService(
+        settings.DB_PATH,
+        settings,
+        tasks,
+        SessionService(continuity, tasks),
+        RetrievalFeedbackService(settings.DB_PATH, settings),
+    )
+    try:
+        result = service.inspect(args.context_pack_id, explain=args.action == "explain")
+    except ContinuityError as exc:
+        print(json.dumps({"error": str(exc), "code": exc.code}))
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="recall-admin")
     parser.add_argument("--home", type=Path)
@@ -523,6 +565,9 @@ def build_parser() -> argparse.ArgumentParser:
     utility.add_argument("memory_id", nargs="?")
     utility.add_argument("--reason")
     utility.add_argument("--limit", type=int, default=100)
+    context = subparsers.add_parser("context")
+    context.add_argument("action", choices=["inspect", "explain"])
+    context.add_argument("context_pack_id")
     models = subparsers.add_parser("models")
     models.add_argument("action", choices=["pull"])
     nats_parser = subparsers.add_parser("nats")
@@ -577,6 +622,8 @@ def main() -> None:
         code = command_outbox(settings, args)
     elif args.command == "utility":
         code = command_utility(settings, args)
+    elif args.command == "context":
+        code = command_context(settings, args)
     elif args.command == "version":
         print(VERSION)
         code = 0

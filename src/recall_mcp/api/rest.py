@@ -42,10 +42,11 @@ import errno
 import sqlite3
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from typing import Optional
+from typing import Mapping, Optional
 
 from recall_mcp.pipeline import MemoryPipeline
 from recall_mcp.continuity import ContinuityError
+from recall_mcp.context import CONTEXT_SCHEMA_VERSION, ContextPackRequest
 from recall_mcp.api.security import (
     ServiceMetrics,
     SlidingWindowRateLimiter,
@@ -178,9 +179,9 @@ def _build_context_pack(
             )
         lines.append("")
 
-    markdown = "\n".join(lines).strip()
-    # Rough token estimate (~4 chars/token), capped to the requested budget.
-    token_count = min(max_tokens, len(markdown) // 4) if markdown else 0
+    markdown = ctx.get("inline_context") or "\n".join(lines).strip()
+    token_usage = ctx.get("token_usage") or {}
+    token_count = int(token_usage.get("estimated_total", 0))
 
     return {
         "project_id": project or "prism",
@@ -206,6 +207,13 @@ def _build_context_pack(
         "token_count": token_count,
         "retrieval_run_id": ctx.get("retrieval_run_id"),
         "context_pack_id": ctx.get("context_pack_id"),
+        "checkpoint_version": (ctx.get("session") or {}).get(
+            "latest_checkpoint_version"
+        ),
+        "validation_requests": ctx.get("validation_requests", []),
+        "references": ctx.get("references", []),
+        "source_fingerprint": (ctx.get("freshness") or {}).get("source_fingerprint"),
+        "schema_version": ctx.get("schema_version", 1),
     }
 
 
@@ -220,7 +228,22 @@ def _continuity_status(error: ContinuityError) -> int:
         return 404
     if error.code in {"idempotency_conflict", "scope_mismatch"}:
         return 409
+    if error.code in {"service_unavailable", "telemetry_unavailable"}:
+        return 503
     return 400
+
+
+def _scope(values: Mapping[str, object]) -> dict[str, str | None]:
+    return {
+        key: str(values[key]) if values.get(key) is not None else None
+        for key in (
+            "user_id",
+            "workspace_id",
+            "project_id",
+            "repository_id",
+            "task_id",
+        )
+    }
 
 
 def _required_text(body: dict, name: str, *, alias: str | None = None) -> str:
@@ -278,6 +301,12 @@ class RecallHandler(BaseHTTPRequestHandler):
                 probe["outbox_worker"] = outbox_worker
                 probe["retrieval_feedback"] = (
                     self.pipeline.feedback_service.telemetry_stats()
+                )
+                probe["context_service"] = self.pipeline.context_service.health()
+                ready = ready and bool(
+                    probe["context_service"]["available"]
+                    and probe["context_service"]["migration_available"]
+                    and probe["context_service"]["feedback_linkage_healthy"]
                 )
                 ready = ready and bool(
                     outbox_worker["running"] and outbox_worker["thread_alive"]
@@ -356,6 +385,39 @@ class RecallHandler(BaseHTTPRequestHandler):
                     "recall_utility_ranking_weight",
                     float(str(feedback["ranking_weight"])),
                 )
+                context_stats = self.pipeline.context_service.stats()
+                for metric, field in (
+                    ("context_packs_built_total", "built_total"),
+                    ("context_pack_failures_total", "failures_total"),
+                    (
+                        "context_pack_build_latency_seconds",
+                        "latency_seconds_total",
+                    ),
+                    (
+                        "context_pack_tokens_estimated_total",
+                        "tokens_estimated_total",
+                    ),
+                    (
+                        "context_pack_budget_exceeded_total",
+                        "budget_exceeded_total",
+                    ),
+                    ("context_pack_references_total", "references_total"),
+                    (
+                        "context_pack_validation_requests_total",
+                        "validation_requests_total",
+                    ),
+                    (
+                        "context_pack_scope_rejections_total",
+                        "scope_rejections_total",
+                    ),
+                    (
+                        "context_pack_feedback_pending_total",
+                        "feedback_pending_total",
+                    ),
+                ):
+                    self.service_metrics.set_gauge(
+                        f"recall_{metric}", float(str(context_stats[field]))
+                    )
                 nats_sub = getattr(self.pipeline, "nats_sub", None)
                 if nats_sub is not None:
                     nats_health = nats_sub.health()
@@ -404,9 +466,72 @@ class RecallHandler(BaseHTTPRequestHandler):
                     self.pipeline.session_service.get_session(session_id)
                 )
 
+            elif path.startswith("/v2/context/") and path.endswith("/explain"):
+                context_pack_id = path.split("/")[3]
+                context_scope = _scope(
+                    {
+                        key: params.get(key, [None])[0]
+                        for key in (
+                            "user_id",
+                            "workspace_id",
+                            "project_id",
+                            "repository_id",
+                            "task_id",
+                        )
+                    }
+                )
+                self._json_response(
+                    self.pipeline.context_service.explain(
+                        context_pack_id, context_scope
+                    )
+                )
+
+            elif "/references/" in path and path.startswith("/v2/context/"):
+                parts = path.split("/")
+                context_pack_id, reference_id = parts[3], parts[5]
+                context_scope = _scope(
+                    {
+                        key: params.get(key, [None])[0]
+                        for key in (
+                            "user_id",
+                            "workspace_id",
+                            "project_id",
+                            "repository_id",
+                            "task_id",
+                        )
+                    }
+                )
+                self._json_response(
+                    self.pipeline.context_service.expand_reference(
+                        context_pack_id,
+                        reference_id,
+                        context_scope,
+                        agent_id=params.get("agent_id", [None])[0],
+                        idempotency_key=params.get("idempotency_key", [None])[0],
+                    )
+                )
+
+            elif path.startswith("/v2/context/") and len(path.split("/")) == 4:
+                context_pack_id = path.split("/")[3]
+                context_scope = _scope(
+                    {
+                        key: params.get(key, [None])[0]
+                        for key in (
+                            "user_id",
+                            "workspace_id",
+                            "project_id",
+                            "repository_id",
+                            "task_id",
+                        )
+                    }
+                )
+                self._json_response(
+                    self.pipeline.context_service.get(context_pack_id, context_scope)
+                )
+
             elif path.startswith("/v2/memories/") and path.endswith("/utility/history"):
                 memory_id = path.split("/")[3]
-                scope: dict[str, str] = {
+                utility_scope: dict[str, str] = {
                     key: params[key][0]
                     for key in ("user_id", "project_id", "repository_id", "task_id")
                     if key in params
@@ -415,21 +540,21 @@ class RecallHandler(BaseHTTPRequestHandler):
                     {
                         "memory_id": memory_id,
                         "history": self.pipeline.feedback_service.utility_history(
-                            memory_id, scope=scope
+                            memory_id, scope=utility_scope
                         ),
                     }
                 )
 
             elif path.startswith("/v2/memories/") and path.endswith("/utility"):
                 memory_id = path.split("/")[3]
-                scope = {
+                utility_scope = {
                     key: params[key][0]
                     for key in ("user_id", "project_id", "repository_id", "task_id")
                     if key in params
                 }
                 self._json_response(
                     self.pipeline.feedback_service.explain_utility(
-                        memory_id, scope=scope
+                        memory_id, scope=utility_scope
                     )
                 )
 
@@ -737,10 +862,63 @@ class RecallHandler(BaseHTTPRequestHandler):
                 )
                 self._json_response(result)
 
+            elif path == "/v2/context/build":
+                requested_sections = body.get("requested_sections", [])
+                capabilities = body.get(
+                    "client_capabilities", body.get("capabilities", [])
+                )
+                if not isinstance(requested_sections, list) or not all(
+                    isinstance(value, str) for value in requested_sections
+                ):
+                    raise APIError("requested_sections must be an array of strings")
+                if not isinstance(capabilities, list) or not all(
+                    isinstance(value, str) for value in capabilities
+                ):
+                    raise APIError("client_capabilities must be an array of strings")
+                result = self.pipeline.build_context_v2(
+                    ContextPackRequest(
+                        user_id=body.get("user_id"),
+                        workspace_id=body.get("workspace_id"),
+                        project_id=body.get("project_id"),
+                        repository_id=body.get("repository_id"),
+                        task_id=body.get("task_id"),
+                        session_id=body.get("session_id"),
+                        agent_id=body.get("agent_id"),
+                        objective=body.get("objective"),
+                        max_tokens=self._bounded_int(
+                            body.get("max_tokens"),
+                            default=self.pipeline.settings.CONTEXT_DEFAULT_MAX_TOKENS,
+                            minimum=1,
+                            maximum=self.pipeline.settings.CONTEXT_MAX_TOKENS,
+                            name="max_tokens",
+                        ),
+                        known_checkpoint_version=body.get("known_checkpoint_version"),
+                        known_context_pack_id=body.get("known_context_pack_id"),
+                        branch=body.get("branch"),
+                        commit_sha=body.get("commit_sha"),
+                        requested_sections=tuple(requested_sections),
+                        client_capabilities=tuple(capabilities),
+                        idempotency_key=body.get("idempotency_key"),
+                        retrieval_limit=self._bounded_int(
+                            body.get("retrieval_limit", body.get("limit")),
+                            default=10,
+                            minimum=1,
+                            maximum=self.pipeline.settings.MAX_RESULTS,
+                            name="retrieval_limit",
+                        ),
+                        schema_version=int(
+                            body.get("schema_version", CONTEXT_SCHEMA_VERSION)
+                        ),
+                        include_cold=bool(body.get("include_cold", False)),
+                    )
+                )
+                self._json_response(result, status=201)
+
             elif path.startswith("/v2/context/") and path.endswith("/feedback"):
                 context_pack_id = path.split("/")[3]
-                feedback_result = self.pipeline.feedback_service.record_feedback(
+                feedback_result = self.pipeline.context_service.record_feedback(
                     context_pack_id=context_pack_id,
+                    scope=_scope(body),
                     agent_id=body.get("agent_id"),
                     used_memory_ids=body.get("used_memory_ids", []),
                     ignored_memory_ids=body.get("ignored_memory_ids", []),
@@ -959,10 +1137,6 @@ class RecallHandler(BaseHTTPRequestHandler):
                     retrieval_idempotency_key=body.get("idempotency_key"),
                 )
                 response = _build_context_pack(ctx, task, project, agent, max_tokens)
-                if ctx.get("context_pack_id"):
-                    self.pipeline.feedback_service.mark_context_injected(
-                        str(ctx["context_pack_id"]), agent_id=agent
-                    )
                 self._json_response(response)
 
             else:
