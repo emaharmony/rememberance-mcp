@@ -105,6 +105,9 @@ class TestHealthEndpoint:
         assert data["skill_service"]["available"] is True
         assert data["skill_service"]["migration_current"] is True
         assert data["skill_service"]["compiler_policy_version"] == ("skill-compiler-v1")
+        assert data["cag_service"]["available"] is True
+        assert data["cag_service"]["migration_available"] is True
+        assert data["cag_service"]["policy_version"] == "cag-v1"
 
     def test_readiness_sanitizes_dispatcher_error(self, api_server):
         pipeline = api_server["pipeline"]
@@ -150,6 +153,9 @@ class TestHealthEndpoint:
         assert "recall_context_pack_feedback_pending_total 0.0" in metrics
         assert "recall_skills_total 0.0" in metrics
         assert "recall_skill_versions_total 0.0" in metrics
+        assert "recall_cag_deliveries_total 0.0" in metrics
+        assert "recall_cache_hits_total 0.0" in metrics
+        assert "recall_estimated_tokens_avoided_total 0.0" in metrics
         assert "captured-content" not in json.dumps(readiness)
         assert "captured-content" not in metrics
 
@@ -962,3 +968,113 @@ class TestContextPackV2Endpoints:
         assert v1["schema_version"] == 2
         assert memory_id in v1["selected_memories"]
         assert "Deferred evidence references" in v1["context_markdown"]
+
+
+class TestCAGDeliveryEndpoints:
+    def test_full_no_change_inspect_feedback_and_invalidate(self, api_server):
+        pipeline = api_server["pipeline"]
+        base = api_server["base_url"]
+        task = pipeline.task_service.create_task(
+            user_id="cag-user",
+            workspace_id="cag-workspace",
+            project_id="cag-project",
+            repository_id="cag-repo",
+            title="CAG REST",
+            objective="deliver only safe changes",
+            created_by="codex",
+            canonical_path="/work/cag",
+        )
+        session = pipeline.session_service.start_session(
+            task_id=task["id"], agent_id="codex"
+        )
+        pipeline.session_service.create_checkpoint(
+            session["id"],
+            agent_id="codex",
+            constraints=["never omit critical constraints"],
+        )
+        body = {
+            "user_id": task["user_id"],
+            "workspace_id": task["workspace_id"],
+            "project_id": task["project_id"],
+            "repository_id": task["repository_id"],
+            "task_id": task["id"],
+            "session_id": session["id"],
+            "agent_id": "codex",
+            "max_tokens": 1200,
+            "client_capabilities": ["structured_json"],
+        }
+        request = TestContextPackV2Endpoints.request
+        status, full = request(base, "/v2/context/deliver", body)
+        assert status == 201
+        assert full["delivery_mode"] == "full"
+        authoritative = full["authoritative_state"]
+
+        repeat = {
+            **body,
+            "client_state": {
+                "client_id": "codex-local",
+                "client_type": "codex",
+                "known_checkpoint_version": authoritative["checkpoint_version"],
+                "known_context_pack_id": authoritative["context_pack_id"],
+                "known_context_pack_fingerprint": authoritative[
+                    "context_pack_fingerprint"
+                ],
+                "known_skills": authoritative["skills"],
+                "known_handoffs": authoritative["handoffs"],
+                "capabilities": ["context_delta", "skill_delta"],
+            },
+        }
+        status, unchanged = request(base, "/v2/context/deliver", repeat)
+        assert status == 201
+        assert unchanged["delivery_mode"] == "no_change"
+        assert unchanged["authoritative_state"] == authoritative
+
+        query = urllib.parse.urlencode(
+            {
+                "user_id": task["user_id"],
+                "workspace_id": task["workspace_id"],
+                "project_id": task["project_id"],
+                "repository_id": task["repository_id"],
+                "task_id": task["id"],
+                "session_id": session["id"],
+                "agent_id": "codex",
+            }
+        )
+        status, fetched = request(
+            base,
+            f"/v2/context/deliveries/{unchanged['delivery_id']}?{query}",
+            method="GET",
+        )
+        assert status == 200
+        assert fetched["delivery_mode"] == "no_change"
+        status, explanation = request(
+            base,
+            f"/v2/context/deliveries/{unchanged['delivery_id']}/explain?{query}",
+            method="GET",
+        )
+        assert status == 200
+        assert "current" in explanation["delivery_mode_reason"]
+
+        status, feedback = request(
+            base,
+            f"/v2/context/deliveries/{unchanged['delivery_id']}/feedback",
+            {
+                **body,
+                "used_context_sections": ["constraints.critical"],
+                "outcome": "success",
+                "idempotency_key": "cag-rest-feedback",
+            },
+        )
+        assert status == 201
+        assert feedback["feedback"]["id"]
+
+        status, cache = request(base, "/v2/cache/status", method="GET")
+        assert status == 200
+        assert cache["policy_version"] == "cag-v1"
+        status, invalidated = request(
+            base,
+            "/v2/cache/invalidate",
+            {**body, "reason": "rest_test"},
+        )
+        assert status == 200
+        assert invalidated["invalidated"] == 1

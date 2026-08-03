@@ -36,6 +36,12 @@ EXPECTED_TOOLS = {
     "recall_session_delta",
     "recall_context_feedback",
     "recall_context_build",
+    "recall_context_deliver",
+    "recall_context_delivery_get",
+    "recall_context_delivery_explain",
+    "recall_cache_status",
+    "recall_cache_invalidate",
+    "recall_cache_inspect",
     "recall_context_get",
     "recall_context_explain",
     "recall_context_expand_reference",
@@ -161,6 +167,43 @@ def test_mcp_server_starts_and_lists_tools():
                     },
                 )
                 explanation = json.loads(explanation_result.content[0].text)
+                cag_arguments = {
+                    "user_id": "user-1",
+                    "workspace_id": "workspace-1",
+                    "project_id": "project-1",
+                    "repository_id": "repo-1",
+                    "task_id": task["id"],
+                    "session_id": shared_session["id"],
+                    "agent_id": "codex",
+                    "max_tokens": 1000,
+                    "client_capabilities": ["structured_json"],
+                }
+                cag_full_result = await session.call_tool(
+                    "recall_context_deliver", cag_arguments
+                )
+                cag_full = json.loads(cag_full_result.content[0].text)
+                authoritative = cag_full["authoritative_state"]
+                cag_repeat_result = await session.call_tool(
+                    "recall_context_deliver",
+                    {
+                        **cag_arguments,
+                        "client_state": {
+                            "client_id": "mcp-smoke",
+                            "client_type": "codex",
+                            "known_checkpoint_version": authoritative[
+                                "checkpoint_version"
+                            ],
+                            "known_context_pack_id": authoritative["context_pack_id"],
+                            "known_context_pack_fingerprint": authoritative[
+                                "context_pack_fingerprint"
+                            ],
+                            "known_skills": authoritative["skills"],
+                            "known_handoffs": authoritative["handoffs"],
+                            "capabilities": ["context_delta", "skill_delta"],
+                        },
+                    },
+                )
+                cag_repeat = json.loads(cag_repeat_result.content[0].text)
                 skill_result = await session.call_tool(
                     "recall_skill_propose",
                     {
@@ -279,6 +322,8 @@ def test_mcp_server_starts_and_lists_tools():
                     handoff,
                     completion,
                     handoff_delta,
+                    cag_full,
+                    cag_repeat,
                 )
 
     try:
@@ -292,6 +337,8 @@ def test_mcp_server_starts_and_lists_tools():
             handoff,
             completion,
             handoff_delta,
+            cag_full,
+            cag_repeat,
         ) = asyncio.run(asyncio.wait_for(_run(), timeout=60))
     finally:
         shutil.rmtree(home, ignore_errors=True)
@@ -308,3 +355,5 @@ def test_mcp_server_starts_and_lists_tools():
     assert handoff["status"] == "ready"
     assert completion["checkpoint_version"] == 2
     assert handoff_delta["completion"]["work_completed"] == ["MCP handoff smoke"]
+    assert cag_full["delivery_mode"] == "full"
+    assert cag_repeat["delivery_mode"] == "no_change", json.dumps(cag_repeat)

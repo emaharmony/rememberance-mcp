@@ -34,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Optional
 
 from recall_mcp.config import Settings
+from recall_mcp.cag import CAGDeliveryService, CAGRequest
 from recall_mcp.continuity import (
     ContinuityError,
     ContinuityStore,
@@ -187,6 +188,15 @@ class MemoryPipeline:
             self.session_service,
             self.context_service,
             self.skill_service,
+        )
+        self.cag_service = CAGDeliveryService(
+            self.settings.DB_PATH,
+            self.settings,
+            self.task_service,
+            self.session_service,
+            self.context_service,
+            self.skill_service,
+            self.handoff_service,
         )
 
         # ── V2: Dream Cycle ──────────────────────────────────
@@ -739,6 +749,10 @@ class MemoryPipeline:
         """Build the canonical provider-neutral context response."""
         return self.context_service.build(request)
 
+    def deliver_context(self, request: CAGRequest) -> dict:
+        """Deliver full or delta context through the shared CAG service."""
+        return self.cag_service.deliver(request)
+
     def graph_query(
         self, entity_name: str, depth: int = 1, edge_types: Optional[list[str]] = None
     ) -> dict:
@@ -785,6 +799,7 @@ class MemoryPipeline:
             "context_packs": self.context_service.stats(),
             "skills": self.skill_service.stats(),
             "handoffs": self.handoff_service.stats(),
+            "cag": self.cag_service.stats(),
             "entities": self.entity_store.stats(),
             "facts": self.fact_store.stats(),
             "v2": self.store_v2.v2_stats(),

@@ -184,15 +184,17 @@ Exit gate:
 
 ## Phase 6 — CAG caching
 
+Status: complete in the local Phase 6 checkpoint.
+
 Build:
 
-- Compiled context cache
-- Client skill-version cache
-- Cache dependency tracking
-- Sliding expiration after successful use
-- Source-hash invalidation
-- Context deltas
-- Token-savings telemetry
+- [x] Compiled context cache
+- [x] Client skill-version awareness
+- [x] Cache dependency tracking
+- [x] Bounded hot-cache expiration and eviction
+- [x] Source-hash invalidation
+- [x] Context, skill, and handoff deltas
+- [x] Estimated token-savings telemetry
 
 Exit gate:
 

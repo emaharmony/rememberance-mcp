@@ -45,6 +45,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from typing import Mapping, Optional
 
 from recall_mcp.pipeline import MemoryPipeline
+from recall_mcp.cag import CAGRequest, ClientState
 from recall_mcp.continuity import ContinuityError
 from recall_mcp.context import CONTEXT_SCHEMA_VERSION, ContextPackRequest
 from recall_mcp.handoff import (
@@ -276,6 +277,27 @@ def _scope(values: Mapping[str, object]) -> dict[str, str | None]:
     }
 
 
+def _cag_scope(values: Mapping[str, object]) -> dict[str, str | None]:
+    required: dict[str, str | None] = {}
+    for field in (
+        "user_id",
+        "workspace_id",
+        "project_id",
+        "repository_id",
+        "task_id",
+        "agent_id",
+    ):
+        value = values.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ContinuityError(f"missing required CAG scope: {field}")
+        required[field] = value.strip()
+    session = values.get("session_id")
+    required["session_id"] = (
+        session.strip() if isinstance(session, str) and session.strip() else None
+    )
+    return required
+
+
 def _skill_scope(values: Mapping[str, object]) -> SkillScope:
     required: dict[str, str] = {}
     for field in ("user_id", "workspace_id", "project_id"):
@@ -370,6 +392,7 @@ class RecallHandler(BaseHTTPRequestHandler):
                 probe["context_service"] = self.pipeline.context_service.health()
                 probe["skill_service"] = self.pipeline.skill_service.health()
                 probe["handoff_service"] = self.pipeline.handoff_service.health()
+                probe["cag_service"] = self.pipeline.cag_service.health()
                 ready = ready and bool(
                     probe["context_service"]["available"]
                     and probe["context_service"]["migration_available"]
@@ -382,6 +405,10 @@ class RecallHandler(BaseHTTPRequestHandler):
                 ready = ready and bool(
                     probe["handoff_service"]["available"]
                     and probe["handoff_service"]["migration_available"]
+                )
+                ready = ready and bool(
+                    probe["cag_service"]["available"]
+                    and probe["cag_service"]["migration_available"]
                 )
                 ready = ready and bool(
                     outbox_worker["running"] and outbox_worker["thread_alive"]
@@ -543,6 +570,53 @@ class RecallHandler(BaseHTTPRequestHandler):
                 ):
                     self.service_metrics.set_gauge(
                         f"recall_{metric}", float(str(handoff_stats[field]))
+                    )
+                if self.pipeline.settings.CACHE_METRICS_ENABLED:
+                    cag_stats = self.pipeline.cag_service.stats()
+                    for metric, field in (
+                        ("cag_deliveries_total", "deliveries_total"),
+                        ("cag_full_deliveries_total", "full_total"),
+                        ("cag_delta_deliveries_total", "delta_total"),
+                        ("cag_no_change_total", "no_change_total"),
+                        ("cag_refresh_required_total", "refresh_required_total"),
+                        ("cag_fallback_total", "fallback_total"),
+                        ("cache_hits_total", "cache_hits_total"),
+                        ("cache_misses_total", "cache_misses_total"),
+                        ("cache_invalidations_total", "cache_invalidations_total"),
+                        ("cache_stale_total", "cache_stale_total"),
+                        ("cache_corrupt_total", "cache_corrupt_total"),
+                        ("skill_delta_deliveries_total", "skill_delta_total"),
+                        ("context_delta_deliveries_total", "context_delta_total"),
+                        ("handoff_delta_deliveries_total", "handoff_delta_total"),
+                        ("estimated_tokens_full_total", "estimated_tokens_full_total"),
+                        (
+                            "estimated_tokens_delivered_total",
+                            "estimated_tokens_delivered_total",
+                        ),
+                        (
+                            "estimated_tokens_avoided_total",
+                            "estimated_tokens_avoided_total",
+                        ),
+                        (
+                            "cag_delivery_latency_seconds",
+                            "delivery_latency_seconds_total",
+                        ),
+                        (
+                            "cache_lookup_latency_seconds",
+                            "cache_lookup_latency_seconds_total",
+                        ),
+                        (
+                            "delta_generation_latency_seconds",
+                            "delta_generation_latency_seconds_total",
+                        ),
+                    ):
+                        self.service_metrics.set_gauge(
+                            f"recall_{metric}", float(str(cag_stats[field]))
+                        )
+                    hot_cache = cag_stats["hot_cache"]
+                    self.service_metrics.set_gauge(
+                        "recall_cache_evictions_total",
+                        float(str(hot_cache["evictions"])),
                     )
                 nats_sub = getattr(self.pipeline, "nats_sub", None)
                 if nats_sub is not None:
@@ -783,6 +857,62 @@ class RecallHandler(BaseHTTPRequestHandler):
                 self._json_response(
                     self.pipeline.session_service.get_session(session_id)
                 )
+
+            elif path == "/v2/cache/status":
+                self._json_response(self.pipeline.cag_service.stats())
+
+            elif path.startswith("/v2/cache/entries/"):
+                cache_entry_id = unquote(path.split("/")[4])
+                cache_scope = _cag_scope(
+                    {
+                        key: params.get(key, [None])[0]
+                        for key in (
+                            "user_id",
+                            "workspace_id",
+                            "project_id",
+                            "repository_id",
+                            "task_id",
+                            "session_id",
+                            "agent_id",
+                        )
+                    }
+                )
+                self._json_response(
+                    self.pipeline.cag_service.inspect_cache_entry(
+                        cache_entry_id, cache_scope
+                    )
+                )
+
+            elif path.startswith("/v2/context/deliveries/"):
+                parts = path.split("/")
+                delivery_id = unquote(parts[4])
+                delivery_scope = _cag_scope(
+                    {
+                        key: params.get(key, [None])[0]
+                        for key in (
+                            "user_id",
+                            "workspace_id",
+                            "project_id",
+                            "repository_id",
+                            "task_id",
+                            "session_id",
+                            "agent_id",
+                        )
+                    }
+                )
+                if len(parts) == 6 and parts[5] == "explain":
+                    result = self.pipeline.cag_service.explain(
+                        delivery_id, delivery_scope
+                    )
+                elif len(parts) == 5:
+                    result = self.pipeline.cag_service.get_delivery(
+                        delivery_id, delivery_scope
+                    )
+                else:
+                    raise ContinuityError(
+                        "delivery route was not found", code="not_found"
+                    )
+                self._json_response(result)
 
             elif path.startswith("/v2/context/") and path.endswith("/explain"):
                 context_pack_id = path.split("/")[3]
@@ -1383,6 +1513,111 @@ class RecallHandler(BaseHTTPRequestHandler):
                     idempotency_key=body.get("idempotency_key"),
                 )
                 self._json_response(result)
+
+            elif path == "/v2/context/deliver":
+                requested_sections = body.get("requested_sections", [])
+                context_capabilities = body.get("client_capabilities", [])
+                if not isinstance(requested_sections, list) or not all(
+                    isinstance(value, str) for value in requested_sections
+                ):
+                    raise APIError("requested_sections must be an array of strings")
+                if not isinstance(context_capabilities, list) or not all(
+                    isinstance(value, str) for value in context_capabilities
+                ):
+                    raise APIError("client_capabilities must be an array of strings")
+                state_body = body.get("client_state")
+                client_state = None
+                if state_body is not None:
+                    if not isinstance(state_body, dict):
+                        raise APIError("client_state must be an object")
+                    state_capabilities = state_body.get("capabilities", [])
+                    known_skills = state_body.get("known_skills", {})
+                    known_handoffs = state_body.get("known_handoffs", {})
+                    if not isinstance(state_capabilities, list) or not all(
+                        isinstance(value, str) for value in state_capabilities
+                    ):
+                        raise APIError("client_state.capabilities must be strings")
+                    if not isinstance(known_skills, dict) or not isinstance(
+                        known_handoffs, dict
+                    ):
+                        raise APIError(
+                            "known skill and handoff versions must be objects"
+                        )
+                    client_state = ClientState(
+                        client_id=state_body.get("client_id"),
+                        client_type=state_body.get("client_type"),
+                        known_checkpoint_version=state_body.get(
+                            "known_checkpoint_version"
+                        ),
+                        known_context_pack_id=state_body.get("known_context_pack_id"),
+                        known_context_pack_fingerprint=state_body.get(
+                            "known_context_pack_fingerprint"
+                        ),
+                        known_skills=known_skills,
+                        known_handoffs=known_handoffs,
+                        capabilities=tuple(state_capabilities),
+                    )
+                result = self.pipeline.deliver_context(
+                    CAGRequest(
+                        context=ContextPackRequest(
+                            user_id=body.get("user_id"),
+                            workspace_id=body.get("workspace_id"),
+                            project_id=body.get("project_id"),
+                            repository_id=body.get("repository_id"),
+                            task_id=body.get("task_id"),
+                            session_id=body.get("session_id"),
+                            agent_id=body.get("agent_id"),
+                            objective=body.get("objective"),
+                            max_tokens=self._bounded_int(
+                                body.get("max_tokens"),
+                                default=self.pipeline.settings.CONTEXT_DEFAULT_MAX_TOKENS,
+                                minimum=1,
+                                maximum=self.pipeline.settings.CONTEXT_MAX_TOKENS,
+                                name="max_tokens",
+                            ),
+                            branch=body.get("branch"),
+                            commit_sha=body.get("commit_sha"),
+                            requested_sections=tuple(requested_sections),
+                            client_capabilities=tuple(context_capabilities),
+                            retrieval_limit=self._bounded_int(
+                                body.get("retrieval_limit", body.get("limit")),
+                                default=10,
+                                minimum=1,
+                                maximum=self.pipeline.settings.MAX_RESULTS,
+                                name="retrieval_limit",
+                            ),
+                            include_cold=bool(body.get("include_cold", False)),
+                        ),
+                        client_state=client_state,
+                        idempotency_key=body.get("idempotency_key"),
+                    )
+                )
+                self._json_response(result, status=201)
+
+            elif path == "/v2/cache/invalidate":
+                result = self.pipeline.cag_service.invalidate(
+                    scope=_cag_scope(body),
+                    cache_entry_id=body.get("cache_entry_id"),
+                    reason=str(body.get("reason") or "manual_invalidation"),
+                    actor_id=body.get("actor_id", body.get("agent_id")),
+                )
+                self._json_response(result)
+
+            elif path.startswith("/v2/context/deliveries/") and path.endswith(
+                "/feedback"
+            ):
+                delivery_id = unquote(path.split("/")[4])
+                result = self.pipeline.cag_service.record_feedback(
+                    delivery_id,
+                    scope=_cag_scope(body),
+                    agent_id=_required_text(body, "agent_id"),
+                    used_skill_versions=body.get("used_skill_versions", []),
+                    used_context_sections=body.get("used_context_sections", []),
+                    expanded_references=body.get("expanded_references", []),
+                    outcome=body.get("outcome"),
+                    idempotency_key=body.get("idempotency_key"),
+                )
+                self._json_response({"feedback": result}, status=201)
 
             elif path == "/v2/context/build":
                 requested_sections = body.get("requested_sections", [])

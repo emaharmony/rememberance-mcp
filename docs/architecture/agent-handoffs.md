@@ -27,5 +27,5 @@ Completion is a structured report. Recall appends an attributed
 stored as proposed, never approved implicitly. Actual reported skill and memory
 use feeds Phase 2 telemetry; mere inclusion does not count as use.
 
-Phase 5 does not add orchestration, multi-target claims, NATS lifecycle events,
-or Phase 6 caching.
+Phase 5 does not add orchestration, multi-target claims, or NATS lifecycle
+events. Phase 6 reuses immutable handoff versions for compact verified deltas.
