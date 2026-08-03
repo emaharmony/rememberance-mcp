@@ -41,6 +41,9 @@ SESSION_EVENT_TYPES = {
     "blocker.reported",
     "work.completed",
     "validation.requested",
+    "handoff.created",
+    "handoff.claimed",
+    "handoff.completed",
 }
 
 

@@ -44,9 +44,10 @@ Implementation records:
 ## Current progress
 
 Phase 1 shared task and session continuity, Phase 2 retrieval feedback and
-shadow utility scoring, Phase 3 Context Pack V2, and Phase 4 manually approved
-versioned Recall Skills are complete on top of the verified transactional-
-outbox checkpoint. Phase 5 cross-agent Handoff Skills is the next recommended
+shadow utility scoring, Phase 3 Context Pack V2, Phase 4 manually approved
+versioned Recall Skills, and Phase 5 cross-agent Handoff Skills are complete on
+top of the verified transactional-outbox checkpoint. Phase 6 CAG caching,
+skill-version awareness, and broader context deltas is the next recommended
 slice. Deferred refinements remain documented; they are not silently marked
 complete.
 

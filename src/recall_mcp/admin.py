@@ -204,6 +204,7 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
     from recall_mcp.context import ContextPackService
     from recall_mcp.continuity import ContinuityStore, SessionService, TaskService
     from recall_mcp.feedback import RetrievalFeedbackService
+    from recall_mcp.handoff import HandoffService
     from recall_mcp.skills import SkillService
 
     store = MemoryStore(settings.DB_PATH)
@@ -241,6 +242,14 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
         "retrieval_feedback": feedback.telemetry_stats(),
         "context_service": context_service.health(),
         "skill_service": skills.health(),
+        "handoff_service": HandoffService(
+            settings.DB_PATH,
+            settings,
+            tasks,
+            sessions,
+            context_service,
+            skills,
+        ).health(),
     }
     token_file = args.token_file or settings.API_TOKEN_FILE
     checks["token_file"] = str(token_file) if token_file else None
@@ -655,6 +664,111 @@ def command_skill(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def command_handoff(settings: Settings, args: argparse.Namespace) -> int:
+    """Inspect and recover handoffs without starting the capture worker."""
+    from recall_mcp.context import ContextPackService
+    from recall_mcp.continuity import (
+        ContinuityError,
+        ContinuityStore,
+        SessionService,
+        TaskService,
+    )
+    from recall_mcp.feedback import RetrievalFeedbackService
+    from recall_mcp.handoff import HandoffScope, HandoffService
+    from recall_mcp.skills import SkillService
+
+    continuity = ContinuityStore(settings.DB_PATH)
+    tasks = TaskService(continuity)
+    sessions = SessionService(continuity, tasks)
+    skills = SkillService(settings.DB_PATH, settings)
+    context = ContextPackService(
+        settings.DB_PATH,
+        settings,
+        tasks,
+        sessions,
+        RetrievalFeedbackService(settings.DB_PATH, settings),
+        skill_service=skills,
+    )
+    service = HandoffService(
+        settings.DB_PATH, settings, tasks, sessions, context, skills
+    )
+    scope = HandoffScope(
+        user_id=args.user_id,
+        workspace_id=args.workspace_id,
+        project_id=args.project_id,
+        repository_id=args.repository_id,
+        task_id=args.task_id,
+        session_id=args.session_id,
+    )
+    try:
+        if args.action == "list":
+            result: object = {
+                "handoffs": service.list_handoffs(
+                    scope=scope, agent_id=args.agent_id, status=args.status
+                )
+            }
+        elif not args.handoff_id:
+            raise ContinuityError("handoff_id is required for this action")
+        elif args.action == "inspect":
+            result = service.get(
+                args.handoff_id,
+                scope=scope,
+                version=args.version,
+                agent_id=args.agent_id,
+            )
+        elif args.action == "versions":
+            result = {
+                "handoff_id": args.handoff_id,
+                "versions": service.versions(
+                    args.handoff_id, scope=scope, agent_id=args.agent_id
+                ),
+            }
+        elif args.action == "explain":
+            result = service.explain(
+                args.handoff_id,
+                scope=scope,
+                version=args.version,
+                agent_id=args.agent_id,
+            )
+        elif args.action == "cancel":
+            if not args.agent_id or not args.reason:
+                raise ContinuityError("cancel requires --agent-id and --reason")
+            result = service.cancel(
+                args.handoff_id,
+                scope=scope,
+                agent_id=args.agent_id,
+                reason=args.reason,
+                idempotency_key=args.idempotency_key,
+            )
+        elif args.action == "expire":
+            if not args.agent_id:
+                raise ContinuityError("expire requires --agent-id")
+            result = service.expire(
+                args.handoff_id,
+                scope=scope,
+                agent_id=args.agent_id,
+                reason=args.reason or "manual expiration",
+                idempotency_key=args.idempotency_key,
+            )
+        elif args.action == "retry":
+            if not args.agent_id:
+                raise ContinuityError("retry requires --agent-id")
+            result = service.progress(
+                args.handoff_id,
+                scope=scope,
+                agent_id=args.agent_id,
+                progress={"reason": args.reason or "manual retry"},
+                idempotency_key=args.idempotency_key,
+            )
+        else:  # pragma: no cover - argparse enforces choices
+            raise ContinuityError("unsupported handoff action")
+    except ContinuityError as exc:
+        print(json.dumps({"error": str(exc), "code": exc.code}))
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="recall-admin")
     parser.add_argument("--home", type=Path)
@@ -710,6 +824,31 @@ def build_parser() -> argparse.ArgumentParser:
     skill.add_argument("--memory-id", action="append")
     skill.add_argument("--source-ref")
     skill.add_argument("--source-content")
+    handoff = subparsers.add_parser("handoff")
+    handoff.add_argument(
+        "action",
+        choices=[
+            "list",
+            "inspect",
+            "versions",
+            "explain",
+            "cancel",
+            "expire",
+            "retry",
+        ],
+    )
+    handoff.add_argument("handoff_id", nargs="?")
+    handoff.add_argument("--version", type=int)
+    handoff.add_argument("--user-id", required=True)
+    handoff.add_argument("--workspace-id", required=True)
+    handoff.add_argument("--project-id", required=True)
+    handoff.add_argument("--repository-id", required=True)
+    handoff.add_argument("--task-id", required=True)
+    handoff.add_argument("--session-id", required=True)
+    handoff.add_argument("--agent-id")
+    handoff.add_argument("--status")
+    handoff.add_argument("--reason")
+    handoff.add_argument("--idempotency-key")
     models = subparsers.add_parser("models")
     models.add_argument("action", choices=["pull"])
     nats_parser = subparsers.add_parser("nats")
@@ -768,6 +907,8 @@ def main() -> None:
         code = command_context(settings, args)
     elif args.command == "skill":
         code = command_skill(settings, args)
+    elif args.command == "handoff":
+        code = command_handoff(settings, args)
     elif args.command == "version":
         print(VERSION)
         code = 0

@@ -1,0 +1,33 @@
+{
+  "policy_version": "handoff-v1",
+  "cases": [
+    {
+      "id": "claude-codex-claude",
+      "full_transcript_tokens": 12000,
+      "handoff_token_budget": 3000,
+      "required_sections": [
+        "objective",
+        "expected_output",
+        "constraints",
+        "approved_decisions",
+        "completed",
+        "remaining"
+      ],
+      "preserved_sections": [
+        "objective",
+        "expected_output",
+        "constraints",
+        "approved_decisions",
+        "completed",
+        "remaining"
+      ],
+      "user_restatement": false,
+      "cross_user_leakage": 0,
+      "cross_project_leakage": 0,
+      "cross_repository_leakage": 0,
+      "wrong_agent_access": 0,
+      "rework_required": false,
+      "user_corrections": 0
+    }
+  ]
+}

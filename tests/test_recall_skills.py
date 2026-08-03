@@ -91,8 +91,8 @@ def proposal(env, **overrides):
 def test_migration_9_is_incremental_idempotent_and_adds_immutable_tables(tmp_path):
     db_path = tmp_path / "memory.db"
     run_migrations(db_path, MIGRATIONS[:8])
-    upgraded = run_migrations(db_path)
-    repeated = run_migrations(db_path)
+    upgraded = run_migrations(db_path, MIGRATIONS[:9])
+    repeated = run_migrations(db_path, MIGRATIONS[:9])
 
     assert [item.version for item in upgraded.applied] == [9]
     assert repeated.from_version == repeated.to_version == 9

@@ -225,6 +225,7 @@ def test_partially_migrated_database_resumes_in_order(tmp_path):
         7,
         8,
         9,
+        10,
     ]
     assert resumed.to_version == CURRENT_SCHEMA_VERSION
 

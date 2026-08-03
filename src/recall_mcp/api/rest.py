@@ -41,12 +41,17 @@ import logging
 import errno
 import sqlite3
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, unquote, urlparse
 from typing import Mapping, Optional
 
 from recall_mcp.pipeline import MemoryPipeline
 from recall_mcp.continuity import ContinuityError
 from recall_mcp.context import CONTEXT_SCHEMA_VERSION, ContextPackRequest
+from recall_mcp.handoff import (
+    HandoffCompletion,
+    HandoffRequest,
+    HandoffScope,
+)
 from recall_mcp.skills import SkillProposal, SkillScope
 from recall_mcp.api.security import (
     ServiceMetrics,
@@ -250,6 +255,7 @@ def _continuity_status(error: ContinuityError) -> int:
         "idempotency_conflict",
         "scope_mismatch",
         "invalid_transition",
+        "conflict",
     }:
         return 409
     if error.code in {"service_unavailable", "telemetry_unavailable"}:
@@ -286,6 +292,23 @@ def _skill_scope(values: Mapping[str, object]) -> SkillScope:
             else None
         ),
     )
+
+
+def _handoff_scope(values: Mapping[str, object]) -> HandoffScope:
+    required: dict[str, str] = {}
+    for field in (
+        "user_id",
+        "workspace_id",
+        "project_id",
+        "repository_id",
+        "task_id",
+        "session_id",
+    ):
+        value = values.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ContinuityError(f"missing required handoff scope: {field}")
+        required[field] = value.strip()
+    return HandoffScope(**required)
 
 
 def _required_text(body: dict, name: str, *, alias: str | None = None) -> str:
@@ -346,6 +369,7 @@ class RecallHandler(BaseHTTPRequestHandler):
                 )
                 probe["context_service"] = self.pipeline.context_service.health()
                 probe["skill_service"] = self.pipeline.skill_service.health()
+                probe["handoff_service"] = self.pipeline.handoff_service.health()
                 ready = ready and bool(
                     probe["context_service"]["available"]
                     and probe["context_service"]["migration_available"]
@@ -354,6 +378,10 @@ class RecallHandler(BaseHTTPRequestHandler):
                 ready = ready and bool(
                     probe["skill_service"]["available"]
                     and probe["skill_service"]["migration_current"]
+                )
+                ready = ready and bool(
+                    probe["handoff_service"]["available"]
+                    and probe["handoff_service"]["migration_available"]
                 )
                 ready = ready and bool(
                     outbox_worker["running"] and outbox_worker["thread_alive"]
@@ -493,6 +521,29 @@ class RecallHandler(BaseHTTPRequestHandler):
                     self.service_metrics.set_gauge(
                         f"recall_{metric}", float(str(value))
                     )
+                handoff_stats = self.pipeline.handoff_service.stats()
+                for metric, field in (
+                    ("handoffs_created_total", "created_total"),
+                    ("handoffs_claimed_total", "claimed_total"),
+                    ("handoffs_completed_total", "completed_total"),
+                    ("handoffs_blocked_total", "blocked_total"),
+                    ("handoffs_rejected_total", "rejected_total"),
+                    ("handoffs_expired_total", "expired_total"),
+                    ("handoff_build_failures_total", "build_failures_total"),
+                    (
+                        "handoff_completion_failures_total",
+                        "completion_failures_total",
+                    ),
+                    (
+                        "handoff_reference_expansions_total",
+                        "reference_expansions_total",
+                    ),
+                    ("handoff_skill_usage_total", "skill_usage_total"),
+                    ("handoff_latency_seconds", "latency_seconds_total"),
+                ):
+                    self.service_metrics.set_gauge(
+                        f"recall_{metric}", float(str(handoff_stats[field]))
+                    )
                 nats_sub = getattr(self.pipeline, "nats_sub", None)
                 if nats_sub is not None:
                     nats_health = nats_sub.health()
@@ -590,6 +641,115 @@ class RecallHandler(BaseHTTPRequestHandler):
                     )
                 else:
                     raise ContinuityError("skill route was not found", code="not_found")
+                self._json_response(result)
+
+            elif path == "/v2/handoffs":
+                values = {
+                    key: params.get(key, [None])[0]
+                    for key in (
+                        "user_id",
+                        "workspace_id",
+                        "project_id",
+                        "repository_id",
+                        "task_id",
+                        "session_id",
+                    )
+                }
+                self._json_response(
+                    {
+                        "handoffs": self.pipeline.handoff_service.list_handoffs(
+                            scope=_handoff_scope(values),
+                            agent_id=params.get("agent_id", [None])[0],
+                            status=params.get("status", [None])[0],
+                        )
+                    }
+                )
+
+            elif path.startswith("/v2/handoffs/"):
+                parts = path.split("/")
+                handoff_id = unquote(parts[3])
+                values = {
+                    key: params.get(key, [None])[0]
+                    for key in (
+                        "user_id",
+                        "workspace_id",
+                        "project_id",
+                        "repository_id",
+                        "task_id",
+                        "session_id",
+                    )
+                }
+                handoff_scope = _handoff_scope(values)
+                agent_id = params.get("agent_id", [None])[0]
+                if len(parts) == 5 and parts[4] == "versions":
+                    result = {
+                        "handoff_id": handoff_id,
+                        "versions": self.pipeline.handoff_service.versions(
+                            handoff_id, scope=handoff_scope, agent_id=agent_id
+                        ),
+                    }
+                elif len(parts) == 6 and parts[4] == "versions":
+                    result = self.pipeline.handoff_service.get(
+                        handoff_id,
+                        scope=handoff_scope,
+                        version=self._bounded_int(
+                            parts[5],
+                            default=1,
+                            minimum=1,
+                            maximum=2_147_483_647,
+                            name="version",
+                        ),
+                        agent_id=agent_id,
+                    )
+                elif len(parts) == 5 and parts[4] == "delta":
+                    result = self.pipeline.handoff_service.get_delta(
+                        handoff_id,
+                        scope=handoff_scope,
+                        known_version=self._bounded_int(
+                            params.get("known_version", ["0"])[0],
+                            default=0,
+                            minimum=0,
+                            maximum=2_147_483_647,
+                            name="known_version",
+                        ),
+                        known_checkpoint_version=(
+                            int(params["known_checkpoint_version"][0])
+                            if params.get("known_checkpoint_version")
+                            else None
+                        ),
+                        agent_id=agent_id,
+                    )
+                elif len(parts) == 5 and parts[4] == "explain":
+                    result = self.pipeline.handoff_service.explain(
+                        handoff_id,
+                        scope=handoff_scope,
+                        version=(
+                            int(params["version"][0]) if params.get("version") else None
+                        ),
+                        agent_id=agent_id,
+                    )
+                elif len(parts) == 6 and parts[4] == "references":
+                    if not agent_id:
+                        raise ContinuityError("agent_id is required")
+                    result = self.pipeline.handoff_service.expand_reference(
+                        handoff_id,
+                        parts[5],
+                        scope=handoff_scope,
+                        agent_id=agent_id,
+                    )
+                elif len(parts) == 4:
+                    result = self.pipeline.handoff_service.get(
+                        handoff_id,
+                        scope=handoff_scope,
+                        version=(
+                            int(params["version"][0]) if params.get("version") else None
+                        ),
+                        agent_id=agent_id,
+                    )
+                else:
+                    raise ContinuityError(
+                        "handoff route was not found", code="not_found"
+                    )
                 self._json_response(result)
 
             elif path.startswith("/v2/tasks/") and len(path.split("/")) == 4:
@@ -1051,6 +1211,113 @@ class RecallHandler(BaseHTTPRequestHandler):
                     )
                 else:
                     raise ContinuityError("skill route was not found", code="not_found")
+                self._json_response(result)
+
+            elif path == "/v2/handoffs":
+                capabilities = body.get("capabilities", [])
+                if not isinstance(capabilities, list) or not all(
+                    isinstance(value, str) for value in capabilities
+                ):
+                    raise APIError("capabilities must be an array of strings")
+                result = self.pipeline.handoff_service.create(
+                    HandoffRequest(
+                        scope=_handoff_scope(body),
+                        source_agent_id=_required_text(body, "source_agent_id"),
+                        target_agent_id=_required_text(body, "target_agent_id"),
+                        requested_by=_required_text(body, "requested_by"),
+                        expected_output=_required_text(body, "expected_output"),
+                        known_checkpoint_version=int(
+                            body.get("known_checkpoint_version", 0)
+                        ),
+                        max_tokens=body.get("max_tokens"),
+                        capabilities=tuple(capabilities),
+                        idempotency_key=body.get("idempotency_key"),
+                        status=str(body.get("status", "ready")),
+                    )
+                )
+                self._json_response(result, status=201)
+
+            elif path.startswith("/v2/handoffs/"):
+                parts = path.split("/")
+                handoff_id = unquote(parts[3])
+                action = parts[4] if len(parts) == 5 else ""
+                handoff_scope = _handoff_scope(body)
+                agent_id = _required_text(body, "agent_id")
+                if action == "claim":
+                    result = self.pipeline.handoff_service.claim(
+                        handoff_id,
+                        scope=handoff_scope,
+                        agent_id=agent_id,
+                        idempotency_key=body.get("idempotency_key"),
+                    )
+                elif action == "progress":
+                    progress = body.get("progress", {})
+                    if not isinstance(progress, dict):
+                        raise APIError("progress must be an object")
+                    result = self.pipeline.handoff_service.progress(
+                        handoff_id,
+                        scope=handoff_scope,
+                        agent_id=agent_id,
+                        progress=progress,
+                        idempotency_key=body.get("idempotency_key"),
+                    )
+                elif action == "block":
+                    blocker = body.get("blocker", {})
+                    if not isinstance(blocker, dict):
+                        raise APIError("blocker must be an object")
+                    result = self.pipeline.handoff_service.block(
+                        handoff_id,
+                        scope=handoff_scope,
+                        agent_id=agent_id,
+                        blocker=blocker,
+                        idempotency_key=body.get("idempotency_key"),
+                    )
+                elif action == "complete":
+                    tests = body.get("tests", {})
+                    if not isinstance(tests, dict):
+                        raise APIError("tests must be an object")
+                    result = self.pipeline.handoff_service.complete(
+                        handoff_id,
+                        scope=handoff_scope,
+                        agent_id=agent_id,
+                        completion=HandoffCompletion(
+                            files_changed=tuple(body.get("files_changed", [])),
+                            work_completed=tuple(body.get("work_completed", [])),
+                            tests=tests,
+                            blockers=tuple(body.get("blockers", [])),
+                            remaining_work=tuple(body.get("remaining_work", [])),
+                            new_decisions=tuple(body.get("new_decisions", [])),
+                            new_questions=tuple(body.get("new_questions", [])),
+                            used_skill_versions=tuple(
+                                body.get("used_skill_versions", [])
+                            ),
+                            used_memory_ids=tuple(body.get("used_memory_ids", [])),
+                            expanded_references=tuple(
+                                body.get("expanded_references", [])
+                            ),
+                        ),
+                        idempotency_key=body.get("idempotency_key"),
+                    )
+                elif action == "cancel":
+                    result = self.pipeline.handoff_service.cancel(
+                        handoff_id,
+                        scope=handoff_scope,
+                        agent_id=agent_id,
+                        reason=_required_text(body, "reason"),
+                        idempotency_key=body.get("idempotency_key"),
+                    )
+                elif action == "reject":
+                    result = self.pipeline.handoff_service.reject(
+                        handoff_id,
+                        scope=handoff_scope,
+                        agent_id=agent_id,
+                        reason=_required_text(body, "reason"),
+                        idempotency_key=body.get("idempotency_key"),
+                    )
+                else:
+                    raise ContinuityError(
+                        "handoff route was not found", code="not_found"
+                    )
                 self._json_response(result)
 
             elif path == "/v2/sessions":
