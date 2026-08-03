@@ -35,6 +35,10 @@ EXPECTED_TOOLS = {
     "recall_session_checkpoint",
     "recall_session_delta",
     "recall_context_feedback",
+    "recall_context_build",
+    "recall_context_get",
+    "recall_context_explain",
+    "recall_context_expand_reference",
     "recall_task_outcome",
     "recall_memory_utility",
 }
@@ -110,6 +114,34 @@ def test_mcp_server_starts_and_lists_tools():
                     },
                 )
                 delta = json.loads(delta_result.content[0].text)
+                context_result = await session.call_tool(
+                    "recall_context_build",
+                    {
+                        "user_id": "user-1",
+                        "workspace_id": "workspace-1",
+                        "project_id": "project-1",
+                        "repository_id": "repo-1",
+                        "task_id": task["id"],
+                        "session_id": shared_session["id"],
+                        "agent_id": "codex",
+                        "known_checkpoint_version": 0,
+                        "max_tokens": 1000,
+                        "idempotency_key": "mcp-context-v2",
+                    },
+                )
+                context_pack = json.loads(context_result.content[0].text)
+                explanation_result = await session.call_tool(
+                    "recall_context_explain",
+                    {
+                        "context_pack_id": context_pack["context_pack_id"],
+                        "user_id": "user-1",
+                        "workspace_id": "workspace-1",
+                        "project_id": "project-1",
+                        "repository_id": "repo-1",
+                        "task_id": task["id"],
+                    },
+                )
+                explanation = json.loads(explanation_result.content[0].text)
                 outcome_result = await session.call_tool(
                     "recall_task_outcome",
                     {
@@ -122,10 +154,18 @@ def test_mcp_server_starts_and_lists_tools():
                     },
                 )
                 outcome = json.loads(outcome_result.content[0].text)
-                return {t.name for t in tools.tools}, delta, outcome
+                return (
+                    {t.name for t in tools.tools},
+                    delta,
+                    outcome,
+                    context_pack,
+                    explanation,
+                )
 
     try:
-        names, delta, outcome = asyncio.run(asyncio.wait_for(_run(), timeout=60))
+        names, delta, outcome, context_pack, explanation = asyncio.run(
+            asyncio.wait_for(_run(), timeout=60)
+        )
     finally:
         shutil.rmtree(home, ignore_errors=True)
     assert EXPECTED_TOOLS.issubset(names), f"missing tools: {EXPECTED_TOOLS - names}"
@@ -134,3 +174,6 @@ def test_mcp_server_starts_and_lists_tools():
     assert delta["checkpoint"]["constraints"] == ["no push"]
     assert outcome["successful"] is True
     assert outcome["agent_id"] == "codex"
+    assert context_pack["schema_version"] == 2
+    assert context_pack["session"]["delta"]["status"] == "changed"
+    assert explanation["utility_affected_ranking"] is False

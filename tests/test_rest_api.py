@@ -15,6 +15,7 @@ from recall_mcp.api.rest import RecallHandler, _is_client_disconnect
 from recall_mcp.gate_backends import HeuristicBackend, GateFallbackChain
 import urllib.request
 import urllib.error
+import urllib.parse
 
 
 class _DisconnectingHandler:
@@ -92,6 +93,11 @@ class TestHealthEndpoint:
         assert data["retrieval_feedback"]["policy_version"] == "utility-v1"
         assert data["retrieval_feedback"]["shadow_mode"] is True
         assert data["retrieval_feedback"]["error_count"] == 0
+        assert data["context_service"]["available"] is True
+        assert data["context_service"]["migration_available"] is True
+        assert data["context_service"]["feedback_linkage_healthy"] is True
+        assert data["context_service"]["policy_version"] == "context-v2"
+        assert data["context_service"]["token_estimator_version"] == "chars-v1"
 
     def test_readiness_sanitizes_dispatcher_error(self, api_server):
         pipeline = api_server["pipeline"]
@@ -132,6 +138,9 @@ class TestHealthEndpoint:
         )
         assert "recall_retrieval_feedback_errors 1.0" in metrics
         assert "recall_utility_shadow_mode 1.0" in metrics
+        assert "recall_context_packs_built_total 0.0" in metrics
+        assert "recall_context_pack_failures_total 0.0" in metrics
+        assert "recall_context_pack_feedback_pending_total 0.0" in metrics
         assert "captured-content" not in json.dumps(readiness)
         assert "captured-content" not in metrics
 
@@ -175,6 +184,8 @@ class TestStatsEndpoint:
         assert data["outbox_worker"]["thread_alive"] is True
         assert data["retrieval_feedback"]["retrieval_runs"] == 0
         assert data["retrieval_feedback"]["shadow_mode"] is True
+        assert data["context_packs"]["schema_version"] == 2
+        assert data["context_packs"]["policy_version"] == "context-v2"
 
 
 class TestCaptureEndpoint:
@@ -591,3 +602,140 @@ class TestNotFoundEndpoint:
             assert False, "Expected 404"
         except urllib.error.HTTPError as e:
             assert e.code == 404
+
+
+class TestContextPackV2Endpoints:
+    @staticmethod
+    def request(base_url, path, body=None, method="POST"):
+        request = urllib.request.Request(
+            f"{base_url}{path}",
+            data=json.dumps(body).encode("utf-8") if body is not None else None,
+            headers={"Content-Type": "application/json"},
+            method=method,
+        )
+        try:
+            response = urllib.request.urlopen(request)
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+        return response.status, json.loads(response.read())
+
+    def test_build_get_explain_expand_feedback_and_v1_compatibility(self, api_server):
+        pipeline = api_server["pipeline"]
+        base = api_server["base_url"]
+        task = pipeline.task_service.create_task(
+            user_id="context-user",
+            workspace_id="context-workspace",
+            project_id="context-project",
+            repository_id="context-repo",
+            title="Context V2 REST",
+            objective="context marker",
+            created_by="claude-code",
+            canonical_path="/work/context",
+        )
+        session = pipeline.session_service.start_session(
+            task_id=task["id"], agent_id="claude-code"
+        )
+        pipeline.session_service.join_session(session["id"], agent_id="codex")
+        pipeline.session_service.create_checkpoint(
+            session["id"],
+            agent_id="claude-code",
+            constraints=["retain critical context"],
+            approved_decisions=["use context v2"],
+        )
+        long_text = "context marker repository evidence " * 100
+        memory_id = pipeline.store.store(
+            long_text,
+            long_text,
+            "project",
+            "active",
+            [],
+            source="repository:src/context.py",
+            agent="claude-code",
+            user_id=task["user_id"],
+            workspace_id=task["workspace_id"],
+            project_id=task["project_id"],
+            repository_id=task["repository_id"],
+            task_id=task["id"],
+            session_id=session["id"],
+        )
+        body = {
+            "user_id": task["user_id"],
+            "workspace_id": task["workspace_id"],
+            "project_id": task["project_id"],
+            "repository_id": task["repository_id"],
+            "task_id": task["id"],
+            "session_id": session["id"],
+            "agent_id": "codex",
+            "known_checkpoint_version": 0,
+            "max_tokens": 3000,
+            "client_capabilities": ["structured_json", "references"],
+            "idempotency_key": "rest-context-v2",
+        }
+        status, pack = self.request(base, "/v2/context/build", body)
+        assert status == 201
+        assert pack["schema_version"] == 2
+        assert pack["retrieval"]["retrieval_run_id"]
+        assert pack["references"]
+        scope_keys = (
+            "user_id",
+            "workspace_id",
+            "project_id",
+            "repository_id",
+            "task_id",
+        )
+        query = urllib.parse.urlencode({key: body[key] for key in scope_keys})
+        status, fetched = self.request(
+            base, f"/v2/context/{pack['context_pack_id']}?{query}", method="GET"
+        )
+        assert status == 200
+        assert fetched["context_pack_id"] == pack["context_pack_id"]
+        status, explanation = self.request(
+            base,
+            f"/v2/context/{pack['context_pack_id']}/explain?{query}",
+            method="GET",
+        )
+        assert status == 200
+        assert explanation["utility_affected_ranking"] is False
+        reference_id = pack["references"][0]["reference_id"]
+        status, expanded = self.request(
+            base,
+            f"/v2/context/{pack['context_pack_id']}/references/{reference_id}?{query}&agent_id=codex",
+            method="GET",
+        )
+        assert status == 200
+        assert expanded["reference_id"] == reference_id
+        status, feedback = self.request(
+            base,
+            f"/v2/context/{pack['context_pack_id']}/feedback",
+            {
+                **{key: body[key] for key in scope_keys},
+                "agent_id": "codex",
+                "used_memory_ids": [memory_id],
+                "idempotency_key": "rest-context-used",
+            },
+        )
+        assert status == 201
+        assert feedback["feedback"][0]["usage_type"] == "used"
+
+        status, rejected = self.request(
+            base,
+            f"/v2/context/{pack['context_pack_id']}/feedback",
+            {**body, "project_id": "wrong", "used_memory_ids": [memory_id]},
+        )
+        assert status == 404
+        assert rejected["code"] == "not_found"
+
+        status, v1 = self.request(
+            base,
+            "/v1/context/build",
+            {
+                "task": "context marker",
+                "project_id": "context-project",
+                "agent_id": "prism",
+                "max_tokens": 1000,
+            },
+        )
+        assert status == 200
+        assert "context_markdown" in v1
+        assert v1["context_pack_id"]
+        assert v1["schema_version"] == 2

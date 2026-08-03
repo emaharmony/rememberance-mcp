@@ -53,6 +53,47 @@ def test_fresh_database_applies_all_migrations(tmp_path):
         {"version": migration.version, "name": migration.name}
         for migration in MIGRATIONS
     ]
+
+
+def test_migration_8_preserves_phase_2_context_pack_and_is_idempotent(tmp_path):
+    db_path = tmp_path / "phase-2.db"
+    run_migrations(db_path, MIGRATIONS[:7])
+    now = time.time()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO retrieval_runs (
+                id, query, mode, requested_limit, created_at, latency_ms
+            ) VALUES ('run-old', 'query', 'balanced', 10, ?, 1.0)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO context_packs (
+                id, retrieval_run_id, estimated_tokens, created_at
+            ) VALUES ('context-old', 'run-old', 12, ?)
+            """,
+            (now,),
+        )
+
+    upgraded = run_migrations(db_path)
+    repeated = run_migrations(db_path)
+
+    assert [migration.version for migration in upgraded.applied] == [8]
+    assert repeated.from_version == repeated.to_version == 8
+    assert {"context_pack_items", "context_pack_references"}.issubset(
+        _objects(db_path, "table")
+    )
+    assert {"pack_json", "source_fingerprint", "schema_version"}.issubset(
+        _columns(db_path, "context_packs")
+    )
+    with sqlite3.connect(db_path) as conn:
+        preserved = conn.execute(
+            "SELECT schema_version, estimated_tokens FROM context_packs WHERE id = ?",
+            ("context-old",),
+        ).fetchone()
+    assert preserved == (1, 12)
     assert {
         "schema_migrations",
         "memories",
@@ -174,7 +215,7 @@ def test_partially_migrated_database_resumes_in_order(tmp_path):
     resumed = run_migrations(db_path)
 
     assert resumed.from_version == 2
-    assert [migration.version for migration in resumed.applied] == [3, 4, 5, 6, 7]
+    assert [migration.version for migration in resumed.applied] == [3, 4, 5, 6, 7, 8]
     assert resumed.to_version == CURRENT_SCHEMA_VERSION
 
 

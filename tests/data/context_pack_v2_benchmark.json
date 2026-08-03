@@ -1,0 +1,26 @@
+{
+  "name": "context-pack-v2-k3",
+  "token_budget": 800,
+  "mandatory": [
+    {"id": "objective", "retained": true},
+    {"id": "approved-decision", "retained": true},
+    {"id": "critical-constraint", "retained": true},
+    {"id": "blocker", "retained": true},
+    {"id": "task-status", "retained": true},
+    {"id": "session-delta", "retained": true},
+    {"id": "validation-request", "retained": true},
+    {"id": "scope-warning", "retained": true}
+  ],
+  "results": [
+    {"id": "repository-evidence", "project_id": "recall", "rank": 1, "relevant": true, "disposition": "inline", "delivered_tokens": 90, "omitted_tokens": 0},
+    {"id": "near-duplicate", "project_id": "recall", "rank": 2, "relevant": false, "disposition": "omitted", "delivered_tokens": 0, "omitted_tokens": 85},
+    {"id": "long-tool-output", "project_id": "recall", "rank": 3, "relevant": true, "disposition": "reference", "delivered_tokens": 30, "omitted_tokens": 320},
+    {"id": "stale-history", "project_id": "recall", "rank": 4, "relevant": false, "disposition": "omitted", "delivered_tokens": 0, "omitted_tokens": 120},
+    {"id": "corrected-claim", "project_id": "recall", "rank": 5, "relevant": false, "disposition": "omitted", "delivered_tokens": 0, "omitted_tokens": 85},
+    {"id": "frequent-reuse", "project_id": "recall", "rank": 6, "relevant": true, "disposition": "inline", "delivered_tokens": 80, "omitted_tokens": 0},
+    {"id": "contradictory-claim", "project_id": "recall", "rank": 7, "relevant": false, "disposition": "omitted", "delivered_tokens": 0, "omitted_tokens": 90},
+    {"id": "cross-project-distractor", "project_id": "other", "rank": 0, "relevant": false, "disposition": "filtered", "delivered_tokens": 0, "omitted_tokens": 0}
+  ],
+  "mandatory_tokens": 220,
+  "continuity_tokens": 70
+}

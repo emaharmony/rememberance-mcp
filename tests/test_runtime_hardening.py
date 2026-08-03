@@ -27,6 +27,18 @@ from recall_mcp.pipeline import MemoryPipeline
         ({"OUTBOX_LEASE_SECONDS": 0}, "outbox polling"),
         ({"OUTBOX_MAX_ATTEMPTS": 0}, "outbox retry"),
         ({"OUTBOX_RETRY_BASE_SECONDS": 0}, "outbox retry"),
+        ({"CONTEXT_DEFAULT_MAX_TOKENS": 0}, "context token budgets"),
+        (
+            {"CONTEXT_DEFAULT_MAX_TOKENS": 20, "CONTEXT_MAX_TOKENS": 10},
+            "default context budget",
+        ),
+        ({"CONTEXT_PACK_TTL_SECONDS": 0}, "CONTEXT_PACK_TTL"),
+        ({"CONTEXT_INLINE_EVIDENCE_MAX_TOKENS": 0}, "INLINE_EVIDENCE"),
+        ({"CONTEXT_BUDGET_WEIGHTS": {"unknown": 1.0}}, "unknown classes"),
+        (
+            {"CONTEXT_BUDGET_WEIGHTS": {"retrieval": 0.8, "reserve": 0.3}},
+            "at most 1.0",
+        ),
     ],
 )
 def test_settings_reject_invalid_runtime_limits(tmp_path, override, message):
