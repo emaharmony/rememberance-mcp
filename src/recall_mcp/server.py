@@ -53,6 +53,7 @@ def create_server():
     from recall_mcp.continuity import ContinuityError
     from recall_mcp.context import ContextPackRequest
     from recall_mcp.pipeline import MemoryPipeline
+    from recall_mcp.skills import SkillProposal, SkillScope
 
     settings = Settings()
     pipeline = MemoryPipeline(settings=settings)
@@ -86,6 +87,12 @@ def create_server():
         what parameters each tool takes, and what it returns.
         The AI uses this to decide which tool to call.
         """
+        skill_scope_properties = {
+            "user_id": {"type": "string"},
+            "workspace_id": {"type": "string"},
+            "project_id": {"type": "string"},
+            "repository_id": {"type": "string"},
+        }
         return [
             Tool(
                 name="memory_capture",
@@ -511,6 +518,162 @@ def create_server():
                 },
             ),
             continuity_tool(
+                "recall_skill_list",
+                "List scope-filtered Recall Skills before any relevance ranking.",
+                ["user_id", "workspace_id", "project_id"],
+                {**skill_scope_properties, "status": {"type": "string"}},
+            ),
+            continuity_tool(
+                "recall_skill_get",
+                "Fetch one exact immutable skill version or the current approved version.",
+                ["skill_id", "user_id", "workspace_id", "project_id"],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_propose",
+                "Compile a deterministic skill candidate from scoped evidence.",
+                [
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "slug",
+                    "title",
+                    "purpose",
+                    "agent_id",
+                    "sources",
+                ],
+                {
+                    **skill_scope_properties,
+                    "slug": {"type": "string"},
+                    "title": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "sources": {"type": "array", "items": {"type": "object"}},
+                    "summary": {"type": "string"},
+                    "instructions": {"type": "array"},
+                    "facts": {"type": "array"},
+                    "decisions": {"type": "array"},
+                    "constraints": {"type": "array"},
+                    "open_questions": {"type": "array"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_approve",
+                "Manually approve one exact immutable skill version.",
+                [
+                    "skill_id",
+                    "version",
+                    "reviewer_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                    "reviewer_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_reject",
+                "Reject one exact skill version while retaining its audit history.",
+                [
+                    "skill_id",
+                    "version",
+                    "reviewer_id",
+                    "reason",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                    "reviewer_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_refresh",
+                "Refresh a skill from current evidence without rewriting history.",
+                [
+                    "skill_id",
+                    "agent_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "sources": {"type": "array", "items": {"type": "object"}},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_explain",
+                "Explain a skill version, evidence, review state, and staleness.",
+                ["skill_id", "user_id", "workspace_id", "project_id"],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_evidence",
+                "Expand the supporting evidence for an exact skill version.",
+                [
+                    "skill_id",
+                    "version",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                    "agent_id": {"type": "string"},
+                    "context_pack_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_feedback",
+                "Record attributed feedback for one exact skill version.",
+                [
+                    "skill_id",
+                    "version",
+                    "usage_type",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                    "usage_type": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "context_pack_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "metadata": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
                 "recall_context_build",
                 "Build and persist a scope-safe provider-neutral Context Pack V2.",
                 [
@@ -629,6 +792,10 @@ def create_server():
                     "expanded_memory_ids": {"type": "array"},
                     "corrected_memory_ids": {"type": "array"},
                     "rejected_memory_ids": {"type": "array"},
+                    "used_skill_versions": {"type": "array"},
+                    "ignored_skill_versions": {"type": "array"},
+                    "corrected_skill_versions": {"type": "array"},
+                    "rejected_skill_versions": {"type": "array"},
                     "idempotency_key": {"type": "string"},
                 },
             ),
@@ -692,6 +859,14 @@ def create_server():
                         "task_id",
                     )
                 }
+
+            def skill_scope() -> SkillScope:
+                return SkillScope(
+                    user_id=str(arguments.get("user_id") or ""),
+                    workspace_id=str(arguments.get("workspace_id") or ""),
+                    project_id=str(arguments.get("project_id") or ""),
+                    repository_id=arguments.get("repository_id"),
+                )
 
             if name == "recall_task_create":
                 result = pipeline.task_service.create_task(
@@ -802,6 +977,124 @@ def create_server():
                     )
                 )
 
+            elif name == "recall_skill_list":
+                return result_json(
+                    {
+                        "skills": pipeline.skill_service.list_skills(
+                            scope=skill_scope(), status=arguments.get("status")
+                        )
+                    }
+                )
+
+            elif name == "recall_skill_get":
+                return result_json(
+                    pipeline.skill_service.get(
+                        arguments["skill_id"],
+                        scope=skill_scope(),
+                        version=(
+                            int(arguments["version"])
+                            if arguments.get("version") is not None
+                            else None
+                        ),
+                    )
+                )
+
+            elif name == "recall_skill_propose":
+                return result_json(
+                    pipeline.skill_service.propose(
+                        SkillProposal(
+                            scope=skill_scope(),
+                            slug=arguments["slug"],
+                            title=arguments["title"],
+                            purpose=arguments["purpose"],
+                            created_by_agent_id=arguments["agent_id"],
+                            sources=tuple(arguments["sources"]),
+                            summary=arguments.get("summary", ""),
+                            instructions=tuple(arguments.get("instructions", [])),
+                            facts=tuple(arguments.get("facts", [])),
+                            decisions=tuple(arguments.get("decisions", [])),
+                            constraints=tuple(arguments.get("constraints", [])),
+                            open_questions=tuple(arguments.get("open_questions", [])),
+                            idempotency_key=arguments.get("idempotency_key"),
+                        )
+                    )
+                )
+
+            elif name == "recall_skill_approve":
+                return result_json(
+                    pipeline.skill_service.approve(
+                        arguments["skill_id"],
+                        int(arguments["version"]),
+                        scope=skill_scope(),
+                        reviewer_id=arguments["reviewer_id"],
+                        reason=arguments.get("reason", ""),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_skill_reject":
+                return result_json(
+                    pipeline.skill_service.reject(
+                        arguments["skill_id"],
+                        int(arguments["version"]),
+                        scope=skill_scope(),
+                        reviewer_id=arguments["reviewer_id"],
+                        reason=arguments["reason"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_skill_refresh":
+                return result_json(
+                    pipeline.skill_service.refresh(
+                        arguments["skill_id"],
+                        scope=skill_scope(),
+                        created_by_agent_id=arguments["agent_id"],
+                        source_overrides=arguments.get("sources"),
+                    )
+                )
+
+            elif name == "recall_skill_explain":
+                return result_json(
+                    pipeline.skill_service.explain(
+                        arguments["skill_id"],
+                        scope=skill_scope(),
+                        version=(
+                            int(arguments["version"])
+                            if arguments.get("version") is not None
+                            else None
+                        ),
+                    )
+                )
+
+            elif name == "recall_skill_evidence":
+                return result_json(
+                    pipeline.skill_service.expand_evidence(
+                        arguments["skill_id"],
+                        int(arguments["version"]),
+                        scope=skill_scope(),
+                        agent_id=arguments.get("agent_id"),
+                        context_pack_id=arguments.get("context_pack_id"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_skill_feedback":
+                return result_json(
+                    pipeline.skill_service.record_usage(
+                        arguments["skill_id"],
+                        int(arguments["version"]),
+                        scope=skill_scope(),
+                        usage_type=arguments["usage_type"],
+                        agent_id=arguments.get("agent_id"),
+                        context_pack_id=arguments.get("context_pack_id"),
+                        task_id=arguments.get("task_id"),
+                        session_id=arguments.get("session_id"),
+                        metadata=arguments.get("metadata"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
             elif name == "recall_context_build":
                 return result_json(
                     pipeline.build_context_v2(
@@ -872,6 +1165,16 @@ def create_server():
                         expanded_memory_ids=arguments.get("expanded_memory_ids", []),
                         corrected_memory_ids=arguments.get("corrected_memory_ids", []),
                         rejected_memory_ids=arguments.get("rejected_memory_ids", []),
+                        used_skill_versions=arguments.get("used_skill_versions", []),
+                        ignored_skill_versions=arguments.get(
+                            "ignored_skill_versions", []
+                        ),
+                        corrected_skill_versions=arguments.get(
+                            "corrected_skill_versions", []
+                        ),
+                        rejected_skill_versions=arguments.get(
+                            "rejected_skill_versions", []
+                        ),
                         idempotency_key=arguments.get("idempotency_key"),
                     )
                 )

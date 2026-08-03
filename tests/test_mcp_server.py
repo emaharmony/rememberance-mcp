@@ -41,6 +41,15 @@ EXPECTED_TOOLS = {
     "recall_context_expand_reference",
     "recall_task_outcome",
     "recall_memory_utility",
+    "recall_skill_list",
+    "recall_skill_get",
+    "recall_skill_propose",
+    "recall_skill_approve",
+    "recall_skill_reject",
+    "recall_skill_refresh",
+    "recall_skill_explain",
+    "recall_skill_evidence",
+    "recall_skill_feedback",
 }
 
 
@@ -142,6 +151,52 @@ def test_mcp_server_starts_and_lists_tools():
                     },
                 )
                 explanation = json.loads(explanation_result.content[0].text)
+                skill_result = await session.call_tool(
+                    "recall_skill_propose",
+                    {
+                        "user_id": "user-1",
+                        "workspace_id": "workspace-1",
+                        "project_id": "project-1",
+                        "repository_id": "repo-1",
+                        "slug": "mcp-contract",
+                        "title": "MCP Contract",
+                        "purpose": "Keep MCP transport rules reusable",
+                        "agent_id": "claude-code",
+                        "sources": [
+                            {
+                                "source_type": "repository",
+                                "source_id": "repo-1",
+                                "source_ref": "src/recall_mcp/server.py",
+                                "content": "MCP delegates to shared services.",
+                                "commit_sha": "mcp-test",
+                            }
+                        ],
+                    },
+                )
+                skill = json.loads(skill_result.content[0].text)
+                await session.call_tool(
+                    "recall_skill_approve",
+                    {
+                        "skill_id": skill["id"],
+                        "version": 1,
+                        "reviewer_id": "user-1",
+                        "user_id": "user-1",
+                        "workspace_id": "workspace-1",
+                        "project_id": "project-1",
+                        "repository_id": "repo-1",
+                    },
+                )
+                skill_get_result = await session.call_tool(
+                    "recall_skill_get",
+                    {
+                        "skill_id": skill["id"],
+                        "user_id": "user-1",
+                        "workspace_id": "workspace-1",
+                        "project_id": "project-1",
+                        "repository_id": "repo-1",
+                    },
+                )
+                approved_skill = json.loads(skill_get_result.content[0].text)
                 outcome_result = await session.call_tool(
                     "recall_task_outcome",
                     {
@@ -160,10 +215,11 @@ def test_mcp_server_starts_and_lists_tools():
                     outcome,
                     context_pack,
                     explanation,
+                    approved_skill,
                 )
 
     try:
-        names, delta, outcome, context_pack, explanation = asyncio.run(
+        names, delta, outcome, context_pack, explanation, approved_skill = asyncio.run(
             asyncio.wait_for(_run(), timeout=60)
         )
     finally:
@@ -177,3 +233,4 @@ def test_mcp_server_starts_and_lists_tools():
     assert context_pack["schema_version"] == 2
     assert context_pack["session"]["delta"]["status"] == "changed"
     assert explanation["utility_affected_ranking"] is False
+    assert approved_skill["version_status"] == "approved"

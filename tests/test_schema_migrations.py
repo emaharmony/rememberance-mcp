@@ -77,8 +77,8 @@ def test_migration_8_preserves_phase_2_context_pack_and_is_idempotent(tmp_path):
             (now,),
         )
 
-    upgraded = run_migrations(db_path)
-    repeated = run_migrations(db_path)
+    upgraded = run_migrations(db_path, MIGRATIONS[:8])
+    repeated = run_migrations(db_path, MIGRATIONS[:8])
 
     assert [migration.version for migration in upgraded.applied] == [8]
     assert repeated.from_version == repeated.to_version == 8
@@ -140,7 +140,9 @@ def test_migration_8_preserves_phase_2_context_pack_and_is_idempotent(tmp_path):
         outbox_parents = {
             row[2] for row in conn.execute("PRAGMA foreign_key_list(outbox_jobs)")
         }
-    assert history == [(migration.version, migration.name) for migration in MIGRATIONS]
+    assert history == [
+        (migration.version, migration.name) for migration in MIGRATIONS[:8]
+    ]
     assert memory_entity_parents == {"memories", "entities"}
     assert ingest_event_parents == {"memories", "raw_captures"}
     assert outbox_parents == {"raw_captures"}
@@ -215,7 +217,15 @@ def test_partially_migrated_database_resumes_in_order(tmp_path):
     resumed = run_migrations(db_path)
 
     assert resumed.from_version == 2
-    assert [migration.version for migration in resumed.applied] == [3, 4, 5, 6, 7, 8]
+    assert [migration.version for migration in resumed.applied] == [
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+    ]
     assert resumed.to_version == CURRENT_SCHEMA_VERSION
 
 

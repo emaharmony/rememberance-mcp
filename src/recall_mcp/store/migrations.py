@@ -1121,6 +1121,235 @@ def _migration_context_pack_v2(conn: sqlite3.Connection) -> None:
         _require_columns(conn, table, columns)
 
 
+def _migration_versioned_skills(conn: sqlite3.Connection) -> None:
+    """Add immutable, scope-aware skill versions and review/usage audit."""
+    _execute_statements(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS skills (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT,
+            slug TEXT NOT NULL,
+            title TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'candidate' CHECK(status IN (
+                'candidate', 'pending_approval', 'approved', 'rejected',
+                'stale', 'deprecated', 'archived'
+            )),
+            current_version INTEGER NOT NULL DEFAULT 0 CHECK(current_version >= 0),
+            current_approved_version INTEGER,
+            created_by_agent_id TEXT NOT NULL,
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            expires_at REAL,
+            retention_review_at REAL,
+            stale_at REAL,
+            stale_reason TEXT,
+            UNIQUE(user_id, workspace_id, project_id, repository_id, slug),
+            FOREIGN KEY (project_id, user_id, workspace_id)
+                REFERENCES projects(id, user_id, workspace_id),
+            FOREIGN KEY (repository_id, user_id, workspace_id, project_id)
+                REFERENCES repositories(id, user_id, workspace_id, project_id),
+            FOREIGN KEY (created_by_agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_idempotency
+        ON skills(user_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_project_slug
+        ON skills(user_id, workspace_id, project_id, slug)
+        WHERE repository_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_repository_slug
+        ON skills(user_id, workspace_id, project_id, repository_id, slug)
+        WHERE repository_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_skills_scope_status
+        ON skills(user_id, workspace_id, project_id, repository_id, status);
+        CREATE INDEX IF NOT EXISTS idx_skills_stale
+        ON skills(stale_at, status) WHERE stale_at IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS skill_versions (
+            skill_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK(version >= 1),
+            schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version >= 1),
+            content_json TEXT NOT NULL,
+            content_markdown TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            token_estimate INTEGER NOT NULL CHECK(token_estimate >= 0),
+            compiler_policy_version TEXT NOT NULL,
+            compiler_model TEXT,
+            generated INTEGER NOT NULL DEFAULT 0 CHECK(generated IN (0, 1)),
+            created_by_agent_id TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (skill_id, version),
+            FOREIGN KEY (skill_id) REFERENCES skills(id),
+            FOREIGN KEY (created_by_agent_id) REFERENCES agents(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_versions_created
+        ON skill_versions(skill_id, version, created_at);
+
+        CREATE TABLE IF NOT EXISTS skill_sources (
+            skill_id TEXT NOT NULL,
+            skill_version INTEGER NOT NULL,
+            source_type TEXT NOT NULL CHECK(source_type IN (
+                'memory', 'context_pack', 'repository', 'fact',
+                'decision', 'session_event', 'tool_output',
+                'documentation', 'external'
+            )),
+            source_id TEXT NOT NULL,
+            source_version TEXT,
+            source_hash TEXT NOT NULL,
+            relationship TEXT NOT NULL DEFAULT 'supports' CHECK(relationship IN (
+                'supports', 'constrains', 'supersedes', 'contradicts',
+                'derived_from'
+            )),
+            source_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            PRIMARY KEY (
+                skill_id, skill_version, source_type, source_id, relationship
+            ),
+            FOREIGN KEY (skill_id, skill_version)
+                REFERENCES skill_versions(skill_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_sources_source
+        ON skill_sources(source_type, source_id);
+
+        CREATE TABLE IF NOT EXISTS skill_reviews (
+            id TEXT PRIMARY KEY,
+            skill_id TEXT NOT NULL,
+            skill_version INTEGER NOT NULL,
+            decision TEXT NOT NULL CHECK(decision IN (
+                'approved', 'rejected', 'request_changes',
+                'deprecated', 'archived'
+            )),
+            reviewer_id TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (skill_id, skill_version)
+                REFERENCES skill_versions(skill_id, version)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_reviews_idempotency
+        ON skill_reviews(skill_id, skill_version, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_skill_reviews_version
+        ON skill_reviews(skill_id, skill_version, created_at);
+
+        CREATE TABLE IF NOT EXISTS skill_usage (
+            id TEXT PRIMARY KEY,
+            skill_id TEXT NOT NULL,
+            skill_version INTEGER NOT NULL,
+            context_pack_id TEXT,
+            task_id TEXT,
+            session_id TEXT,
+            agent_id TEXT,
+            usage_type TEXT NOT NULL CHECK(usage_type IN (
+                'selected', 'injected', 'referenced', 'expanded',
+                'used', 'ignored', 'corrected', 'rejected'
+            )),
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (skill_id, skill_version)
+                REFERENCES skill_versions(skill_id, version),
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id),
+            FOREIGN KEY (task_id) REFERENCES tasks(id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_usage_idempotency
+        ON skill_usage(skill_id, skill_version, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_skill_usage_pack
+        ON skill_usage(context_pack_id, skill_id, skill_version, usage_type);
+
+        CREATE TABLE IF NOT EXISTS context_pack_skills (
+            context_pack_id TEXT NOT NULL,
+            skill_id TEXT NOT NULL,
+            skill_version INTEGER NOT NULL,
+            disposition TEXT NOT NULL CHECK(disposition IN (
+                'inline', 'summary', 'reference', 'omitted'
+            )),
+            position INTEGER NOT NULL CHECK(position >= 1),
+            reason_json TEXT NOT NULL DEFAULT '[]',
+            created_at REAL NOT NULL,
+            PRIMARY KEY (context_pack_id, skill_id, skill_version),
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (skill_id, skill_version)
+                REFERENCES skill_versions(skill_id, version)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS skill_versions_no_update
+        BEFORE UPDATE ON skill_versions
+        BEGIN
+            SELECT RAISE(ABORT, 'skill versions are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS skill_versions_no_delete
+        BEFORE DELETE ON skill_versions
+        BEGIN
+            SELECT RAISE(ABORT, 'skill versions are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS skill_sources_no_update
+        BEFORE UPDATE ON skill_sources
+        BEGIN
+            SELECT RAISE(ABORT, 'skill sources are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS skill_sources_no_delete
+        BEFORE DELETE ON skill_sources
+        BEGIN
+            SELECT RAISE(ABORT, 'skill sources are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS skill_reviews_no_update
+        BEFORE UPDATE ON skill_reviews
+        BEGIN
+            SELECT RAISE(ABORT, 'skill reviews are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS skill_reviews_no_delete
+        BEFORE DELETE ON skill_reviews
+        BEGIN
+            SELECT RAISE(ABORT, 'skill reviews are append-only');
+        END;
+        """,
+    )
+    for table, columns in {
+        "skills": {
+            "id",
+            "project_id",
+            "slug",
+            "status",
+            "current_version",
+            "current_approved_version",
+            "stale_at",
+        },
+        "skill_versions": {
+            "skill_id",
+            "version",
+            "content_json",
+            "content_hash",
+            "source_fingerprint",
+        },
+        "skill_sources": {
+            "skill_id",
+            "skill_version",
+            "source_type",
+            "source_hash",
+        },
+        "skill_reviews": {"skill_id", "skill_version", "decision", "reviewer_id"},
+        "skill_usage": {"skill_id", "skill_version", "usage_type"},
+        "context_pack_skills": {
+            "context_pack_id",
+            "skill_id",
+            "skill_version",
+            "disposition",
+        },
+    }.items():
+        _require_columns(conn, table, columns)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_memory", _migration_core_memory),
     Migration(2, "memory_v2", _migration_memory_v2),
@@ -1130,6 +1359,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(6, "task_session_continuity", _migration_task_session_continuity),
     Migration(7, "retrieval_utility", _migration_retrieval_utility),
     Migration(8, "context_pack_v2", _migration_context_pack_v2),
+    Migration(9, "versioned_skills", _migration_versioned_skills),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
 

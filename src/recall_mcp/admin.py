@@ -204,6 +204,7 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
     from recall_mcp.context import ContextPackService
     from recall_mcp.continuity import ContinuityStore, SessionService, TaskService
     from recall_mcp.feedback import RetrievalFeedbackService
+    from recall_mcp.skills import SkillService
 
     store = MemoryStore(settings.DB_PATH)
     integrity = store.integrity_report(quick=True)
@@ -212,6 +213,7 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
     continuity = ContinuityStore(settings.DB_PATH)
     tasks = TaskService(continuity)
     sessions = SessionService(continuity, tasks)
+    skills = SkillService(settings.DB_PATH, settings)
     context_service = ContextPackService(
         settings.DB_PATH,
         settings,
@@ -219,6 +221,7 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
         sessions,
         feedback,
         search=lambda **_kwargs: ([], "doctor-probe"),
+        skill_service=skills,
     )
     checks: dict[str, object] = {
         "version": VERSION,
@@ -237,6 +240,7 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
         },
         "retrieval_feedback": feedback.telemetry_stats(),
         "context_service": context_service.health(),
+        "skill_service": skills.health(),
     }
     token_file = args.token_file or settings.API_TOKEN_FILE
     checks["token_file"] = str(token_file) if token_file else None
@@ -545,6 +549,112 @@ def command_context(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def command_skill(settings: Settings, args: argparse.Namespace) -> int:
+    """Review immutable skill versions without starting the capture worker."""
+    from recall_mcp.continuity import ContinuityError
+    from recall_mcp.skills import SkillProposal, SkillScope, SkillService
+
+    service = SkillService(settings.DB_PATH, settings)
+    scope = SkillScope(
+        user_id=args.user_id or "",
+        workspace_id=args.workspace_id or "",
+        project_id=args.project_id or "",
+        repository_id=args.repository_id,
+    )
+    try:
+        if args.action in {"list", "stale"}:
+            result: object = {
+                "skills": service.list_skills(
+                    scope=scope,
+                    status="stale" if args.action == "stale" else args.status,
+                )
+            }
+        elif args.action == "propose":
+            if not all((args.slug, args.title, args.purpose, args.agent_id)):
+                raise ContinuityError(
+                    "propose requires --slug, --title, --purpose, and --agent-id"
+                )
+            sources: list[dict[str, object]] = [
+                {"source_type": "memory", "source_id": memory_id}
+                for memory_id in (args.memory_id or [])
+            ]
+            if args.source_ref and args.source_content:
+                sources.append(
+                    {
+                        "source_type": "repository",
+                        "source_id": args.repository_id,
+                        "source_ref": args.source_ref,
+                        "content": args.source_content,
+                    }
+                )
+            result = service.propose(
+                SkillProposal(
+                    scope=scope,
+                    slug=args.slug,
+                    title=args.title,
+                    purpose=args.purpose,
+                    created_by_agent_id=args.agent_id,
+                    sources=tuple(sources),
+                    summary=args.summary or "",
+                )
+            )
+        elif not args.skill_id:
+            raise ContinuityError("skill_id is required for this action")
+        elif args.action == "inspect":
+            result = service.get(args.skill_id, scope=scope, version=args.version)
+        elif args.action == "versions":
+            result = {
+                "skill_id": args.skill_id,
+                "versions": service.versions(args.skill_id, scope=scope),
+            }
+        elif args.action == "evidence":
+            skill = service.get(args.skill_id, scope=scope, version=args.version)
+            result = {
+                "skill_id": args.skill_id,
+                "version": skill["version"],
+                "evidence": service.evidence(
+                    args.skill_id, int(skill["version"]), scope=scope
+                ),
+            }
+        elif args.action == "approve":
+            if args.version is None or not args.reviewer_id:
+                raise ContinuityError("approve requires --version and --reviewer-id")
+            result = service.approve(
+                args.skill_id,
+                args.version,
+                scope=scope,
+                reviewer_id=args.reviewer_id,
+                reason=args.reason or "",
+            )
+        elif args.action == "reject":
+            if args.version is None or not args.reviewer_id or not args.reason:
+                raise ContinuityError(
+                    "reject requires --version, --reviewer-id, and --reason"
+                )
+            result = service.reject(
+                args.skill_id,
+                args.version,
+                scope=scope,
+                reviewer_id=args.reviewer_id,
+                reason=args.reason,
+            )
+        elif args.action == "refresh":
+            if not args.agent_id:
+                raise ContinuityError("refresh requires --agent-id")
+            result = service.refresh(
+                args.skill_id,
+                scope=scope,
+                created_by_agent_id=args.agent_id,
+            )
+        else:
+            raise ContinuityError("unsupported skill action")
+    except ContinuityError as exc:
+        print(json.dumps({"error": str(exc), "code": exc.code}))
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="recall-admin")
     parser.add_argument("--home", type=Path)
@@ -568,6 +678,38 @@ def build_parser() -> argparse.ArgumentParser:
     context = subparsers.add_parser("context")
     context.add_argument("action", choices=["inspect", "explain"])
     context.add_argument("context_pack_id")
+    skill = subparsers.add_parser("skill")
+    skill.add_argument(
+        "action",
+        choices=[
+            "list",
+            "inspect",
+            "versions",
+            "propose",
+            "approve",
+            "reject",
+            "refresh",
+            "evidence",
+            "stale",
+        ],
+    )
+    skill.add_argument("skill_id", nargs="?")
+    skill.add_argument("--version", type=int)
+    skill.add_argument("--user-id", required=True)
+    skill.add_argument("--workspace-id", required=True)
+    skill.add_argument("--project-id", required=True)
+    skill.add_argument("--repository-id")
+    skill.add_argument("--status")
+    skill.add_argument("--slug")
+    skill.add_argument("--title")
+    skill.add_argument("--purpose")
+    skill.add_argument("--summary")
+    skill.add_argument("--agent-id")
+    skill.add_argument("--reviewer-id")
+    skill.add_argument("--reason")
+    skill.add_argument("--memory-id", action="append")
+    skill.add_argument("--source-ref")
+    skill.add_argument("--source-content")
     models = subparsers.add_parser("models")
     models.add_argument("action", choices=["pull"])
     nats_parser = subparsers.add_parser("nats")
@@ -624,6 +766,8 @@ def main() -> None:
         code = command_utility(settings, args)
     elif args.command == "context":
         code = command_context(settings, args)
+    elif args.command == "skill":
+        code = command_skill(settings, args)
     elif args.command == "version":
         print(VERSION)
         code = 0

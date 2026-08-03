@@ -144,16 +144,18 @@ Exit gate:
 
 ## Phase 4 — Manually approved Recall Skills
 
+Status: **Complete**
+
 Build:
 
-- Canonical skill schema
-- Skill compiler
-- Skill source tracking
-- Immutable versions
-- Markdown and JSON renderers
-- Manual approval
-- Source-hash invalidation
-- Skill usage telemetry
+- [x] Canonical skill schema
+- [x] Skill compiler
+- [x] Skill source tracking
+- [x] Immutable versions
+- [x] Markdown and JSON renderers
+- [x] Manual approval
+- [x] Source-hash invalidation
+- [x] Skill usage telemetry
 
 Exit gate:
 

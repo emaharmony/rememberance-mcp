@@ -47,6 +47,7 @@ from typing import Mapping, Optional
 from recall_mcp.pipeline import MemoryPipeline
 from recall_mcp.continuity import ContinuityError
 from recall_mcp.context import CONTEXT_SCHEMA_VERSION, ContextPackRequest
+from recall_mcp.skills import SkillProposal, SkillScope
 from recall_mcp.api.security import (
     ServiceMetrics,
     SlidingWindowRateLimiter,
@@ -243,7 +244,13 @@ class APIError(Exception):
 def _continuity_status(error: ContinuityError) -> int:
     if error.code == "not_found":
         return 404
-    if error.code in {"idempotency_conflict", "scope_mismatch"}:
+    if error.code == "forbidden":
+        return 403
+    if error.code in {
+        "idempotency_conflict",
+        "scope_mismatch",
+        "invalid_transition",
+    }:
         return 409
     if error.code in {"service_unavailable", "telemetry_unavailable"}:
         return 503
@@ -261,6 +268,24 @@ def _scope(values: Mapping[str, object]) -> dict[str, str | None]:
             "task_id",
         )
     }
+
+
+def _skill_scope(values: Mapping[str, object]) -> SkillScope:
+    required: dict[str, str] = {}
+    for field in ("user_id", "workspace_id", "project_id"):
+        value = values.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ContinuityError(f"missing required skill scope: {field}")
+        required[field] = value.strip()
+    repository = values.get("repository_id")
+    return SkillScope(
+        **required,
+        repository_id=(
+            repository.strip()
+            if isinstance(repository, str) and repository.strip()
+            else None
+        ),
+    )
 
 
 def _required_text(body: dict, name: str, *, alias: str | None = None) -> str:
@@ -320,10 +345,15 @@ class RecallHandler(BaseHTTPRequestHandler):
                     self.pipeline.feedback_service.telemetry_stats()
                 )
                 probe["context_service"] = self.pipeline.context_service.health()
+                probe["skill_service"] = self.pipeline.skill_service.health()
                 ready = ready and bool(
                     probe["context_service"]["available"]
                     and probe["context_service"]["migration_available"]
                     and probe["context_service"]["feedback_linkage_healthy"]
+                )
+                ready = ready and bool(
+                    probe["skill_service"]["available"]
+                    and probe["skill_service"]["migration_current"]
                 )
                 ready = ready and bool(
                     outbox_worker["running"] and outbox_worker["thread_alive"]
@@ -435,6 +465,34 @@ class RecallHandler(BaseHTTPRequestHandler):
                     self.service_metrics.set_gauge(
                         f"recall_{metric}", float(str(context_stats[field]))
                     )
+                skill_stats = self.pipeline.skill_service.stats()
+                for metric, value in (
+                    ("skills_total", skill_stats["total"]),
+                    ("skill_versions_total", skill_stats["versions_total"]),
+                    (
+                        "skill_candidates_total",
+                        skill_stats["pending_approval"],
+                    ),
+                    ("skill_approvals_total", skill_stats["approvals_total"]),
+                    ("skill_rejections_total", skill_stats["rejections_total"]),
+                    ("skill_stale_total", skill_stats["stale"]),
+                    ("skill_refresh_total", skill_stats["refresh_total"]),
+                    (
+                        "skill_compile_failures_total",
+                        skill_stats["compile_failures_total"],
+                    ),
+                    (
+                        "skill_context_injections_total",
+                        skill_stats["context_injections_total"],
+                    ),
+                    (
+                        "skill_reference_expansions_total",
+                        skill_stats["reference_expansions_total"],
+                    ),
+                ):
+                    self.service_metrics.set_gauge(
+                        f"recall_{metric}", float(str(value))
+                    )
                 nats_sub = getattr(self.pipeline, "nats_sub", None)
                 if nats_sub is not None:
                     nats_health = nats_sub.health()
@@ -450,6 +508,89 @@ class RecallHandler(BaseHTTPRequestHandler):
             elif path == "/stats":
                 stats = self.pipeline.stats()
                 self._json_response(stats)
+
+            elif path == "/v2/skills":
+                values = {
+                    key: params.get(key, [None])[0]
+                    for key in (
+                        "user_id",
+                        "workspace_id",
+                        "project_id",
+                        "repository_id",
+                    )
+                }
+                self._json_response(
+                    {
+                        "skills": self.pipeline.skill_service.list_skills(
+                            scope=_skill_scope(values),
+                            status=params.get("status", [None])[0],
+                        )
+                    }
+                )
+
+            elif path.startswith("/v2/skills/"):
+                parts = path.split("/")
+                skill_id = parts[3]
+                values = {
+                    key: params.get(key, [None])[0]
+                    for key in (
+                        "user_id",
+                        "workspace_id",
+                        "project_id",
+                        "repository_id",
+                    )
+                }
+                skill_scope = _skill_scope(values)
+                if len(parts) == 5 and parts[4] == "versions":
+                    result = {
+                        "skill_id": skill_id,
+                        "versions": self.pipeline.skill_service.versions(
+                            skill_id, scope=skill_scope
+                        ),
+                    }
+                elif len(parts) == 6 and parts[4] == "versions":
+                    result = self.pipeline.skill_service.get(
+                        skill_id,
+                        scope=skill_scope,
+                        version=self._bounded_int(
+                            parts[5],
+                            default=1,
+                            minimum=1,
+                            maximum=2_147_483_647,
+                            name="version",
+                        ),
+                    )
+                elif len(parts) == 5 and parts[4] == "explain":
+                    version_value = params.get("version", [None])[0]
+                    result = self.pipeline.skill_service.explain(
+                        skill_id,
+                        scope=skill_scope,
+                        version=(int(version_value) if version_value else None),
+                    )
+                elif len(parts) == 5 and parts[4] == "evidence":
+                    version_value = params.get("version", [None])[0]
+                    skill = self.pipeline.skill_service.get(
+                        skill_id,
+                        scope=skill_scope,
+                        version=(int(version_value) if version_value else None),
+                    )
+                    result = {
+                        "skill_id": skill_id,
+                        "version": skill["version"],
+                        "evidence": self.pipeline.skill_service.evidence(
+                            skill_id, int(skill["version"]), scope=skill_scope
+                        ),
+                    }
+                elif len(parts) == 4:
+                    version_value = params.get("version", [None])[0]
+                    result = self.pipeline.skill_service.get(
+                        skill_id,
+                        scope=skill_scope,
+                        version=(int(version_value) if version_value else None),
+                    )
+                else:
+                    raise ContinuityError("skill route was not found", code="not_found")
+                self._json_response(result)
 
             elif path.startswith("/v2/tasks/") and len(path.split("/")) == 4:
                 task_id = path.split("/")[3]
@@ -815,6 +956,103 @@ class RecallHandler(BaseHTTPRequestHandler):
                 )
                 self._json_response(result, status=201)
 
+            elif path == "/v2/skills/propose":
+                sources = body.get("sources", [])
+                if not isinstance(sources, list) or not all(
+                    isinstance(item, dict) for item in sources
+                ):
+                    raise APIError("sources must be an array of objects")
+                result = self.pipeline.skill_service.propose(
+                    SkillProposal(
+                        scope=_skill_scope(body),
+                        slug=_required_text(body, "slug"),
+                        title=_required_text(body, "title"),
+                        purpose=_required_text(body, "purpose"),
+                        created_by_agent_id=_required_text(
+                            body, "created_by_agent_id", alias="agent_id"
+                        ),
+                        sources=tuple(sources),
+                        summary=str(body.get("summary") or ""),
+                        instructions=tuple(body.get("instructions") or ()),
+                        facts=tuple(body.get("facts") or ()),
+                        decisions=tuple(body.get("decisions") or ()),
+                        constraints=tuple(body.get("constraints") or ()),
+                        open_questions=tuple(body.get("open_questions") or ()),
+                        expires_at=body.get("expires_at"),
+                        retention_review_at=body.get("retention_review_at"),
+                        idempotency_key=body.get("idempotency_key"),
+                        compiler_model=body.get("compiler_model"),
+                        generated=bool(body.get("generated", False)),
+                    )
+                )
+                self._json_response(result, status=201)
+
+            elif path.startswith("/v2/skills/"):
+                parts = path.split("/")
+                skill_id = parts[3]
+                skill_scope = _skill_scope(body)
+                if (
+                    len(parts) == 7
+                    and parts[4] == "versions"
+                    and parts[6] in {"approve", "reject"}
+                ):
+                    version = self._bounded_int(
+                        parts[5],
+                        default=1,
+                        minimum=1,
+                        maximum=2_147_483_647,
+                        name="version",
+                    )
+                    if parts[6] == "approve":
+                        result = self.pipeline.skill_service.approve(
+                            skill_id,
+                            version,
+                            scope=skill_scope,
+                            reviewer_id=_required_text(body, "reviewer_id"),
+                            reason=str(body.get("reason") or ""),
+                            idempotency_key=body.get("idempotency_key"),
+                        )
+                    else:
+                        result = self.pipeline.skill_service.reject(
+                            skill_id,
+                            version,
+                            scope=skill_scope,
+                            reviewer_id=_required_text(body, "reviewer_id"),
+                            reason=_required_text(body, "reason"),
+                            idempotency_key=body.get("idempotency_key"),
+                        )
+                elif len(parts) == 5 and parts[4] == "refresh":
+                    overrides = body.get("sources")
+                    if overrides is not None and (
+                        not isinstance(overrides, list)
+                        or not all(isinstance(item, dict) for item in overrides)
+                    ):
+                        raise APIError("sources must be an array of objects")
+                    result = self.pipeline.skill_service.refresh(
+                        skill_id,
+                        scope=skill_scope,
+                        created_by_agent_id=_required_text(
+                            body, "created_by_agent_id", alias="agent_id"
+                        ),
+                        source_overrides=overrides,
+                    )
+                elif len(parts) == 5 and parts[4] == "feedback":
+                    result = self.pipeline.skill_service.record_usage(
+                        skill_id,
+                        int(body.get("version", 0)),
+                        scope=skill_scope,
+                        usage_type=_required_text(body, "usage_type"),
+                        agent_id=body.get("agent_id"),
+                        context_pack_id=body.get("context_pack_id"),
+                        task_id=body.get("task_id"),
+                        session_id=body.get("session_id"),
+                        metadata=body.get("metadata"),
+                        idempotency_key=body.get("idempotency_key"),
+                    )
+                else:
+                    raise ContinuityError("skill route was not found", code="not_found")
+                self._json_response(result)
+
             elif path == "/v2/sessions":
                 result = self.pipeline.session_service.start_session(
                     task_id=_required_text(body, "task_id"),
@@ -942,6 +1180,10 @@ class RecallHandler(BaseHTTPRequestHandler):
                     expanded_memory_ids=body.get("expanded_memory_ids", []),
                     corrected_memory_ids=body.get("corrected_memory_ids", []),
                     rejected_memory_ids=body.get("rejected_memory_ids", []),
+                    used_skill_versions=body.get("used_skill_versions", []),
+                    ignored_skill_versions=body.get("ignored_skill_versions", []),
+                    corrected_skill_versions=body.get("corrected_skill_versions", []),
+                    rejected_skill_versions=body.get("rejected_skill_versions", []),
                     idempotency_key=body.get("idempotency_key"),
                 )
                 self._json_response({"feedback": feedback_result}, status=201)

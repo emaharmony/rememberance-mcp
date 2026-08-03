@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from recall_mcp.continuity import ContinuityError, SessionService, TaskService
 from recall_mcp.feedback import RetrievalFeedbackService
 from recall_mcp.runtime import Settings
+from recall_mcp.skills import SkillScope, SkillService
 from recall_mcp.store.migrations import CURRENT_SCHEMA_VERSION, run_migrations
 
 
@@ -37,6 +38,7 @@ SUPPORTED_SECTIONS = {
     "work_state",
     "retrieval",
     "validation_requests",
+    "skills",
 }
 SUPPORTED_CAPABILITIES = {
     "structured_json",
@@ -44,6 +46,7 @@ SUPPORTED_CAPABILITIES = {
     "references",
     "session_delta",
     "expandable_evidence",
+    "skill_references",
 }
 
 SearchCallback = Callable[..., tuple[list[dict[str, Any]], str | None]]
@@ -193,6 +196,7 @@ class ContextPackService:
         session_service: SessionService,
         feedback_service: RetrievalFeedbackService,
         search: SearchCallback | None = None,
+        skill_service: SkillService | None = None,
     ):
         self.db_path = Path(db_path)
         self.settings = settings
@@ -200,6 +204,7 @@ class ContextPackService:
         self.session_service = session_service
         self.feedback_service = feedback_service
         self.search = search
+        self.skill_service = skill_service
         run_migrations(self.db_path)
         self.policy_version = settings.CONTEXT_POLICY_VERSION or CONTEXT_POLICY_VERSION
         self.estimator = TokenEstimator(settings.CONTEXT_TOKEN_ESTIMATOR_VERSION)
@@ -596,10 +601,12 @@ class ContextPackService:
         constraints: Mapping[str, Sequence[Mapping[str, object]]],
         work_state: Mapping[str, Sequence[object]],
         validation_requests: Sequence[Mapping[str, object]],
+        skills: Sequence[Mapping[str, Any]],
         memories: Sequence[Mapping[str, Any]],
         warnings: list[dict[str, object]],
     ) -> tuple[
         str,
+        list[dict[str, object]],
         list[dict[str, object]],
         list[dict[str, object]],
         list[dict[str, object]],
@@ -658,10 +665,15 @@ class ContextPackService:
         reference_limit = min(
             remaining, int(budget * self.budget_weights["references"])
         )
+        skill_limit = min(
+            remaining,
+            int(budget * self.settings.SKILL_CONTEXT_BUDGET_RATIO),
+        )
         retrieval_limit = min(
-            max(0, remaining - reference_limit),
+            max(0, remaining - reference_limit - skill_limit),
             int(budget * self.budget_weights["retrieval"]),
         )
+        skill_used = 0
         retrieval_used = 0
         reference_used = 0
         omitted_tokens = 0
@@ -673,9 +685,111 @@ class ContextPackService:
         persistence_items: list[dict[str, object]] = []
         references: list[dict[str, object]] = []
         omissions: list[dict[str, object]] = []
+        skill_items: list[dict[str, object]] = []
         supports_references = not request.client_capabilities or bool(
             {"references", "expandable_evidence"} & set(request.client_capabilities)
         )
+        supports_skill_references = supports_references or bool(
+            {"skill_references"} & set(request.client_capabilities)
+        )
+        for position, skill in enumerate(skills, start=1):
+            skill_id = str(skill["id"])
+            version = int(skill["version"])
+            markdown = str(skill.get("content_markdown") or "")
+            summary = str(skill.get("summary") or skill.get("purpose") or "")
+            full_tokens = self.estimator.estimate_text(markdown)
+            summary_tokens = self.estimator.estimate_text(summary)
+            reasons = ["scope_valid", "approved", "fresh", "task_relevant"]
+            disposition = "omitted"
+            if (
+                full_tokens <= self.settings.CONTEXT_INLINE_EVIDENCE_MAX_TOKENS
+                and skill_used + full_tokens <= skill_limit
+            ):
+                disposition = "inline"
+                skill_used += full_tokens
+                reasons.append("within_skill_budget")
+                inline_blocks.append(
+                    f"## Recall Skill {skill_id}@{version}\n{markdown.strip()}"
+                )
+            elif summary and skill_used + summary_tokens <= skill_limit:
+                disposition = "summary"
+                skill_used += summary_tokens
+                reasons.append("summary_within_skill_budget")
+                inline_blocks.append(f"## Recall Skill {skill_id}@{version}\n{summary}")
+            else:
+                preview = {
+                    "type": "skill",
+                    "title": str(skill.get("title") or skill_id),
+                    "summary": summary[:500],
+                }
+                preview_tokens = self.estimator.estimate(preview)
+                if (
+                    supports_skill_references
+                    and reference_used + preview_tokens <= reference_limit
+                ):
+                    disposition = "reference"
+                    reference_used += preview_tokens
+                    reasons.append("deferred_skill_reference")
+                    reference_id = (
+                        "skill_ref_"
+                        + hashlib.sha256(
+                            f"{skill_id}@{version}".encode("utf-8")
+                        ).hexdigest()[:24]
+                    )
+                    references.append(
+                        {
+                            "reference_id": reference_id,
+                            "memory_id": None,
+                            "type": "skill",
+                            "title": preview["title"],
+                            "summary": preview["summary"],
+                            "estimated_tokens": full_tokens,
+                            "expandable": True,
+                            "source": {
+                                "skill_id": skill_id,
+                                "skill_version": version,
+                                "source_fingerprint": skill["source_fingerprint"],
+                            },
+                            "trust": {
+                                "authority": "approved_project_skill",
+                                "verification": "manually_approved",
+                            },
+                            "freshness": {"stale": False},
+                            "content": {
+                                "skill_id": skill_id,
+                                "skill_version": version,
+                                "content_markdown": markdown,
+                            },
+                        }
+                    )
+                else:
+                    reasons.append("budget_exhausted")
+                    omitted_tokens += full_tokens
+                    omissions.append(
+                        {
+                            "type": "skill",
+                            "id": skill_id,
+                            "version": version,
+                            "estimated_tokens": full_tokens,
+                            "reason": "budget_exhausted",
+                        }
+                    )
+            skill_items.append(
+                {
+                    "id": skill_id,
+                    "version": version,
+                    "status": "approved",
+                    "title": skill.get("title"),
+                    "purpose": skill.get("purpose"),
+                    "delivery": disposition,
+                    "token_estimate": full_tokens,
+                    "expandable": disposition == "reference",
+                    "content_hash": skill["content_hash"],
+                    "source_fingerprint": skill["source_fingerprint"],
+                    "position": position,
+                    "reasons": reasons,
+                }
+            )
         seen_text: set[str] = set()
         category_counts: dict[str, int] = {}
         for position, memory in enumerate(memories, start=1):
@@ -808,13 +922,18 @@ class ContextPackService:
                 }
             )
         estimated_total = (
-            mandatory_tokens + continuity_tokens + retrieval_used + reference_used
+            mandatory_tokens
+            + continuity_tokens
+            + skill_used
+            + retrieval_used
+            + reference_used
         )
         token_usage = {
             "budget": budget,
             "estimated_total": estimated_total,
             "mandatory_tokens": mandatory_tokens,
             "continuity_tokens": continuity_tokens,
+            "skill_tokens": skill_used,
             "retrieval_tokens": retrieval_used,
             "reference_tokens": reference_used,
             "reserve_tokens": reserve,
@@ -825,6 +944,7 @@ class ContextPackService:
             result_items,
             persistence_items,
             references,
+            skill_items,
             token_usage,
             omissions,
         )
@@ -836,6 +956,7 @@ class ContextPackService:
         task: Mapping[str, Any] | None,
         session: Mapping[str, object] | None,
         checkpoint: Mapping[str, Any],
+        skills: Sequence[Mapping[str, Any]],
         memories: Sequence[Mapping[str, Any]],
     ) -> str:
         source = {
@@ -862,6 +983,14 @@ class ContextPackService:
                 }
                 for memory in memories
             ],
+            "skills": [
+                {
+                    "id": skill["id"],
+                    "version": skill["version"],
+                    "source_fingerprint": skill["source_fingerprint"],
+                }
+                for skill in skills
+            ],
             "repository": {"branch": request.branch, "commit_sha": request.commit_sha},
             "policies": {
                 "context": self.policy_version,
@@ -877,6 +1006,7 @@ class ContextPackService:
         *,
         scope: Mapping[str, str | None],
         items: Sequence[Mapping[str, object]],
+        skills: Sequence[Mapping[str, object]],
         token_usage: Mapping[str, int],
         warnings: Sequence[Mapping[str, object]],
         omissions: Sequence[Mapping[str, object]],
@@ -888,6 +1018,7 @@ class ContextPackService:
                 "critical_constraints": "protected mandatory policy",
                 "session": "compact checkpoint and requested delta",
                 "retrieval": "scope-filtered evidence in production rank order",
+                "skills": "approved, fresh, scope-filtered reusable guidance",
             },
             "retrieval_items": [
                 {
@@ -896,6 +1027,15 @@ class ContextPackService:
                     "reasons": item["reasons"],
                 }
                 for item in items
+            ],
+            "skill_items": [
+                {
+                    "skill_id": item["id"],
+                    "version": item["version"],
+                    "delivery": item["delivery"],
+                    "reasons": item["reasons"],
+                }
+                for item in skills
             ],
             "scope_filters": {
                 key: value
@@ -981,6 +1121,33 @@ class ContextPackService:
             ).strip()
             if not objective:
                 raise ContinuityError("objective must be a non-empty string")
+            skills: list[dict[str, Any]] = []
+            if self.skill_service is not None and all(
+                scope.get(field) for field in ("user_id", "workspace_id", "project_id")
+            ):
+                skill_scope = SkillScope(
+                    user_id=str(scope["user_id"]),
+                    workspace_id=str(scope["workspace_id"]),
+                    project_id=str(scope["project_id"]),
+                    repository_id=scope.get("repository_id"),
+                )
+                skills = self.skill_service.select_for_context(
+                    scope=skill_scope,
+                    objective=objective,
+                    token_limit=request.max_tokens
+                    or self.settings.CONTEXT_DEFAULT_MAX_TOKENS,
+                )
+                stale_skills = self.skill_service.list_skills(
+                    scope=skill_scope, status="stale"
+                )
+                if stale_skills:
+                    warnings.append(
+                        self._warning(
+                            "stale_skills_excluded",
+                            "Stale skills were excluded; underlying evidence remains available.",
+                            count=len(stale_skills),
+                        )
+                    )
             results, retrieval_run_id = self.search(
                 query=objective,
                 category=None,
@@ -1048,6 +1215,7 @@ class ContextPackService:
                 retrieval_items,
                 persistence_items,
                 references,
+                skill_items,
                 token_usage,
                 omissions,
             ) = self._allocate(
@@ -1058,6 +1226,7 @@ class ContextPackService:
                 constraints=constraints,
                 work_state=work_state,
                 validation_requests=validation_requests,
+                skills=skills,
                 memories=memories,
                 warnings=warnings,
             )
@@ -1066,6 +1235,7 @@ class ContextPackService:
                 task=task,
                 session=session,
                 checkpoint=checkpoint,
+                skills=skills,
                 memories=memories,
             )
             stale_reason = None
@@ -1121,6 +1291,7 @@ class ContextPackService:
                     "referenced_memory_ids": referenced_ids,
                     "omitted_memory_ids": omitted_ids,
                 },
+                "skills": skill_items,
                 "inline_context": inline_context,
                 "references": [
                     {key: value for key, value in reference.items() if key != "content"}
@@ -1140,6 +1311,7 @@ class ContextPackService:
             explanation = self._explanation(
                 scope=scope,
                 items=persistence_items,
+                skills=skill_items,
                 token_usage=token_usage,
                 warnings=warnings,
                 omissions=omissions,
@@ -1163,6 +1335,7 @@ class ContextPackService:
                 idempotency_key=request.idempotency_key,
                 items=persistence_items,
                 references=references,
+                skills=skill_items,
             )
             if persisted_id != pack_id:
                 return self.get(persisted_id, scope)
@@ -1264,6 +1437,27 @@ class ContextPackService:
                 idempotency_key=idempotency_key
                 or f"expand:{reference_id}:{agent_id or 'anonymous'}",
             )
+        elif row["type"] == "skill" and self.skill_service is not None:
+            content = json.loads(row["content_json"])
+            skill_scope = SkillScope(
+                user_id=str(scope["user_id"]),
+                workspace_id=str(scope["workspace_id"]),
+                project_id=str(scope["project_id"]),
+                repository_id=scope.get("repository_id"),
+            )
+            self.skill_service.record_usage(
+                str(content["skill_id"]),
+                int(content["skill_version"]),
+                scope=skill_scope,
+                usage_type="expanded",
+                agent_id=agent_id,
+                context_pack_id=context_pack_id,
+                task_id=scope.get("task_id"),
+                session_id=scope.get("session_id"),
+                metadata={"reference_id": reference_id},
+                idempotency_key=idempotency_key
+                or f"expand:{reference_id}:{agent_id or 'anonymous'}",
+            )
         return {
             "reference_id": reference_id,
             "context_pack_id": context_pack_id,
@@ -1289,13 +1483,17 @@ class ContextPackService:
         expanded_memory_ids: Sequence[str] = (),
         corrected_memory_ids: Sequence[str] = (),
         rejected_memory_ids: Sequence[str] = (),
+        used_skill_versions: Sequence[Mapping[str, object]] = (),
+        ignored_skill_versions: Sequence[Mapping[str, object]] = (),
+        corrected_skill_versions: Sequence[Mapping[str, object]] = (),
+        rejected_skill_versions: Sequence[Mapping[str, object]] = (),
         idempotency_key: str | None = None,
     ) -> list[dict[str, object]]:
         """Scope-check a pack, then delegate feedback to the Phase 2 service."""
         metadata = self.inspect(context_pack_id)
         if metadata["schema_version"] == 2 and metadata["scope_required"]:
             self.get(context_pack_id, scope)
-        return self.feedback_service.record_feedback(
+        results = self.feedback_service.record_feedback(
             context_pack_id=context_pack_id,
             agent_id=agent_id,
             used_memory_ids=used_memory_ids,
@@ -1305,6 +1503,58 @@ class ContextPackService:
             rejected_memory_ids=rejected_memory_ids,
             idempotency_key=idempotency_key,
         )
+        skill_groups = (
+            ("used", used_skill_versions),
+            ("ignored", ignored_skill_versions),
+            ("corrected", corrected_skill_versions),
+            ("rejected", rejected_skill_versions),
+        )
+        if any(values for _usage_type, values in skill_groups):
+            if self.skill_service is None:
+                raise ContinuityError(
+                    "skill feedback is unavailable", code="service_unavailable"
+                )
+            skill_scope = SkillScope(
+                user_id=str(scope["user_id"]),
+                workspace_id=str(scope["workspace_id"]),
+                project_id=str(scope["project_id"]),
+                repository_id=scope.get("repository_id"),
+            )
+            for usage_type, values in skill_groups:
+                for item in values:
+                    skill_id = str(item.get("id") or item.get("skill_id") or "")
+                    version = int(
+                        str(item.get("version") or item.get("skill_version") or 0)
+                    )
+                    if not skill_id or version < 1:
+                        raise ContinuityError(
+                            "skill feedback requires id and positive version"
+                        )
+                    usage = self.skill_service.record_usage(
+                        skill_id,
+                        version,
+                        scope=skill_scope,
+                        usage_type=usage_type,
+                        agent_id=agent_id,
+                        context_pack_id=context_pack_id,
+                        task_id=scope.get("task_id"),
+                        session_id=scope.get("session_id"),
+                        idempotency_key=(
+                            f"{idempotency_key}:{usage_type}:{skill_id}@{version}"
+                            if idempotency_key
+                            else None
+                        ),
+                    )
+                    results.append(
+                        {
+                            "type": "skill",
+                            "skill_id": skill_id,
+                            "version": version,
+                            "usage_type": usage_type,
+                            **usage,
+                        }
+                    )
+        return results
 
     def inspect(self, context_pack_id: str, *, explain: bool = False) -> dict[str, Any]:
         """Return local-admin diagnostics without captured text."""

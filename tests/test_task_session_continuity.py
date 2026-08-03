@@ -49,8 +49,8 @@ def test_current_migration_is_fresh_and_idempotent(tmp_path):
     db_path = tmp_path / "memory.db"
     first = run_migrations(db_path)
     repeated = run_migrations(db_path)
-    assert first.to_version == CURRENT_SCHEMA_VERSION == 8
-    assert repeated.from_version == repeated.to_version == 8
+    assert first.to_version == CURRENT_SCHEMA_VERSION == 9
+    assert repeated.from_version == repeated.to_version == 9
     assert repeated.applied == ()
     with sqlite3.connect(db_path) as conn:
         tables = {
@@ -72,14 +72,14 @@ def test_current_migration_is_fresh_and_idempotent(tmp_path):
     } <= tables
 
 
-@pytest.mark.parametrize("baseline", range(1, 8))
+@pytest.mark.parametrize("baseline", range(1, 9))
 def test_current_migration_upgrades_every_supported_baseline(tmp_path, baseline):
     db_path = tmp_path / f"baseline-{baseline}.db"
     run_migrations(db_path, MIGRATIONS[:baseline])
     upgraded = run_migrations(db_path)
     assert upgraded.from_version == baseline
-    assert upgraded.to_version == 8
-    assert [item.version for item in upgraded.applied] == list(range(baseline + 1, 9))
+    assert upgraded.to_version == 9
+    assert [item.version for item in upgraded.applied] == list(range(baseline + 1, 10))
 
 
 def test_task_create_read_update_complete_and_idempotency(services):
