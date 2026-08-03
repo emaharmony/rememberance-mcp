@@ -730,12 +730,20 @@ class TestContextPackV2Endpoints:
             "/v1/context/build",
             {
                 "task": "context marker",
-                "project_id": "context-project",
+                "user_id": task["user_id"],
+                "workspace_id": task["workspace_id"],
+                "project_id": task["project_id"],
+                "repository_id": task["repository_id"],
+                "task_id": task["id"],
+                "session_id": session["id"],
                 "agent_id": "prism",
-                "max_tokens": 1000,
+                "formal_agent_id": "codex",
+                "max_tokens": 3000,
             },
         )
         assert status == 200
         assert "context_markdown" in v1
         assert v1["context_pack_id"]
         assert v1["schema_version"] == 2
+        assert memory_id in v1["selected_memories"]
+        assert "Deferred evidence references" in v1["context_markdown"]

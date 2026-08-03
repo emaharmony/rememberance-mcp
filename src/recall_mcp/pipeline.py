@@ -678,8 +678,8 @@ class MemoryPipeline:
                 known_checkpoint_version=known_checkpoint_version,
                 retrieval_limit=limit,
                 include_cold=include_cold,
-                legacy_project=project,
-                legacy_agent=agent,
+                legacy_project=project if task_id is None else None,
+                legacy_agent=agent if task_id is None else None,
                 idempotency_key=retrieval_idempotency_key,
                 compatibility_mode=True,
             )

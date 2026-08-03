@@ -180,6 +180,23 @@ def _build_context_pack(
         lines.append("")
 
     markdown = ctx.get("inline_context") or "\n".join(lines).strip()
+    references = ctx.get("references", []) or []
+    if ctx.get("inline_context") and references:
+        reference_lines = ["## Deferred evidence references"]
+        for reference in references:
+            reference_lines.append(
+                f"- {reference.get('title', reference.get('reference_id', 'reference'))}: "
+                f"{reference.get('summary', '')}"
+            )
+        markdown = markdown + "\n\n" + "\n".join(reference_lines)
+    selected_ids = list(
+        dict.fromkeys(
+            [
+                *selected_ids,
+                *(ctx.get("retrieval") or {}).get("selected_memory_ids", []),
+            ]
+        )
+    )
     token_usage = ctx.get("token_usage") or {}
     token_count = int(token_usage.get("estimated_total", 0))
 
@@ -211,7 +228,7 @@ def _build_context_pack(
             "latest_checkpoint_version"
         ),
         "validation_requests": ctx.get("validation_requests", []),
-        "references": ctx.get("references", []),
+        "references": references,
         "source_fingerprint": (ctx.get("freshness") or {}).get("source_fingerprint"),
         "schema_version": ctx.get("schema_version", 1),
     }
