@@ -40,6 +40,7 @@ from recall_mcp.continuity import (
     SessionService,
     TaskService,
 )
+from recall_mcp.context import ContextPackRequest, ContextPackService
 from recall_mcp.gate import GateDecision
 from recall_mcp.registry import build_gate_chain
 from recall_mcp.extract import OllamaExtractor, StubExtractor, BaseExtractor
@@ -165,6 +166,14 @@ class MemoryPipeline:
             entity_store=self.entity_store,
             embedding_provider=self.embedding_provider,
             fact_store=self.fact_store,
+        )
+        self.context_service = ContextPackService(
+            self.settings.DB_PATH,
+            self.settings,
+            self.task_service,
+            self.session_service,
+            self.feedback_service,
+            self._search_with_telemetry,
         )
 
         # ── V2: Dream Cycle ──────────────────────────────────
@@ -654,129 +663,68 @@ class MemoryPipeline:
         include_cold: bool = False,
         retrieval_idempotency_key: Optional[str] = None,
     ) -> dict:
-        """
-        Build context for a task using hybrid search + graph traversal.
-
-        This is what agents call before working on a task.
-        Returns relevant memories, entities, and open threads.
-        """
-        active_task = None
-        latest_checkpoint = None
-        session_delta = None
-        warnings: list[str] = []
-        if task_id is not None:
-            active_task = self.task_service.get_task(
-                task_id,
+        """Build through Context Pack V2 and adapt the result for V1 callers."""
+        pack = self.build_context_v2(
+            ContextPackRequest(
                 user_id=user_id,
+                workspace_id=workspace_id,
                 project_id=project_id,
                 repository_id=repository_id,
+                task_id=task_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                objective=task,
+                max_tokens=token_budget,
+                known_checkpoint_version=known_checkpoint_version,
+                retrieval_limit=limit,
+                include_cold=include_cold,
+                legacy_project=project,
+                legacy_agent=agent,
+                idempotency_key=retrieval_idempotency_key,
+                compatibility_mode=True,
             )
-            if workspace_id is not None and active_task["workspace_id"] != workspace_id:
-                raise ContinuityError(
-                    "task is outside the requested scope", code="not_found"
-                )
-            user_id = active_task["user_id"]
-            workspace_id = active_task["workspace_id"]
-            project_id = active_task["project_id"]
-            repository_id = active_task["repository_id"]
-            if not task.strip():
-                task = active_task["objective"]
-        if session_id is not None:
-            session = self.session_service.get_session(session_id)
-            if task_id is None:
-                task_id = session["task_id"]
-                active_task = self.task_service.get_task(
-                    task_id,
-                    user_id=user_id,
-                    project_id=project_id,
-                    repository_id=repository_id,
-                )
-                user_id = active_task["user_id"]
-                workspace_id = active_task["workspace_id"]
-                project_id = active_task["project_id"]
-                repository_id = active_task["repository_id"]
-                if not task.strip():
-                    task = active_task["objective"]
-            elif session["task_id"] != task_id:
-                raise ContinuityError(
-                    "session is outside the requested task", code="scope_mismatch"
-                )
-            latest_checkpoint = session.get("checkpoint")
-            if known_checkpoint_version is not None:
-                session_delta = self.session_service.get_delta(
-                    session_id,
-                    known_version=known_checkpoint_version,
-                    agent_id=agent_id,
-                )
-        if not task.strip():
-            raise ValueError("task must be a non-empty string")
-        results, retrieval_run_id = self._search_with_telemetry(
-            query=task,
-            category=None,
-            tier=None,
-            limit=limit,
-            mode="balanced",
-            project=project,
-            agent=agent,
-            user_id=user_id,
-            workspace_id=workspace_id,
-            project_id=project_id,
-            repository_id=repository_id,
-            task_id=task_id,
-            session_id=session_id,
-            agent_id=agent_id,
-            include_cold=include_cold,
-            retrieval_idempotency_key=retrieval_idempotency_key,
         )
-        context = self.hybrid_search.build_context(
-            query=task,
-            project=project,
-            agent=agent,
-            limit=limit,
-            user_id=user_id,
-            workspace_id=workspace_id,
-            project_id=project_id,
-            repository_id=repository_id,
-            task_id=task_id,
-            session_id=session_id,
-            include_cold=include_cold,
-            results=results,
-        )
-        context["retrieval_run_id"] = retrieval_run_id
-        context["context_pack_id"] = None
-        if retrieval_run_id is not None:
-            try:
-                estimated_tokens = sum(
-                    len(str(result.get("summary") or result.get("content") or "")) // 4
-                    for result in results
-                )
-                context["context_pack_id"] = self.feedback_service.create_context_pack(
-                    retrieval_run_id,
-                    task_id=task_id,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    token_budget=token_budget,
-                    estimated_tokens=estimated_tokens,
-                )
-            except Exception as exc:
-                self.feedback_service.record_error(exc)
-                logger.exception("Context-pack telemetry failed")
-        if active_task is not None:
-            context["active_task"] = active_task
-        if session_id is not None:
-            context["latest_checkpoint"] = latest_checkpoint
-            context["session_delta"] = session_delta
-            checkpoint = latest_checkpoint or {}
-            context["approved_decisions"] = checkpoint.get("approved_decisions", [])
-            context["critical_constraints"] = checkpoint.get("constraints", [])
-            context["open_blockers"] = checkpoint.get("blockers", [])
-            context["open_questions"] = checkpoint.get("open_questions", [])
+        retrieval = pack["retrieval"]
+        session = pack.get("session") or {}
+        decisions = pack.get("decisions") or {}
+        constraints = pack.get("constraints") or {}
+        work_state = pack.get("work_state") or {}
+        legacy_warnings = [
+            str(warning.get("message", warning))
+            if isinstance(warning, dict)
+            else str(warning)
+            for warning in pack.get("warnings", [])
+        ]
         if any((user_id, workspace_id, project_id, repository_id, task_id, session_id)):
-            warnings.append(
+            legacy_warnings.append(
                 "Global graph synthesis is omitted for formally scoped context."
             )
-        context["warnings"] = [*context.get("warnings", []), *warnings]
-        return context
+        return {
+            **pack,
+            "query": task,
+            "project": project,
+            "agent": agent,
+            "memories": retrieval["results"],
+            "entities": [],
+            "open_threads": [],
+            "total_results": len(retrieval["results"]),
+            "retrieval_run_id": retrieval["retrieval_run_id"],
+            "latest_checkpoint": session.get("checkpoint"),
+            "session_delta": session.get("delta"),
+            "approved_decisions": [
+                item.get("value") for item in decisions.get("approved", [])
+            ],
+            "critical_constraints": [
+                item.get("value") for item in constraints.get("critical", [])
+            ],
+            "open_blockers": work_state.get("blockers", []),
+            "open_questions": work_state.get("open_questions", []),
+            "warnings": legacy_warnings,
+        }
+
+    def build_context_v2(self, request: ContextPackRequest) -> dict:
+        """Build the canonical provider-neutral context response."""
+        return self.context_service.build(request)
 
     def graph_query(
         self, entity_name: str, depth: int = 1, edge_types: Optional[list[str]] = None
@@ -821,6 +769,7 @@ class MemoryPipeline:
             "operational": self.store.operational_stats(),
             "outbox_worker": self.outbox_dispatcher.health(),
             "retrieval_feedback": self.feedback_service.telemetry_stats(),
+            "context_packs": self.context_service.stats(),
             "entities": self.entity_store.stats(),
             "facts": self.fact_store.stats(),
             "v2": self.store_v2.v2_stats(),

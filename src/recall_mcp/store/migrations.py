@@ -1015,6 +1015,112 @@ def _migration_retrieval_utility(conn: sqlite3.Connection) -> None:
         _require_columns(conn, table, columns)
 
 
+def _migration_context_pack_v2(conn: sqlite3.Connection) -> None:
+    """Extend Phase 2 context-pack identities with reproducible V2 snapshots."""
+    _add_columns(
+        conn,
+        "context_packs",
+        {
+            "schema_version": "INTEGER NOT NULL DEFAULT 1",
+            "policy_version": "TEXT NOT NULL DEFAULT 'context-v1'",
+            "token_estimator_version": "TEXT NOT NULL DEFAULT 'chars-v1'",
+            "user_id": "TEXT",
+            "workspace_id": "TEXT",
+            "project_id": "TEXT",
+            "repository_id": "TEXT",
+            "request_json": "TEXT NOT NULL DEFAULT '{}'",
+            "request_digest": "TEXT NOT NULL DEFAULT ''",
+            "pack_json": "TEXT NOT NULL DEFAULT '{}'",
+            "explanation_json": "TEXT NOT NULL DEFAULT '{}'",
+            "source_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "expires_at": "REAL",
+            "idempotency_key": "TEXT",
+            "build_latency_ms": "REAL NOT NULL DEFAULT 0.0",
+        },
+    )
+    _execute_statements(
+        conn,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packs_idempotency
+        ON context_packs(agent_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_context_packs_scope_created
+        ON context_packs(user_id, project_id, repository_id, task_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS context_pack_items (
+            context_pack_id TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            disposition TEXT NOT NULL CHECK(disposition IN (
+                'inline', 'summary', 'reference', 'omitted'
+            )),
+            position INTEGER NOT NULL CHECK(position >= 1),
+            estimated_tokens INTEGER NOT NULL CHECK(estimated_tokens >= 0),
+            reason_json TEXT NOT NULL DEFAULT '[]',
+            trust_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (context_pack_id, memory_id),
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_context_pack_items_disposition
+        ON context_pack_items(context_pack_id, disposition, position);
+
+        CREATE TABLE IF NOT EXISTS context_pack_references (
+            id TEXT NOT NULL,
+            context_pack_id TEXT NOT NULL,
+            memory_id TEXT,
+            type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            estimated_tokens INTEGER NOT NULL CHECK(estimated_tokens >= 0),
+            expandable INTEGER NOT NULL DEFAULT 1 CHECK(expandable IN (0, 1)),
+            source_json TEXT NOT NULL DEFAULT '{}',
+            trust_json TEXT NOT NULL DEFAULT '{}',
+            freshness_json TEXT NOT NULL DEFAULT '{}',
+            content_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            PRIMARY KEY(context_pack_id, id),
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_context_pack_references_pack
+        ON context_pack_references(context_pack_id, id);
+        """,
+    )
+    _require_columns(
+        conn,
+        "context_packs",
+        {
+            "schema_version",
+            "policy_version",
+            "token_estimator_version",
+            "request_json",
+            "pack_json",
+            "explanation_json",
+            "source_fingerprint",
+            "idempotency_key",
+        },
+    )
+    for table, columns in {
+        "context_pack_items": {
+            "context_pack_id",
+            "memory_id",
+            "disposition",
+            "position",
+        },
+        "context_pack_references": {
+            "id",
+            "context_pack_id",
+            "memory_id",
+            "content_json",
+        },
+    }.items():
+        _require_columns(conn, table, columns)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_memory", _migration_core_memory),
     Migration(2, "memory_v2", _migration_memory_v2),
@@ -1023,6 +1129,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(5, "transactional_outbox", _migration_transactional_outbox),
     Migration(6, "task_session_continuity", _migration_task_session_continuity),
     Migration(7, "retrieval_utility", _migration_retrieval_utility),
+    Migration(8, "context_pack_v2", _migration_context_pack_v2),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
 

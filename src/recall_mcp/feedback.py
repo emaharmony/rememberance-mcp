@@ -797,6 +797,246 @@ class RetrievalFeedbackService:
                 )
             return pack_id
 
+    def persist_context_pack_v2(
+        self,
+        *,
+        pack_id: str,
+        retrieval_run_id: str,
+        scope: Mapping[str, str | None],
+        request: Mapping[str, object],
+        request_digest: str,
+        pack: Mapping[str, object],
+        explanation: Mapping[str, object],
+        source_fingerprint: str,
+        policy_version: str,
+        token_estimator_version: str,
+        token_budget: int,
+        estimated_tokens: int,
+        expires_at: float,
+        build_latency_ms: float,
+        idempotency_key: str | None,
+        items: Sequence[Mapping[str, object]],
+        references: Sequence[Mapping[str, object]],
+    ) -> str:
+        """Persist a V2 pack and its Phase 2 usage linkage atomically."""
+        now = time.time()
+        try:
+            with self._connect(immediate=True) as conn:
+                run = conn.execute(
+                    "SELECT * FROM retrieval_runs WHERE id = ?",
+                    (retrieval_run_id,),
+                ).fetchone()
+                if run is None:
+                    raise ContinuityError(
+                        "retrieval run was not found", code="not_found"
+                    )
+                for field in (
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                    "session_id",
+                    "agent_id",
+                ):
+                    if scope.get(field) != run[field]:
+                        raise ContinuityError(
+                            "context pack scope does not match its retrieval run",
+                            code="scope_mismatch",
+                        )
+                if idempotency_key:
+                    existing = conn.execute(
+                        """
+                        SELECT id, request_digest FROM context_packs
+                        WHERE agent_id IS ? AND idempotency_key = ?
+                        """,
+                        (scope.get("agent_id"), idempotency_key),
+                    ).fetchone()
+                    if existing:
+                        if str(existing["request_digest"]) != request_digest:
+                            raise ContinuityError(
+                                "idempotency key was reused with a different request",
+                                code="idempotency_conflict",
+                            )
+                        return str(existing["id"])
+                existing_run = conn.execute(
+                    "SELECT id FROM context_packs WHERE retrieval_run_id = ?",
+                    (retrieval_run_id,),
+                ).fetchone()
+                if existing_run:
+                    return str(existing_run["id"])
+
+                conn.execute(
+                    """
+                    INSERT INTO context_packs (
+                        id, retrieval_run_id, task_id, session_id, agent_id,
+                        token_budget, estimated_tokens, created_at,
+                        schema_version, policy_version, token_estimator_version,
+                        user_id, workspace_id, project_id, repository_id,
+                        request_json, request_digest, pack_json, explanation_json,
+                        source_fingerprint, expires_at, idempotency_key,
+                        build_latency_ms
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        pack_id,
+                        retrieval_run_id,
+                        scope.get("task_id"),
+                        scope.get("session_id"),
+                        scope.get("agent_id"),
+                        token_budget,
+                        max(0, estimated_tokens),
+                        now,
+                        policy_version,
+                        token_estimator_version,
+                        scope.get("user_id"),
+                        scope.get("workspace_id"),
+                        scope.get("project_id"),
+                        scope.get("repository_id"),
+                        _json(request),
+                        request_digest,
+                        _json(pack),
+                        _json(explanation),
+                        source_fingerprint,
+                        expires_at,
+                        idempotency_key,
+                        max(0.0, build_latency_ms),
+                    ),
+                )
+                run_memory_ids = {
+                    str(row["memory_id"])
+                    for row in conn.execute(
+                        """
+                        SELECT memory_id FROM retrieval_results
+                        WHERE retrieval_run_id = ?
+                        """,
+                        (retrieval_run_id,),
+                    ).fetchall()
+                }
+                item_memory_ids = {str(item["memory_id"]) for item in items}
+                if item_memory_ids != run_memory_ids:
+                    raise ContinuityError(
+                        "context pack items do not match retrieval results",
+                        code="invalid_context_pack",
+                    )
+                selected_ids: list[str] = []
+                injected_ids: list[str] = []
+                for item in items:
+                    memory_id = str(item["memory_id"])
+                    disposition = str(item["disposition"])
+                    conn.execute(
+                        """
+                        INSERT INTO context_pack_items (
+                            context_pack_id, memory_id, disposition, position,
+                            estimated_tokens, reason_json, trust_json,
+                            provenance_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            pack_id,
+                            memory_id,
+                            disposition,
+                            int(str(item["position"])),
+                            max(0, int(str(item["estimated_tokens"]))),
+                            _json(item.get("reasons", [])),
+                            _json(item.get("trust", {})),
+                            _json(item.get("provenance", {})),
+                        ),
+                    )
+                    usages = ["returned"]
+                    if disposition in {"inline", "summary", "reference"}:
+                        selected_ids.append(memory_id)
+                        usages.append("selected")
+                    if disposition in {"inline", "summary"}:
+                        injected_ids.append(memory_id)
+                        usages.append("injected")
+                    for usage_type in usages:
+                        conn.execute(
+                            """
+                            INSERT INTO context_usage (
+                                id, context_pack_id, memory_id, agent_id,
+                                usage_type, created_at, metadata_json,
+                                idempotency_key
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                _id("usage"),
+                                pack_id,
+                                memory_id,
+                                scope.get("agent_id"),
+                                usage_type,
+                                now,
+                                _json({"disposition": disposition}),
+                                f"system:{usage_type}:{memory_id}",
+                            ),
+                        )
+                        if usage_type in {"selected", "injected"}:
+                            self._apply_usage_timestamp(
+                                conn,
+                                memory_id,
+                                usage_type,
+                                now=now,
+                                successful=False,
+                            )
+                            self._persist_utility(
+                                conn,
+                                memory_id,
+                                reason=f"context.{usage_type}",
+                                now=now,
+                            )
+                if selected_ids:
+                    placeholders = ",".join("?" for _ in selected_ids)
+                    conn.execute(
+                        f"""
+                        UPDATE retrieval_results SET selected = 1
+                        WHERE retrieval_run_id = ?
+                          AND memory_id IN ({placeholders})
+                        """,
+                        (retrieval_run_id, *selected_ids),
+                    )
+                if injected_ids:
+                    placeholders = ",".join("?" for _ in injected_ids)
+                    conn.execute(
+                        f"""
+                        UPDATE retrieval_results SET injected = 1
+                        WHERE retrieval_run_id = ?
+                          AND memory_id IN ({placeholders})
+                        """,
+                        (retrieval_run_id, *injected_ids),
+                    )
+                for reference in references:
+                    conn.execute(
+                        """
+                        INSERT INTO context_pack_references (
+                            id, context_pack_id, memory_id, type, title, summary,
+                            estimated_tokens, expandable, source_json, trust_json,
+                            freshness_json, content_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            reference["reference_id"],
+                            pack_id,
+                            reference.get("memory_id"),
+                            reference["type"],
+                            reference["title"],
+                            reference["summary"],
+                            max(0, int(str(reference["estimated_tokens"]))),
+                            int(bool(reference.get("expandable", True))),
+                            _json(reference.get("source", {})),
+                            _json(reference.get("trust", {})),
+                            _json(reference.get("freshness", {})),
+                            _json(reference.get("content", {})),
+                            now,
+                        ),
+                    )
+            return pack_id
+        except Exception as exc:
+            self.record_error(exc)
+            raise
+
     def context_pack_for_run(self, retrieval_run_id: str) -> str:
         with self._connect() as conn:
             row = conn.execute(

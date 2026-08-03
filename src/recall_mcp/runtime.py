@@ -201,6 +201,28 @@ class Settings:
         default_factory=lambda: _integer("RETENTION_REVIEW_SECONDS", 30 * 86400)
     )
 
+    CONTEXT_POLICY_VERSION: str = field(
+        default_factory=lambda: _text("CONTEXT_POLICY_VERSION", "context-v2")
+    )
+    CONTEXT_TOKEN_ESTIMATOR_VERSION: str = field(
+        default_factory=lambda: _text("CONTEXT_TOKEN_ESTIMATOR_VERSION", "chars-v1")
+    )
+    CONTEXT_DEFAULT_MAX_TOKENS: int = field(
+        default_factory=lambda: _integer("CONTEXT_DEFAULT_MAX_TOKENS", 3000)
+    )
+    CONTEXT_MAX_TOKENS: int = field(
+        default_factory=lambda: _integer("CONTEXT_MAX_TOKENS", 100_000)
+    )
+    CONTEXT_PACK_TTL_SECONDS: int = field(
+        default_factory=lambda: _integer("CONTEXT_PACK_TTL_SECONDS", 900)
+    )
+    CONTEXT_INLINE_EVIDENCE_MAX_TOKENS: int = field(
+        default_factory=lambda: _integer("CONTEXT_INLINE_EVIDENCE_MAX_TOKENS", 180)
+    )
+    CONTEXT_BUDGET_WEIGHTS: dict[str, float] = field(
+        default_factory=lambda: _number_mapping("CONTEXT_BUDGET_WEIGHTS")
+    )
+
     NATS_URL: str = field(
         default_factory=lambda: _text("NATS_URL", "nats://127.0.0.1:4222")
     )
@@ -274,6 +296,27 @@ class Settings:
         )
         if any(window < 0 for window in retention_windows):
             raise ValueError("retention windows must not be negative")
+        if not self.CONTEXT_POLICY_VERSION.strip():
+            raise ValueError("RECALL_CONTEXT_POLICY_VERSION must not be empty")
+        if not self.CONTEXT_TOKEN_ESTIMATOR_VERSION.strip():
+            raise ValueError("RECALL_CONTEXT_TOKEN_ESTIMATOR_VERSION must not be empty")
+        if self.CONTEXT_DEFAULT_MAX_TOKENS <= 0 or self.CONTEXT_MAX_TOKENS <= 0:
+            raise ValueError("context token budgets must be positive")
+        if self.CONTEXT_DEFAULT_MAX_TOKENS > self.CONTEXT_MAX_TOKENS:
+            raise ValueError("default context budget must not exceed the maximum")
+        if self.CONTEXT_PACK_TTL_SECONDS <= 0:
+            raise ValueError("RECALL_CONTEXT_PACK_TTL_SECONDS must be positive")
+        if self.CONTEXT_INLINE_EVIDENCE_MAX_TOKENS <= 0:
+            raise ValueError(
+                "RECALL_CONTEXT_INLINE_EVIDENCE_MAX_TOKENS must be positive"
+            )
+        context_budget_keys = {"continuity", "retrieval", "references", "reserve"}
+        if set(self.CONTEXT_BUDGET_WEIGHTS) - context_budget_keys:
+            raise ValueError("RECALL_CONTEXT_BUDGET_WEIGHTS contains unknown classes")
+        if any(value < 0 for value in self.CONTEXT_BUDGET_WEIGHTS.values()):
+            raise ValueError("context budget weights must not be negative")
+        if sum(self.CONTEXT_BUDGET_WEIGHTS.values()) > 1.0:
+            raise ValueError("context budget weights must total at most 1.0")
         if self.OLLAMA_TIMEOUT_SECONDS <= 0:
             raise ValueError("RECALL_OLLAMA_TIMEOUT_SECONDS must be positive")
         if not self.OLLAMA_BASE_URL.startswith(("http://", "https://")):
