@@ -122,17 +122,19 @@ Exit gate:
 
 ## Phase 3 — Context Pack V2
 
+Status: **Complete**
+
 Build:
 
-- Scope-aware context assembly
-- Token-budget allocation
-- Inline-versus-reference decisions
-- Active task state
-- Session delta
-- Skill references
-- Provenance
-- Trust labels
-- Validation notices
+- [x] Scope-aware context assembly
+- [x] Token-budget allocation
+- [x] Inline-versus-reference decisions
+- [x] Active task state
+- [x] Session delta
+- [x] Future skill-reference extension points
+- [x] Provenance
+- [x] Trust labels
+- [x] Validation notices
 
 Exit gate:
 

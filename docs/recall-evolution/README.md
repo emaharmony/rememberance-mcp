@@ -43,10 +43,11 @@ Implementation records:
 
 ## Current progress
 
-Phase 1 shared task and session continuity and Phase 2 retrieval feedback and
-shadow utility scoring are complete on top of the verified transactional-outbox
-checkpoint. Phase 3 Context Pack V2 is the next recommended slice. Deferred
-Phase 0 refinements remain documented; they are not silently marked complete.
+Phase 1 shared task and session continuity, Phase 2 retrieval feedback and
+shadow utility scoring, and Phase 3 Context Pack V2 are complete on top of the
+verified transactional-outbox checkpoint. Phase 4 manually approved,
+versioned Recall Skills is the next recommended slice. Deferred refinements
+remain documented; they are not silently marked complete.
 
 ## One-line architecture
 

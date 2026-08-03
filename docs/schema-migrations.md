@@ -1,7 +1,7 @@
 # Schema migrations
 
 Recall uses ordered, forward-only SQLite migrations for canonical schema
-changes. The current schema version is `7`.
+changes. The current schema version is `8`.
 
 ## Migration ledger
 
@@ -22,6 +22,7 @@ Current migrations are:
 | 5 | `transactional_outbox` | Durable capture jobs, leases, retries, persisted gate results, and fact derivation keys |
 | 6 | `task_session_continuity` | Formal scope, agents, tasks, sessions, append-only events, and checkpoints |
 | 7 | `retrieval_utility` | Retrieval telemetry, context usage, task outcomes, explainable utility history, and reversible lifecycle state |
+| 8 | `context_pack_v2` | Reproducible V2 snapshots, scope and policy metadata, dispositions, references, fingerprints, and token accounting |
 
 FTS5 tables and triggers are not canonical migration state. They are derived
 indexes that Recall can rebuild from canonical memories.

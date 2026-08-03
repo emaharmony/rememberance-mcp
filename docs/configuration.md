@@ -40,5 +40,12 @@ All settings use the `RECALL_` prefix. Legacy `REMEMBRANCE_` names remain tempor
 | RECALL_RETENTION_USE_SECONDS | 2592000 | Expiry extension after use |
 | RECALL_RETENTION_SUCCESS_SECONDS | 7776000 | Expiry extension after successful task use |
 | RECALL_RETENTION_REVIEW_SECONDS | 2592000 | Delay until the next retention review |
+| RECALL_CONTEXT_POLICY_VERSION | context-v2 | Persisted context assembly policy identifier |
+| RECALL_CONTEXT_TOKEN_ESTIMATOR_VERSION | chars-v1 | Centralized provider-neutral token estimator |
+| RECALL_CONTEXT_DEFAULT_MAX_TOKENS | 3000 | Default Context Pack V2 content budget |
+| RECALL_CONTEXT_MAX_TOKENS | 100000 | Maximum accepted context budget |
+| RECALL_CONTEXT_PACK_TTL_SECONDS | 900 | Freshness lifetime reported for a generated pack |
+| RECALL_CONTEXT_INLINE_EVIDENCE_MAX_TOKENS | 180 | Largest evidence item eligible for inline delivery |
+| RECALL_CONTEXT_BUDGET_WEIGHTS | `{}` | JSON overrides for continuity, retrieval, references, and reserve |
 
 A non-loopback `RECALL_HOST` requires a configured token. Container deployments use a non-loopback container bind but publish only to host loopback.
