@@ -59,15 +59,18 @@ def api_server():
         thread.start()
 
         base_url = f"http://127.0.0.1:{port}"
-        yield {
-            "base_url": base_url,
-            "pipeline": pipeline,
-            "port": port,
-        }
-
-        server.shutdown()
-        server.server_close()
-        pipeline.close()
+        try:
+            yield {
+                "base_url": base_url,
+                "pipeline": pipeline,
+                "port": port,
+            }
+        finally:
+            # Close before the TemporaryDirectory exits its scope so Windows
+            # can remove the db files even if the test body raised.
+            server.shutdown()
+            server.server_close()
+            pipeline.close()
 
 
 class TestHealthEndpoint:

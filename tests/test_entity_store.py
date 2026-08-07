@@ -215,27 +215,34 @@ class TestGraphTraversal:
 
 class TestMemoryEntityLinks:
     def test_link_memory_entity(self, store):
-        # Need a memories table for FK constraint — use same DB
-        with sqlite3.connect(str(store.db_path)) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS memories (
-                    id TEXT PRIMARY KEY, content TEXT NOT NULL,
-                    summary TEXT, category TEXT DEFAULT 'project',
-                    tier TEXT DEFAULT 'active', key_topics TEXT,
-                    source TEXT DEFAULT '', embedding BLOB,
-                    created_at REAL NOT NULL, accessed_at REAL NOT NULL,
-                    expires_at REAL
+        # Need a memories table for FK constraint — use same DB.
+        # `with conn:` only commits/rolls back on exit, it does not close
+        # the connection — close explicitly so Windows can remove the
+        # fixture's TemporaryDirectory at teardown.
+        conn = sqlite3.connect(str(store.db_path))
+        try:
+            with conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS memories (
+                        id TEXT PRIMARY KEY, content TEXT NOT NULL,
+                        summary TEXT, category TEXT DEFAULT 'project',
+                        tier TEXT DEFAULT 'active', key_topics TEXT,
+                        source TEXT DEFAULT '', embedding BLOB,
+                        created_at REAL NOT NULL, accessed_at REAL NOT NULL,
+                        expires_at REAL
+                    )
+                """)
+                conn.execute(
+                    "INSERT INTO memories (id, content, created_at, accessed_at) VALUES (?, ?, ?, ?)",
+                    (
+                        "mem_123",
+                        "Ema decided Prism stays domain-agnostic",
+                        time.time(),
+                        time.time(),
+                    ),
                 )
-            """)
-            conn.execute(
-                "INSERT INTO memories (id, content, created_at, accessed_at) VALUES (?, ?, ?, ?)",
-                (
-                    "mem_123",
-                    "Ema decided Prism stays domain-agnostic",
-                    time.time(),
-                    time.time(),
-                ),
-            )
+        finally:
+            conn.close()
 
         store.create_entity("Ema", "person")
         store.create_entity("Prism", "project")
