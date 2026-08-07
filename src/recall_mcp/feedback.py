@@ -817,6 +817,7 @@ class RetrievalFeedbackService:
         idempotency_key: str | None,
         items: Sequence[Mapping[str, object]],
         references: Sequence[Mapping[str, object]],
+        skills: Sequence[Mapping[str, object]] = (),
     ) -> str:
         """Persist a V2 pack and its Phase 2 usage linkage atomically."""
         now = time.time()
@@ -1032,6 +1033,96 @@ class RetrievalFeedbackService:
                             now,
                         ),
                     )
+                for skill in skills:
+                    skill_id = str(skill["id"])
+                    skill_version = int(str(skill["version"]))
+                    disposition = str(skill["delivery"])
+                    version_row = conn.execute(
+                        """
+                        SELECT s.user_id, s.workspace_id, s.project_id,
+                               s.repository_id, s.current_approved_version,
+                               s.stale_at
+                        FROM skills s
+                        JOIN skill_versions v
+                          ON v.skill_id = s.id AND v.version = ?
+                        WHERE s.id = ?
+                        """,
+                        (skill_version, skill_id),
+                    ).fetchone()
+                    if version_row is None:
+                        raise ContinuityError(
+                            "context skill version was not found", code="not_found"
+                        )
+                    for field in (
+                        "user_id",
+                        "workspace_id",
+                        "project_id",
+                        "repository_id",
+                    ):
+                        expected = scope.get(field)
+                        actual = version_row[field]
+                        if field == "repository_id" and actual is None:
+                            continue
+                        if expected != actual:
+                            raise ContinuityError(
+                                "context skill scope does not match its pack",
+                                code="scope_mismatch",
+                            )
+                    if disposition != "omitted" and (
+                        version_row["current_approved_version"] != skill_version
+                        or version_row["stale_at"] is not None
+                    ):
+                        raise ContinuityError(
+                            "only the fresh approved skill version may be delivered",
+                            code="invalid_context_pack",
+                        )
+                    conn.execute(
+                        """
+                        INSERT INTO context_pack_skills (
+                            context_pack_id, skill_id, skill_version,
+                            disposition, position, reason_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            pack_id,
+                            skill_id,
+                            skill_version,
+                            disposition,
+                            int(str(skill["position"])),
+                            _json(skill.get("reasons", [])),
+                            now,
+                        ),
+                    )
+                    skill_usages: list[str] = []
+                    if disposition in {"inline", "summary", "reference"}:
+                        skill_usages.append("selected")
+                    if disposition in {"inline", "summary"}:
+                        skill_usages.append("injected")
+                    if disposition == "reference":
+                        skill_usages.append("referenced")
+                    for usage_type in skill_usages:
+                        conn.execute(
+                            """
+                            INSERT INTO skill_usage (
+                                id, skill_id, skill_version, context_pack_id,
+                                task_id, session_id, agent_id, usage_type,
+                                metadata_json, idempotency_key, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                _id("skill_usage"),
+                                skill_id,
+                                skill_version,
+                                pack_id,
+                                scope.get("task_id"),
+                                scope.get("session_id"),
+                                scope.get("agent_id"),
+                                usage_type,
+                                _json({"delivery": disposition}),
+                                f"system:{usage_type}:{pack_id}",
+                                now,
+                            ),
+                        )
             return pack_id
         except Exception as exc:
             self.record_error(exc)

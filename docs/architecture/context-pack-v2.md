@@ -65,8 +65,10 @@ metadata and whether utility affected production rank; it does not silently
 enable utility ranking.
 
 `client_capabilities`, `requested_sections`, stable references, policy versions,
-and fingerprints are Phase 4 extension points. Phase 3 does not create,
-compile, approve, cache, or publish Recall Skills.
+and fingerprints now carry optional Phase 4 approved skill versions. Skills use
+their own budget class and never displace mandatory context. Pending or stale
+versions are excluded, while exact selected versions and usage semantics remain
+auditable. Context Pack V2 still does not cache or automatically publish skills.
 
 ## Deterministic benchmark
 
@@ -82,4 +84,4 @@ Known limitations are the approximate provider-neutral estimator, client-
 reported use feedback, no external client adapter changes in this repository,
 no automatic conversion of arbitrary memories into validation requests, no
 new NATS context lifecycle subjects, shadow-only utility by default, and no
-Recall Skills or CAG skill caching.
+automatic skill approval or CAG skill caching.

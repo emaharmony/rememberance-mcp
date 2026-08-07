@@ -223,6 +223,15 @@ class Settings:
         default_factory=lambda: _number_mapping("CONTEXT_BUDGET_WEIGHTS")
     )
 
+    SKILL_COMPILER_POLICY_VERSION: str = field(
+        default_factory=lambda: _text(
+            "SKILL_COMPILER_POLICY_VERSION", "skill-compiler-v1"
+        )
+    )
+    SKILL_CONTEXT_BUDGET_RATIO: float = field(
+        default_factory=lambda: _number("SKILL_CONTEXT_BUDGET_RATIO", 0.15)
+    )
+
     NATS_URL: str = field(
         default_factory=lambda: _text("NATS_URL", "nats://127.0.0.1:4222")
     )
@@ -317,6 +326,12 @@ class Settings:
             raise ValueError("context budget weights must not be negative")
         if sum(self.CONTEXT_BUDGET_WEIGHTS.values()) > 1.0:
             raise ValueError("context budget weights must total at most 1.0")
+        if not self.SKILL_COMPILER_POLICY_VERSION.strip():
+            raise ValueError("RECALL_SKILL_COMPILER_POLICY_VERSION must not be empty")
+        if not 0 <= self.SKILL_CONTEXT_BUDGET_RATIO <= 0.25:
+            raise ValueError(
+                "RECALL_SKILL_CONTEXT_BUDGET_RATIO must be between 0 and 0.25"
+            )
         if self.OLLAMA_TIMEOUT_SECONDS <= 0:
             raise ValueError("RECALL_OLLAMA_TIMEOUT_SECONDS must be positive")
         if not self.OLLAMA_BASE_URL.startswith(("http://", "https://")):

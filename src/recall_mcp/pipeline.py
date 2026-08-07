@@ -58,6 +58,7 @@ from recall_mcp.dream.cycle import DreamCycle
 from recall_mcp.feedback import RetrievalFeedbackService
 from recall_mcp.gate_backends import GateMetrics
 from recall_mcp.outbox import CaptureOutcome, CaptureOutboxDispatcher
+from recall_mcp.skills import SkillCandidateService, SkillService
 from recall_mcp.store.store import OutboxJob
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,8 @@ class MemoryPipeline:
         self.feedback_service = RetrievalFeedbackService(
             self.settings.DB_PATH, self.settings
         )
+        self.skill_service = SkillService(self.settings.DB_PATH, self.settings)
+        self.skill_candidate_service = SkillCandidateService(self.skill_service)
 
         # ── V2: Entity Store + Knowledge Graph ─────────────────
         # Unified into the main DB (DB_PATH) so dream-cycle phases can join
@@ -174,6 +177,7 @@ class MemoryPipeline:
             self.session_service,
             self.feedback_service,
             self._search_with_telemetry,
+            skill_service=self.skill_service,
         )
 
         # ── V2: Dream Cycle ──────────────────────────────────
@@ -770,6 +774,7 @@ class MemoryPipeline:
             "outbox_worker": self.outbox_dispatcher.health(),
             "retrieval_feedback": self.feedback_service.telemetry_stats(),
             "context_packs": self.context_service.stats(),
+            "skills": self.skill_service.stats(),
             "entities": self.entity_store.stats(),
             "facts": self.fact_store.stats(),
             "v2": self.store_v2.v2_stats(),

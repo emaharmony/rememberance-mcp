@@ -98,6 +98,9 @@ class TestHealthEndpoint:
         assert data["context_service"]["feedback_linkage_healthy"] is True
         assert data["context_service"]["policy_version"] == "context-v2"
         assert data["context_service"]["token_estimator_version"] == "chars-v1"
+        assert data["skill_service"]["available"] is True
+        assert data["skill_service"]["migration_current"] is True
+        assert data["skill_service"]["compiler_policy_version"] == ("skill-compiler-v1")
 
     def test_readiness_sanitizes_dispatcher_error(self, api_server):
         pipeline = api_server["pipeline"]
@@ -141,6 +144,8 @@ class TestHealthEndpoint:
         assert "recall_context_packs_built_total 0.0" in metrics
         assert "recall_context_pack_failures_total 0.0" in metrics
         assert "recall_context_pack_feedback_pending_total 0.0" in metrics
+        assert "recall_skills_total 0.0" in metrics
+        assert "recall_skill_versions_total 0.0" in metrics
         assert "captured-content" not in json.dumps(readiness)
         assert "captured-content" not in metrics
 
@@ -186,6 +191,131 @@ class TestStatsEndpoint:
         assert data["retrieval_feedback"]["shadow_mode"] is True
         assert data["context_packs"]["schema_version"] == 2
         assert data["context_packs"]["policy_version"] == "context-v2"
+        assert data["skills"]["compiler_policy_version"] == "skill-compiler-v1"
+
+
+class TestSkillEndpoints:
+    @staticmethod
+    def request(base_url, path, body=None, method="POST"):
+        request = urllib.request.Request(
+            f"{base_url}{path}",
+            data=json.dumps(body).encode("utf-8") if body is not None else None,
+            headers={"Content-Type": "application/json"},
+            method=method,
+        )
+        try:
+            response = urllib.request.urlopen(request)
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+        return response.status, json.loads(response.read())
+
+    def test_propose_approve_read_explain_evidence_feedback_and_scope(self, api_server):
+        pipeline = api_server["pipeline"]
+        base = api_server["base_url"]
+        task = pipeline.task_service.create_task(
+            user_id="skill-user",
+            workspace_id="skill-workspace",
+            project_id="skill-project",
+            repository_id="skill-repo",
+            title="REST Skills",
+            objective="Expose skill review",
+            created_by="claude-code",
+            canonical_path="/work/skills",
+        )
+        other = pipeline.task_service.create_task(
+            user_id="skill-user",
+            workspace_id="skill-workspace",
+            project_id="other-project",
+            repository_id="other-repo",
+            title="Other",
+            objective="Distractor",
+            created_by="claude-code",
+            canonical_path="/work/other-skills",
+        )
+        scope = {
+            "user_id": task["user_id"],
+            "workspace_id": task["workspace_id"],
+            "project_id": task["project_id"],
+            "repository_id": task["repository_id"],
+        }
+        status, candidate = self.request(
+            base,
+            "/v2/skills/propose",
+            {
+                **scope,
+                "slug": "rest-contract",
+                "title": "REST Contract",
+                "purpose": "Keep REST adapters thin",
+                "agent_id": "claude-code",
+                "sources": [
+                    {
+                        "source_type": "repository",
+                        "source_id": task["repository_id"],
+                        "source_ref": "src/recall_mcp/api/rest.py",
+                        "content": "REST calls the shared skill service.",
+                        "commit_sha": "rest-test",
+                    }
+                ],
+                "idempotency_key": "rest-skill-propose",
+            },
+        )
+        assert status == 201
+        assert candidate["version_status"] == "pending_approval"
+        skill_path = f"/v2/skills/{candidate['id']}"
+        status, approved = self.request(
+            base,
+            f"{skill_path}/versions/1/approve",
+            {**scope, "reviewer_id": "skill-user"},
+        )
+        assert status == 200
+        assert approved["version_status"] == "approved"
+        query = urllib.parse.urlencode(scope)
+        assert self.request(base, f"/v2/skills?{query}", method="GET")[0] == 200
+        status, fetched = self.request(base, f"{skill_path}?{query}", method="GET")
+        assert status == 200
+        assert fetched["version"] == 1
+        status, versions = self.request(
+            base, f"{skill_path}/versions?{query}", method="GET"
+        )
+        assert status == 200
+        assert len(versions["versions"]) == 1
+        status, explanation = self.request(
+            base, f"{skill_path}/explain?{query}", method="GET"
+        )
+        assert status == 200
+        assert explanation["source_fingerprint"] == candidate["source_fingerprint"]
+        status, evidence = self.request(
+            base, f"{skill_path}/evidence?{query}&version=1", method="GET"
+        )
+        assert status == 200
+        assert evidence["evidence"][0]["source_type"] == "repository"
+        status, feedback = self.request(
+            base,
+            f"{skill_path}/feedback",
+            {
+                **scope,
+                "version": 1,
+                "usage_type": "used",
+                "agent_id": "codex",
+                "idempotency_key": "rest-skill-used",
+            },
+        )
+        assert status == 200
+        assert feedback["idempotent_replay"] is False
+
+        wrong_scope = {
+            "user_id": other["user_id"],
+            "workspace_id": other["workspace_id"],
+            "project_id": other["project_id"],
+            "repository_id": other["repository_id"],
+        }
+        status, rejected = self.request(
+            base,
+            f"{skill_path}?{urllib.parse.urlencode(wrong_scope)}",
+            method="GET",
+        )
+        assert status == 404
+        assert rejected["code"] == "not_found"
 
 
 class TestCaptureEndpoint:
