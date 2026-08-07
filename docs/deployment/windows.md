@@ -13,7 +13,7 @@ $Version = "v2.1.0"
 $Wheel = "C:\Install\recall_mcp-2.1.0-py3-none-any.whl"
 cosign verify-blob $Wheel `
   --bundle "$Wheel.sigstore.json" `
-  --certificate-identity "https://github.com/emaharmony/remembrance/.github/workflows/release.yml@refs/tags/$Version" `
+  --certificate-identity "https://github.com/emaharmony/recall/.github/workflows/release.yml@refs/tags/$Version" `
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 Get-FileHash -Algorithm SHA256 $Wheel
 ```

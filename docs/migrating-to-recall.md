@@ -118,7 +118,7 @@ Do not run the first command until the new URL is verified.
 
 ## Maintainer repository checklist
 
-- Rename the GitHub repository to recall
+- [x] Rename the GitHub repository to recall
 - Verify GitHub redirects
 - Update repository description and topics
 - Verify branch protections

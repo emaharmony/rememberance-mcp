@@ -25,8 +25,7 @@ else
 fi
 
 RELEASE_TAG="v3.0-dilbert-gate"
-# Release assets remain at the existing remote until maintainers rename it.
-REPO="emaharmony/remembrance-mcp"
+REPO="emaharmony/recall"
 BASE_URL="https://github.com/$REPO/releases/download/$RELEASE_TAG"
 
 echo "=== DilBERT v3 Memory Gate - Model Download ==="
