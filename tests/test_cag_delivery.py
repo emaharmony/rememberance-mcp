@@ -426,8 +426,10 @@ def test_stop_hook_invalid_input_exits_zero(tmp_path, monkeypatch):
 
     hook = (
         Path(__file__).parents[1]
+        / "src"
+        / "recall_mcp"
         / "integrations"
-        / "claude-code"
+        / "claude_code"
         / "capture_transcript.py"
     )
     specification = importlib.util.spec_from_file_location("recall_stop_hook", hook)
@@ -436,6 +438,38 @@ def test_stop_hook_invalid_input_exits_zero(tmp_path, monkeypatch):
     specification.loader.exec_module(module)
     monkeypatch.setattr(sys, "stdin", __import__("io").StringIO("invalid-json"))
     assert module.main() == 0
+
+
+def test_stop_hook_old_shim_path_still_works(tmp_path, monkeypatch, capsys):
+    """The pre-restructure path must keep working as a delegating shim.
+
+    Anything still pointing Claude Code's Stop hook at
+    `integrations/claude-code/capture_transcript.py` (the old
+    checkout-relative location) must not break: that file is now a thin shim
+    that imports and calls the packaged implementation's `main()`. Stdout
+    must stay clean since it is the hook's JSON protocol channel.
+    """
+    import importlib.util
+    from pathlib import Path
+    import sys
+
+    hook = (
+        Path(__file__).parents[1]
+        / "integrations"
+        / "claude-code"
+        / "capture_transcript.py"
+    )
+    specification = importlib.util.spec_from_file_location(
+        "recall_stop_hook_old_shim", hook
+    )
+    assert specification and specification.loader
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO("invalid-json"))
+    assert module.main() == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "deprecated" in captured.err
 
 
 def test_delivery_explanation_and_stats_are_content_free(cag_env):

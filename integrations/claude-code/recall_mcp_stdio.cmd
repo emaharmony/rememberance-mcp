@@ -1,8 +1,3 @@
 @echo off
-setlocal
-if not defined RECALL_GATE_BACKENDS if not defined REMEMBRANCE_GATE_BACKENDS set "RECALL_GATE_BACKENDS=heuristic"
-pushd "%~dp0..\.."
-".venv\Scripts\python.exe" -m recall_mcp
-set "RECALL_EXIT=%ERRORLEVEL%"
-popd
-exit /b %RECALL_EXIT%
+echo recall_mcp_stdio.cmd now ships inside the recall_mcp package; delegating to the packaged copy. 1>&2
+call "%~dp0..\..\src\recall_mcp\integrations\claude_code\recall_mcp_stdio.cmd" %*

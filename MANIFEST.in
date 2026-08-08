@@ -3,6 +3,7 @@ include README.md
 include CHANGELOG.md
 recursive-include docs *.md
 recursive-include integrations *.cmd *.json *.md *.ps1 *.py *.vbs
+recursive-include src/recall_mcp/integrations *.cmd *.json *.py
 include deploy/ubuntu/Dockerfile
 recursive-include deploy *.conf *.ps1 *.sh *.template *.yaml
 recursive-include scripts *.sh

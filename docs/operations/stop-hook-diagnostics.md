@@ -1,7 +1,11 @@
 # Stop-hook diagnostics
 
-The repository-owned Claude Code Stop hook is
-`integrations/claude-code/capture_transcript.py`. It is best-effort: malformed
+The Claude Code Stop hook is `recall_mcp.integrations.claude_code.
+capture_transcript`, packaged inside the installed `recall_mcp` distribution
+(`pip install recall-mcp`; no source checkout required). The old
+checkout-relative path, `integrations/claude-code/capture_transcript.py`,
+still works as a thin backward-compatible shim that delegates to the
+packaged module. It is best-effort: malformed
 input and an unavailable Recall endpoint return exit code zero after sanitized
 local diagnostics. A regression test covers malformed input.
 
