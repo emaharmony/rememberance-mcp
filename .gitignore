@@ -62,3 +62,6 @@ tokens.json
 # Local config overrides
 local.cfg
 local.json
+
+# Autonomous-loop session logs
+loop-logs/
