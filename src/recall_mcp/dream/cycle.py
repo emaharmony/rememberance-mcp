@@ -109,8 +109,15 @@ class DreamCycle:
         can leave the file handle open long enough for a caller's
         ``TemporaryDirectory`` cleanup to fail with a PermissionError, so
         every connection opened here is explicitly closed.
+
+        Foreign key enforcement defaults to OFF per sqlite3 connection, so
+        it must be turned on explicitly here — otherwise the ON DELETE
+        CASCADE/SET NULL clauses declared on memory_chunks, memory_entities,
+        and other memory-referencing tables silently never fire, leaving
+        orphaned child rows behind (see _phase_purge).
         """
         conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys=ON")
         try:
             with conn:
                 yield conn
