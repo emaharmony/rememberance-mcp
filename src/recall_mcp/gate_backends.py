@@ -37,9 +37,10 @@ import logging
 import re
 import sqlite3
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from recall_mcp.gate import GateDecision, GateResult
 
@@ -73,10 +74,27 @@ class GateMetrics:
         self.db_path = db_path
         self._init_db()
 
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open a connection that commits/rolls back and always closes.
+
+        A bare ``with sqlite3.connect(...) as conn`` only commits or rolls
+        back on exit — it does not close the connection. On Windows this
+        can leave the file handle open long enough for a caller's
+        ``TemporaryDirectory`` cleanup to fail with a PermissionError, so
+        every connection opened here is explicitly closed.
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self):
         """Create metrics table if it doesn't exist."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS gate_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,7 +118,7 @@ class GateMetrics:
 
     def record(self, metric: GateMetric):
         """Record a classification event."""
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO gate_metrics (timestamp, backend, text_preview, decision, confidence, fallback_used)
@@ -125,7 +143,7 @@ class GateMetrics:
             fallback_rate, skip_rate
         """
         cutoff = time.time() - (hours * 3600)
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
 
             total = conn.execute(

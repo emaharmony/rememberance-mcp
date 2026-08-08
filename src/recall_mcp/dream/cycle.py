@@ -35,6 +35,9 @@ import json
 import sqlite3
 import time
 import logging
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
 
 from recall_mcp.store.edges import EntityStore
 from recall_mcp.store.memory import MemoryStoreV2
@@ -89,6 +92,23 @@ class DreamCycle:
         self.embedding_provider = embedding_provider
         self.wiring = GraphWiring(entity_store)
         self.detector = EntityDetector(entity_store=entity_store)
+
+    @contextmanager
+    def _connect(self, db_path: Path) -> Iterator[sqlite3.Connection]:
+        """Open a connection that commits/rolls back and always closes.
+
+        A bare ``with sqlite3.connect(...) as conn`` only commits or rolls
+        back on exit — it does not close the connection. On Windows this
+        can leave the file handle open long enough for a caller's
+        ``TemporaryDirectory`` cleanup to fail with a PermissionError, so
+        every connection opened here is explicitly closed.
+        """
+        conn = sqlite3.connect(str(db_path))
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def run(self, phases: list[str] | None = None, dry_run: bool = False) -> dict:
         """
@@ -206,7 +226,7 @@ class DreamCycle:
         entities_created = 0
         links_created = 0
 
-        with sqlite3.connect(str(db_path)) as conn:
+        with self._connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             # Find memories that don't have any entity links yet
             rows = conn.execute("""
@@ -254,7 +274,7 @@ class DreamCycle:
 
         # Check entities with timeline entries that don't reference
         # the memories that mention them
-        with sqlite3.connect(str(db_path)) as conn:
+        with self._connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             entities = conn.execute(
                 "SELECT * FROM entities WHERE tier IN ('active', 'persist') LIMIT 100"
@@ -342,7 +362,7 @@ class DreamCycle:
         db_path = self.entity_store.db_path
         patterns_found = 0
 
-        with sqlite3.connect(str(db_path)) as conn:
+        with self._connect(db_path) as conn:
             # Find entities mentioned in many memories
             rows = conn.execute("""
                 SELECT entity_id, COUNT(*) as mention_count
@@ -450,7 +470,7 @@ class DreamCycle:
         cutoff = now - recovery_window
         purged = 0
 
-        with sqlite3.connect(str(db_path)) as conn:
+        with self._connect(db_path) as conn:
             # Delete expired memories past recovery window
             cursor = conn.execute(
                 "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?",

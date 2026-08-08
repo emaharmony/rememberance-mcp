@@ -47,5 +47,9 @@ All settings use the `RECALL_` prefix. Legacy `REMEMBRANCE_` names remain tempor
 | RECALL_CONTEXT_PACK_TTL_SECONDS | 900 | Freshness lifetime reported for a generated pack |
 | RECALL_CONTEXT_INLINE_EVIDENCE_MAX_TOKENS | 180 | Largest evidence item eligible for inline delivery |
 | RECALL_CONTEXT_BUDGET_WEIGHTS | `{}` | JSON overrides for continuity, retrieval, references, and reserve |
+| RECALL_SKILL_COMPILER_POLICY_VERSION | skill-compiler-v1 | Persisted skill compilation policy identifier |
+| RECALL_SKILL_CONTEXT_BUDGET_RATIO | 0.15 | Context budget available to approved fresh skills; range 0-0.25 |
+| RECALL_HANDOFF_POLICY_VERSION | handoff-v1 | Persisted provider-neutral handoff policy identifier |
+| RECALL_HANDOFF_TTL_SECONDS | 86400 | Default handoff expiry interval; expiry does not delete history |
 
 A non-loopback `RECALL_HOST` requires a configured token. Container deployments use a non-loopback container bind but publish only to host loopback.

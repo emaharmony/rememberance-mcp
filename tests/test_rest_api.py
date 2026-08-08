@@ -53,20 +53,24 @@ def api_server():
         sock.close()
 
         RecallHandler.pipeline = pipeline
+        RecallHandler.rate_limiter = None
         server = HTTPServer(("127.0.0.1", port), RecallHandler)
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
         base_url = f"http://127.0.0.1:{port}"
-        yield {
-            "base_url": base_url,
-            "pipeline": pipeline,
-            "port": port,
-        }
-
-        server.shutdown()
-        server.server_close()
-        pipeline.close()
+        try:
+            yield {
+                "base_url": base_url,
+                "pipeline": pipeline,
+                "port": port,
+            }
+        finally:
+            # Close before the TemporaryDirectory exits its scope so Windows
+            # can remove the db files even if the test body raised.
+            server.shutdown()
+            server.server_close()
+            pipeline.close()
 
 
 class TestHealthEndpoint:
@@ -489,6 +493,87 @@ class TestTaskSessionContinuityEndpoints:
                 },
             )
         assert error.value.code == 409
+
+    def test_handoff_create_claim_complete_get_and_delta(self, api_server):
+        pipeline = api_server["pipeline"]
+        base = api_server["base_url"]
+        task = pipeline.task_service.create_task(
+            user_id="handoff-user",
+            workspace_id="handoff-workspace",
+            project_id="handoff-project",
+            repository_id="handoff-repo",
+            title="REST handoff",
+            objective="Transfer work through REST",
+            created_by="claude-code",
+            canonical_path="/work/handoff",
+        )
+        session = pipeline.session_service.start_session(
+            task_id=task["id"], agent_id="claude-code"
+        )
+        pipeline.session_service.join_session(session["id"], agent_id="codex")
+        pipeline.session_service.create_checkpoint(
+            session["id"],
+            agent_id="claude-code",
+            constraints=["no push"],
+            remaining=["REST handoff"],
+        )
+        scope = {
+            "user_id": task["user_id"],
+            "workspace_id": task["workspace_id"],
+            "project_id": task["project_id"],
+            "repository_id": task["repository_id"],
+            "task_id": task["id"],
+            "session_id": session["id"],
+        }
+        status, handoff = self.request(
+            base,
+            "/v2/handoffs",
+            {
+                **scope,
+                "source_agent_id": "claude-code",
+                "target_agent_id": "codex",
+                "requested_by": "claude-code",
+                "expected_output": "REST-tested completion",
+                "idempotency_key": "rest-handoff",
+            },
+        )
+        assert status == 201
+        status, claimed = self.request(
+            base,
+            f"/v2/handoffs/{urllib.parse.quote(handoff['handoff_id'])}/claim",
+            {**scope, "agent_id": "codex", "idempotency_key": "rest-claim"},
+        )
+        assert status == 200
+        assert claimed["status"] == "claimed"
+        status, completed = self.request(
+            base,
+            f"/v2/handoffs/{urllib.parse.quote(handoff['handoff_id'])}/complete",
+            {
+                **scope,
+                "agent_id": "codex",
+                "work_completed": ["REST surface"],
+                "files_changed": ["src/recall_mcp/api/rest.py"],
+                "tests": {"passed": 1, "failed": 0},
+                "idempotency_key": "rest-complete",
+            },
+        )
+        assert status == 200
+        assert completed["checkpoint_version"] == 2
+        query = urllib.parse.urlencode({**scope, "agent_id": "claude-code"})
+        status, fetched = self.request(
+            base,
+            f"/v2/handoffs/{urllib.parse.quote(handoff['handoff_id'])}?{query}",
+            method="GET",
+        )
+        assert status == 200
+        assert fetched["agents"]["target_agent_id"] == "codex"
+        status, delta = self.request(
+            base,
+            f"/v2/handoffs/{urllib.parse.quote(handoff['handoff_id'])}/delta?{query}&known_version=1&known_checkpoint_version=1",
+            method="GET",
+        )
+        assert status == 200
+        assert delta["completion"]["work_completed"] == ["REST surface"]
 
 
 class TestRetrievalFeedbackEndpoints:

@@ -50,6 +50,16 @@ EXPECTED_TOOLS = {
     "recall_skill_explain",
     "recall_skill_evidence",
     "recall_skill_feedback",
+    "recall_handoff_create",
+    "recall_handoff_get",
+    "recall_handoff_claim",
+    "recall_handoff_progress",
+    "recall_handoff_block",
+    "recall_handoff_complete",
+    "recall_handoff_cancel",
+    "recall_handoff_delta",
+    "recall_handoff_explain",
+    "recall_handoff_expand_reference",
 }
 
 
@@ -197,6 +207,56 @@ def test_mcp_server_starts_and_lists_tools():
                     },
                 )
                 approved_skill = json.loads(skill_get_result.content[0].text)
+                handoff_result = await session.call_tool(
+                    "recall_handoff_create",
+                    {
+                        "user_id": "user-1",
+                        "workspace_id": "workspace-1",
+                        "project_id": "project-1",
+                        "repository_id": "repo-1",
+                        "task_id": task["id"],
+                        "session_id": shared_session["id"],
+                        "source_agent_id": "claude-code",
+                        "target_agent_id": "codex",
+                        "requested_by": "claude-code",
+                        "expected_output": "Tested MCP handoff",
+                        "idempotency_key": "mcp-handoff",
+                    },
+                )
+                handoff = json.loads(handoff_result.content[0].text)
+                await session.call_tool(
+                    "recall_handoff_claim",
+                    {
+                        **handoff["scope"],
+                        "handoff_id": handoff["handoff_id"],
+                        "agent_id": "codex",
+                        "idempotency_key": "mcp-handoff-claim",
+                    },
+                )
+                completion_result = await session.call_tool(
+                    "recall_handoff_complete",
+                    {
+                        **handoff["scope"],
+                        "handoff_id": handoff["handoff_id"],
+                        "agent_id": "codex",
+                        "work_completed": ["MCP handoff smoke"],
+                        "files_changed": ["src/recall_mcp/server.py"],
+                        "tests": {"passed": 1, "failed": 0},
+                        "idempotency_key": "mcp-handoff-complete",
+                    },
+                )
+                completion = json.loads(completion_result.content[0].text)
+                handoff_delta_result = await session.call_tool(
+                    "recall_handoff_delta",
+                    {
+                        **handoff["scope"],
+                        "handoff_id": handoff["handoff_id"],
+                        "known_version": 1,
+                        "known_checkpoint_version": 1,
+                        "agent_id": "claude-code",
+                    },
+                )
+                handoff_delta = json.loads(handoff_delta_result.content[0].text)
                 outcome_result = await session.call_tool(
                     "recall_task_outcome",
                     {
@@ -216,12 +276,23 @@ def test_mcp_server_starts_and_lists_tools():
                     context_pack,
                     explanation,
                     approved_skill,
+                    handoff,
+                    completion,
+                    handoff_delta,
                 )
 
     try:
-        names, delta, outcome, context_pack, explanation, approved_skill = asyncio.run(
-            asyncio.wait_for(_run(), timeout=60)
-        )
+        (
+            names,
+            delta,
+            outcome,
+            context_pack,
+            explanation,
+            approved_skill,
+            handoff,
+            completion,
+            handoff_delta,
+        ) = asyncio.run(asyncio.wait_for(_run(), timeout=60))
     finally:
         shutil.rmtree(home, ignore_errors=True)
     assert EXPECTED_TOOLS.issubset(names), f"missing tools: {EXPECTED_TOOLS - names}"
@@ -234,3 +305,6 @@ def test_mcp_server_starts_and_lists_tools():
     assert context_pack["session"]["delta"]["status"] == "changed"
     assert explanation["utility_affected_ranking"] is False
     assert approved_skill["version_status"] == "approved"
+    assert handoff["status"] == "ready"
+    assert completion["checkpoint_version"] == 2
+    assert handoff_delta["completion"]["work_completed"] == ["MCP handoff smoke"]

@@ -52,6 +52,11 @@ def create_server():
     from recall_mcp.config import Settings
     from recall_mcp.continuity import ContinuityError
     from recall_mcp.context import ContextPackRequest
+    from recall_mcp.handoff import (
+        HandoffCompletion,
+        HandoffRequest,
+        HandoffScope,
+    )
     from recall_mcp.pipeline import MemoryPipeline
     from recall_mcp.skills import SkillProposal, SkillScope
 
@@ -92,6 +97,12 @@ def create_server():
             "workspace_id": {"type": "string"},
             "project_id": {"type": "string"},
             "repository_id": {"type": "string"},
+        }
+        handoff_scope_properties = {
+            **skill_scope_properties,
+            "repository_id": {"type": "string"},
+            "task_id": {"type": "string"},
+            "session_id": {"type": "string"},
         }
         return [
             Tool(
@@ -674,6 +685,150 @@ def create_server():
                 },
             ),
             continuity_tool(
+                "recall_handoff_create",
+                "Build and persist an immutable, target-authorized agent handoff.",
+                [
+                    *handoff_scope_properties,
+                    "source_agent_id",
+                    "target_agent_id",
+                    "requested_by",
+                    "expected_output",
+                ],
+                {
+                    **handoff_scope_properties,
+                    "source_agent_id": {"type": "string"},
+                    "target_agent_id": {"type": "string"},
+                    "requested_by": {"type": "string"},
+                    "expected_output": {"type": "string"},
+                    "known_checkpoint_version": {"type": "integer", "minimum": 0},
+                    "max_tokens": {"type": "integer", "minimum": 1},
+                    "capabilities": {"type": "array", "items": {"type": "string"}},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_get",
+                "Fetch an authorized immutable handoff version.",
+                [*handoff_scope_properties, "handoff_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_claim",
+                "Exclusively claim a ready handoff as its assigned target agent.",
+                [*handoff_scope_properties, "handoff_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_progress",
+                "Record target-agent progress without changing canonical task truth.",
+                [*handoff_scope_properties, "handoff_id", "agent_id", "progress"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "progress": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_block",
+                "Block a claimed handoff and append an attributed session blocker.",
+                [*handoff_scope_properties, "handoff_id", "agent_id", "blocker"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "blocker": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_complete",
+                "Submit a structured completion and create the next shared checkpoint.",
+                [*handoff_scope_properties, "handoff_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "files_changed": {"type": "array"},
+                    "work_completed": {"type": "array"},
+                    "tests": {"type": "object"},
+                    "blockers": {"type": "array"},
+                    "remaining_work": {"type": "array"},
+                    "new_decisions": {"type": "array"},
+                    "new_questions": {"type": "array"},
+                    "used_skill_versions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "used_memory_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "expanded_references": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_cancel",
+                "Cancel a non-terminal handoff as its source or requester.",
+                [*handoff_scope_properties, "handoff_id", "agent_id", "reason"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_delta",
+                "Return compact handoff and optional session changes without transcript replay.",
+                [*handoff_scope_properties, "handoff_id", "known_version", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "known_version": {"type": "integer", "minimum": 0},
+                    "known_checkpoint_version": {"type": "integer", "minimum": 0},
+                    "agent_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_explain",
+                "Explain scope, priority, skill versions, fingerprints, and warnings.",
+                [*handoff_scope_properties, "handoff_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_expand_reference",
+                "Expand one authorized handoff evidence reference.",
+                [*handoff_scope_properties, "handoff_id", "reference_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "reference_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
                 "recall_context_build",
                 "Build and persist a scope-safe provider-neutral Context Pack V2.",
                 [
@@ -866,6 +1021,16 @@ def create_server():
                     workspace_id=str(arguments.get("workspace_id") or ""),
                     project_id=str(arguments.get("project_id") or ""),
                     repository_id=arguments.get("repository_id"),
+                )
+
+            def handoff_scope() -> HandoffScope:
+                return HandoffScope(
+                    user_id=str(arguments.get("user_id") or ""),
+                    workspace_id=str(arguments.get("workspace_id") or ""),
+                    project_id=str(arguments.get("project_id") or ""),
+                    repository_id=str(arguments.get("repository_id") or ""),
+                    task_id=str(arguments.get("task_id") or ""),
+                    session_id=str(arguments.get("session_id") or ""),
                 )
 
             if name == "recall_task_create":
@@ -1092,6 +1257,145 @@ def create_server():
                         session_id=arguments.get("session_id"),
                         metadata=arguments.get("metadata"),
                         idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_create":
+                return result_json(
+                    pipeline.handoff_service.create(
+                        HandoffRequest(
+                            scope=handoff_scope(),
+                            source_agent_id=arguments["source_agent_id"],
+                            target_agent_id=arguments["target_agent_id"],
+                            requested_by=arguments["requested_by"],
+                            expected_output=arguments["expected_output"],
+                            known_checkpoint_version=int(
+                                arguments.get("known_checkpoint_version", 0)
+                            ),
+                            max_tokens=arguments.get("max_tokens"),
+                            capabilities=tuple(arguments.get("capabilities", [])),
+                            idempotency_key=arguments.get("idempotency_key"),
+                        )
+                    )
+                )
+
+            elif name == "recall_handoff_get":
+                return result_json(
+                    pipeline.handoff_service.get(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        version=int(arguments["version"])
+                        if arguments.get("version") is not None
+                        else None,
+                        agent_id=arguments["agent_id"],
+                    )
+                )
+
+            elif name == "recall_handoff_claim":
+                return result_json(
+                    pipeline.handoff_service.claim(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_progress":
+                return result_json(
+                    pipeline.handoff_service.progress(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        progress=arguments["progress"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_block":
+                return result_json(
+                    pipeline.handoff_service.block(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        blocker=arguments["blocker"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_complete":
+                return result_json(
+                    pipeline.handoff_service.complete(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        completion=HandoffCompletion(
+                            files_changed=tuple(arguments.get("files_changed", [])),
+                            work_completed=tuple(arguments.get("work_completed", [])),
+                            tests=arguments.get("tests", {}),
+                            blockers=tuple(arguments.get("blockers", [])),
+                            remaining_work=tuple(arguments.get("remaining_work", [])),
+                            new_decisions=tuple(arguments.get("new_decisions", [])),
+                            new_questions=tuple(arguments.get("new_questions", [])),
+                            used_skill_versions=tuple(
+                                arguments.get("used_skill_versions", [])
+                            ),
+                            used_memory_ids=tuple(arguments.get("used_memory_ids", [])),
+                            expanded_references=tuple(
+                                arguments.get("expanded_references", [])
+                            ),
+                        ),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_cancel":
+                return result_json(
+                    pipeline.handoff_service.cancel(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        reason=arguments["reason"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_delta":
+                return result_json(
+                    pipeline.handoff_service.get_delta(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        known_version=int(arguments["known_version"]),
+                        known_checkpoint_version=(
+                            int(arguments["known_checkpoint_version"])
+                            if arguments.get("known_checkpoint_version") is not None
+                            else None
+                        ),
+                        agent_id=arguments["agent_id"],
+                    )
+                )
+
+            elif name == "recall_handoff_explain":
+                return result_json(
+                    pipeline.handoff_service.explain(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        version=(
+                            int(arguments["version"])
+                            if arguments.get("version") is not None
+                            else None
+                        ),
+                        agent_id=arguments["agent_id"],
+                    )
+                )
+
+            elif name == "recall_handoff_expand_reference":
+                return result_json(
+                    pipeline.handoff_service.expand_reference(
+                        arguments["handoff_id"],
+                        arguments["reference_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
                     )
                 )
 

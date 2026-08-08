@@ -165,14 +165,16 @@ Exit gate:
 
 ## Phase 5 — Handoff Skills
 
+Status: **Complete**
+
 Build:
 
-- Parent-to-subagent handoff compiler
-- Target-agent-specific rendering
-- Expected-output contracts
-- Session checkpoint integration
-- Completion deltas
-- Skill-version deltas
+- [x] Cross-agent handoff compiler
+- [x] Target-agent-specific rendering and authorization
+- [x] Expected-output and structured completion contracts
+- [x] Session checkpoint integration
+- [x] Compact completion deltas
+- [x] Exact approved skill-version references
 
 Exit gate:
 

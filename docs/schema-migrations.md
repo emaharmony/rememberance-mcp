@@ -1,5 +1,16 @@
 # Schema migrations
 
+The current schema is version 10. Migration 9 added immutable, manually
+approved Recall Skills. Migration 10 adds scope-constrained `handoffs`,
+immutable `handoff_versions`, append-only `handoff_events`, immutable structured
+`handoff_completions`, and expandable `handoff_references`.
+
+Supported checks are clean `0 -> 10`, incremental `9 -> 10`, and idempotent
+`10 -> 10`. Existing memories, sessions, retrieval/utility telemetry, Context
+Pack V2 rows, and approved skills are not rewritten. Rollback remains restore
+from a verified backup and run the prior application artifact; down migrations
+are intentionally unsupported.
+
 Recall uses ordered, forward-only SQLite migrations for canonical schema
 changes. The current schema version is `9`.
 

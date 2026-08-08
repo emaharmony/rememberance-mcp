@@ -232,6 +232,13 @@ class Settings:
         default_factory=lambda: _number("SKILL_CONTEXT_BUDGET_RATIO", 0.15)
     )
 
+    HANDOFF_POLICY_VERSION: str = field(
+        default_factory=lambda: _text("HANDOFF_POLICY_VERSION", "handoff-v1")
+    )
+    HANDOFF_TTL_SECONDS: int = field(
+        default_factory=lambda: _integer("HANDOFF_TTL_SECONDS", 86_400)
+    )
+
     NATS_URL: str = field(
         default_factory=lambda: _text("NATS_URL", "nats://127.0.0.1:4222")
     )
@@ -332,6 +339,10 @@ class Settings:
             raise ValueError(
                 "RECALL_SKILL_CONTEXT_BUDGET_RATIO must be between 0 and 0.25"
             )
+        if not self.HANDOFF_POLICY_VERSION.strip():
+            raise ValueError("RECALL_HANDOFF_POLICY_VERSION must not be empty")
+        if self.HANDOFF_TTL_SECONDS <= 0:
+            raise ValueError("RECALL_HANDOFF_TTL_SECONDS must be positive")
         if self.OLLAMA_TIMEOUT_SECONDS <= 0:
             raise ValueError("RECALL_OLLAMA_TIMEOUT_SECONDS must be positive")
         if not self.OLLAMA_BASE_URL.startswith(("http://", "https://")):

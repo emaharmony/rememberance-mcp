@@ -1350,6 +1350,306 @@ def _migration_versioned_skills(conn: sqlite3.Connection) -> None:
         _require_columns(conn, table, columns)
 
 
+def _migration_agent_handoffs(conn: sqlite3.Connection) -> None:
+    """Add immutable, scope-aware, single-target agent handoffs."""
+    session_events_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'session_events'"
+    ).fetchone()
+    if session_events_sql and "handoff.created" not in str(session_events_sql[0]):
+        conn.execute("PRAGMA defer_foreign_keys=ON")
+        _execute_statements(
+            conn,
+            """
+            DROP TRIGGER IF EXISTS session_events_no_update;
+            DROP TRIGGER IF EXISTS session_events_no_delete;
+            DROP INDEX IF EXISTS idx_session_events_idempotency;
+            DROP INDEX IF EXISTS idx_events_session_created;
+            DROP INDEX IF EXISTS idx_events_task_created;
+            DROP INDEX IF EXISTS idx_checkpoints_session_version;
+            ALTER TABLE session_checkpoints RENAME TO session_checkpoints_v9;
+            ALTER TABLE session_events RENAME TO session_events_v9;
+
+            CREATE TABLE session_events (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK(sequence >= 1),
+                event_type TEXT NOT NULL CHECK(event_type IN (
+                    'session.started', 'session.closed', 'agent.joined',
+                    'agent.left', 'task.updated', 'checkpoint.created',
+                    'decision.proposed', 'decision.approved',
+                    'blocker.reported', 'work.completed',
+                    'validation.requested', 'handoff.created',
+                    'handoff.claimed', 'handoff.completed'
+                )),
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                idempotency_key TEXT,
+                created_at REAL NOT NULL,
+                UNIQUE(session_id, sequence),
+                FOREIGN KEY (session_id, task_id) REFERENCES sessions(id, task_id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            );
+            INSERT INTO session_events
+            SELECT * FROM session_events_v9;
+
+            CREATE TABLE session_checkpoints (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK(version >= 1),
+                objective TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                completed_json TEXT NOT NULL DEFAULT '[]',
+                remaining_json TEXT NOT NULL DEFAULT '[]',
+                constraints_json TEXT NOT NULL DEFAULT '[]',
+                approved_decisions_json TEXT NOT NULL DEFAULT '[]',
+                proposed_decisions_json TEXT NOT NULL DEFAULT '[]',
+                open_questions_json TEXT NOT NULL DEFAULT '[]',
+                blockers_json TEXT NOT NULL DEFAULT '[]',
+                important_files_json TEXT NOT NULL DEFAULT '[]',
+                known_failures_json TEXT NOT NULL DEFAULT '[]',
+                repository_json TEXT NOT NULL DEFAULT '{}',
+                source_agent_id TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                source_sequence INTEGER NOT NULL CHECK(source_sequence >= 1),
+                generated INTEGER NOT NULL DEFAULT 0 CHECK(generated IN (0, 1)),
+                created_at REAL NOT NULL,
+                UNIQUE(session_id, version),
+                FOREIGN KEY (session_id) REFERENCES sessions(id),
+                FOREIGN KEY (source_agent_id) REFERENCES agents(id),
+                FOREIGN KEY (source_event_id) REFERENCES session_events(id)
+            );
+            INSERT INTO session_checkpoints
+            SELECT * FROM session_checkpoints_v9;
+            DROP TABLE session_checkpoints_v9;
+            DROP TABLE session_events_v9;
+
+            CREATE UNIQUE INDEX idx_session_events_idempotency
+            ON session_events(session_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
+            CREATE INDEX idx_events_session_created
+            ON session_events(session_id, created_at, sequence);
+            CREATE INDEX idx_events_task_created
+            ON session_events(task_id, created_at, sequence);
+            CREATE INDEX idx_checkpoints_session_version
+            ON session_checkpoints(session_id, version);
+            CREATE TRIGGER session_events_no_update
+            BEFORE UPDATE ON session_events BEGIN
+                SELECT RAISE(ABORT, 'session events are append-only');
+            END;
+            CREATE TRIGGER session_events_no_delete
+            BEFORE DELETE ON session_events BEGIN
+                SELECT RAISE(ABORT, 'session events are append-only');
+            END;
+            """,
+        )
+    _execute_statements(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS handoffs (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            source_agent_id TEXT NOT NULL,
+            target_agent_id TEXT NOT NULL,
+            requested_by TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ready' CHECK(status IN (
+                'draft', 'ready', 'claimed', 'in_progress', 'completed',
+                'blocked', 'rejected', 'expired', 'cancelled', 'superseded'
+            )),
+            current_version INTEGER NOT NULL DEFAULT 0 CHECK(current_version >= 0),
+            source_checkpoint_version INTEGER NOT NULL DEFAULT 0
+                CHECK(source_checkpoint_version >= 0),
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            claimed_at REAL,
+            completed_at REAL,
+            expires_at REAL,
+            UNIQUE(id, task_id, session_id),
+            FOREIGN KEY (project_id, user_id, workspace_id)
+                REFERENCES projects(id, user_id, workspace_id),
+            FOREIGN KEY (repository_id, user_id, workspace_id, project_id)
+                REFERENCES repositories(id, user_id, workspace_id, project_id),
+            FOREIGN KEY (task_id, user_id, workspace_id, project_id, repository_id)
+                REFERENCES tasks(id, user_id, workspace_id, project_id, repository_id),
+            FOREIGN KEY (session_id, task_id) REFERENCES sessions(id, task_id),
+            FOREIGN KEY (source_agent_id) REFERENCES agents(id),
+            FOREIGN KEY (target_agent_id) REFERENCES agents(id),
+            FOREIGN KEY (requested_by) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_handoffs_idempotency
+        ON handoffs(user_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_handoffs_scope_status
+        ON handoffs(user_id, workspace_id, project_id, repository_id, status);
+        CREATE INDEX IF NOT EXISTS idx_handoffs_target_status
+        ON handoffs(target_agent_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_handoffs_task_session
+        ON handoffs(task_id, session_id, current_version);
+
+        CREATE TABLE IF NOT EXISTS handoff_versions (
+            handoff_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK(version >= 1),
+            schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version >= 1),
+            content_json TEXT NOT NULL,
+            content_markdown TEXT NOT NULL,
+            compact_markdown TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            context_pack_id TEXT NOT NULL,
+            token_estimate INTEGER NOT NULL CHECK(token_estimate >= 0),
+            policy_version TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (handoff_id, version),
+            FOREIGN KEY (handoff_id) REFERENCES handoffs(id),
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS handoff_events (
+            id TEXT PRIMARY KEY,
+            handoff_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            agent_id TEXT NOT NULL,
+            event_type TEXT NOT NULL CHECK(event_type IN (
+                'handoff.created', 'handoff.ready', 'handoff.claimed',
+                'handoff.started', 'handoff.progress', 'handoff.blocked',
+                'handoff.completed', 'handoff.rejected', 'handoff.expired',
+                'handoff.cancelled', 'handoff.superseded'
+            )),
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (handoff_id, version)
+                REFERENCES handoff_versions(handoff_id, version),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_handoff_events_idempotency
+        ON handoff_events(handoff_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_handoff_events_created
+        ON handoff_events(handoff_id, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS handoff_completions (
+            handoff_id TEXT NOT NULL,
+            handoff_version INTEGER NOT NULL,
+            agent_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('completed', 'blocked')),
+            files_changed_json TEXT NOT NULL DEFAULT '[]',
+            work_completed_json TEXT NOT NULL DEFAULT '[]',
+            tests_json TEXT NOT NULL DEFAULT '{}',
+            blockers_json TEXT NOT NULL DEFAULT '[]',
+            remaining_work_json TEXT NOT NULL DEFAULT '[]',
+            new_decisions_json TEXT NOT NULL DEFAULT '[]',
+            new_questions_json TEXT NOT NULL DEFAULT '[]',
+            used_skill_versions_json TEXT NOT NULL DEFAULT '[]',
+            used_memory_ids_json TEXT NOT NULL DEFAULT '[]',
+            expanded_references_json TEXT NOT NULL DEFAULT '[]',
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (handoff_id, handoff_version),
+            FOREIGN KEY (handoff_id, handoff_version)
+                REFERENCES handoff_versions(handoff_id, version),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_handoff_completion_idempotency
+        ON handoff_completions(handoff_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS handoff_references (
+            id TEXT PRIMARY KEY,
+            handoff_id TEXT NOT NULL,
+            handoff_version INTEGER NOT NULL,
+            reference_type TEXT NOT NULL CHECK(reference_type IN (
+                'context', 'skill', 'memory', 'repository',
+                'decision', 'session_event'
+            )),
+            source_id TEXT NOT NULL,
+            source_version TEXT,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            content_json TEXT NOT NULL DEFAULT '{}',
+            token_estimate INTEGER NOT NULL DEFAULT 0 CHECK(token_estimate >= 0),
+            created_at REAL NOT NULL,
+            FOREIGN KEY (handoff_id, handoff_version)
+                REFERENCES handoff_versions(handoff_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_handoff_references_version
+        ON handoff_references(handoff_id, handoff_version, reference_type);
+
+        CREATE TRIGGER IF NOT EXISTS handoff_versions_no_update
+        BEFORE UPDATE ON handoff_versions BEGIN
+            SELECT RAISE(ABORT, 'handoff versions are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS handoff_versions_no_delete
+        BEFORE DELETE ON handoff_versions BEGIN
+            SELECT RAISE(ABORT, 'handoff versions are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS handoff_events_no_update
+        BEFORE UPDATE ON handoff_events BEGIN
+            SELECT RAISE(ABORT, 'handoff events are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS handoff_events_no_delete
+        BEFORE DELETE ON handoff_events BEGIN
+            SELECT RAISE(ABORT, 'handoff events are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS handoff_completions_no_update
+        BEFORE UPDATE ON handoff_completions BEGIN
+            SELECT RAISE(ABORT, 'handoff completions are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS handoff_completions_no_delete
+        BEFORE DELETE ON handoff_completions BEGIN
+            SELECT RAISE(ABORT, 'handoff completions are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS handoff_references_no_update
+        BEFORE UPDATE ON handoff_references BEGIN
+            SELECT RAISE(ABORT, 'handoff references are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS handoff_references_no_delete
+        BEFORE DELETE ON handoff_references BEGIN
+            SELECT RAISE(ABORT, 'handoff references are immutable');
+        END;
+        """,
+    )
+    for table, columns in {
+        "handoffs": {
+            "id",
+            "task_id",
+            "session_id",
+            "source_agent_id",
+            "target_agent_id",
+            "status",
+            "current_version",
+        },
+        "handoff_versions": {
+            "handoff_id",
+            "version",
+            "content_json",
+            "content_hash",
+            "source_fingerprint",
+            "context_pack_id",
+        },
+        "handoff_events": {"handoff_id", "version", "event_type", "agent_id"},
+        "handoff_completions": {
+            "handoff_id",
+            "handoff_version",
+            "agent_id",
+            "status",
+        },
+        "handoff_references": {
+            "id",
+            "handoff_id",
+            "handoff_version",
+            "reference_type",
+        },
+    }.items():
+        _require_columns(conn, table, columns)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_memory", _migration_core_memory),
     Migration(2, "memory_v2", _migration_memory_v2),
@@ -1360,6 +1660,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(7, "retrieval_utility", _migration_retrieval_utility),
     Migration(8, "context_pack_v2", _migration_context_pack_v2),
     Migration(9, "versioned_skills", _migration_versioned_skills),
+    Migration(10, "agent_handoffs", _migration_agent_handoffs),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
 

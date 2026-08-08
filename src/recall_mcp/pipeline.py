@@ -57,6 +57,7 @@ from recall_mcp.embeddings import EmbeddingError, OllamaEmbeddingProvider
 from recall_mcp.dream.cycle import DreamCycle
 from recall_mcp.feedback import RetrievalFeedbackService
 from recall_mcp.gate_backends import GateMetrics
+from recall_mcp.handoff import HandoffService
 from recall_mcp.outbox import CaptureOutcome, CaptureOutboxDispatcher
 from recall_mcp.skills import SkillCandidateService, SkillService
 from recall_mcp.store.store import OutboxJob
@@ -178,6 +179,14 @@ class MemoryPipeline:
             self.feedback_service,
             self._search_with_telemetry,
             skill_service=self.skill_service,
+        )
+        self.handoff_service = HandoffService(
+            self.settings.DB_PATH,
+            self.settings,
+            self.task_service,
+            self.session_service,
+            self.context_service,
+            self.skill_service,
         )
 
         # ── V2: Dream Cycle ──────────────────────────────────
@@ -775,6 +784,7 @@ class MemoryPipeline:
             "retrieval_feedback": self.feedback_service.telemetry_stats(),
             "context_packs": self.context_service.stats(),
             "skills": self.skill_service.stats(),
+            "handoffs": self.handoff_service.stats(),
             "entities": self.entity_store.stats(),
             "facts": self.fact_store.stats(),
             "v2": self.store_v2.v2_stats(),
