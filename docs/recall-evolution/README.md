@@ -45,11 +45,11 @@ Implementation records:
 
 Phase 1 shared task and session continuity, Phase 2 retrieval feedback and
 shadow utility scoring, Phase 3 Context Pack V2, Phase 4 manually approved
-versioned Recall Skills, and Phase 5 cross-agent Handoff Skills are complete on
-top of the verified transactional-outbox checkpoint. Phase 6 CAG caching,
-skill-version awareness, and broader context deltas is the next recommended
-slice. Deferred refinements remain documented; they are not silently marked
-complete.
+versioned Recall Skills, Phase 5 cross-agent Handoff Skills, and Phase 6
+client-aware CAG delivery are complete on top of the verified transactional-
+outbox checkpoint. The next recommendation is real external-adapter evaluation
+before choosing Curator automation or server-mode storage. Deferred refinements
+remain documented; they are not silently marked complete.
 
 ## One-line architecture
 

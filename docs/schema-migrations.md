@@ -35,6 +35,12 @@ Current migrations are:
 | 7 | `retrieval_utility` | Retrieval telemetry, context usage, task outcomes, explainable utility history, and reversible lifecycle state |
 | 8 | `context_pack_v2` | Reproducible V2 snapshots, scope and policy metadata, dispositions, references, fingerprints, and token accounting |
 | 9 | `versioned_skills` | Scope-aware skills, immutable versions and sources, exact-version review audit, usage feedback, and Context Pack linkage |
+| 10 | `agent_handoffs` | Immutable target-agent handoffs, lifecycle audit, structured completion, references, and session updates |
+| 11 | `cag_context_cache` | Disposable scoped cache metadata and dependencies, immutable CAG deliveries and feedback, and invalidation audit |
+
+Migration 11 cache rows are rebuildable optimization metadata. Delivery records
+remain an audit of what was sent, but neither cache table becomes canonical
+task, memory, session, skill, or handoff truth.
 
 FTS5 tables and triggers are not canonical migration state. They are derived
 indexes that Recall can rebuild from canonical memories.

@@ -50,6 +50,11 @@ recall-service = "recall_mcp.serve:main"
 recall-admin = "recall_mcp.admin:main"
 remembrance-mcp = "remembrance_mcp:main"
 remembrance-service = "remembrance_mcp.serve:main"
+
+[tool.setuptools.package-data]
+"recall_mcp.integrations.claude_code" = ["settings.snippet.json", "recall_mcp_stdio.cmd"]
+"recall_mcp.integrations.codex" = ["hooks.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

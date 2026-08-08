@@ -51,5 +51,14 @@ All settings use the `RECALL_` prefix. Legacy `REMEMBRANCE_` names remain tempor
 | RECALL_SKILL_CONTEXT_BUDGET_RATIO | 0.15 | Context budget available to approved fresh skills; range 0-0.25 |
 | RECALL_HANDOFF_POLICY_VERSION | handoff-v1 | Persisted provider-neutral handoff policy identifier |
 | RECALL_HANDOFF_TTL_SECONDS | 86400 | Default handoff expiry interval; expiry does not delete history |
+| RECALL_CAG_ENABLED | true | Enable verified client-aware delivery; false always uses full context |
+| RECALL_CAG_POLICY_VERSION | cag-v1 | Cache and delta compatibility policy |
+| RECALL_CACHE_MAX_ENTRIES | 256 | Maximum entries in the bounded hot LRU |
+| RECALL_CACHE_MAX_BYTES | 16777216 | Approximate serialized-byte limit for the hot LRU |
+| RECALL_CACHE_TTL_SECONDS | 900 | Durable cache metadata lifetime before review |
+| RECALL_CACHE_LAZY_REBUILD | true | Rebuild stale entries on demand |
+| RECALL_SKILL_DELTA_MAX_RATIO | 0.7 | Full-skill threshold when a delta approaches full size |
+| RECALL_CONTEXT_DELTA_MAX_RATIO | 0.7 | Full-context threshold when a delta approaches full size |
+| RECALL_CACHE_METRICS_ENABLED | true | Emit content-free CAG metrics |
 
 A non-loopback `RECALL_HOST` requires a configured token. Container deployments use a non-loopback container bind but publish only to host loopback.

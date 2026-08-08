@@ -1650,6 +1650,248 @@ def _migration_agent_handoffs(conn: sqlite3.Connection) -> None:
         _require_columns(conn, table, columns)
 
 
+def _migration_cag_context_cache(conn: sqlite3.Connection) -> None:
+    """Add disposable CAG cache metadata and immutable delivery telemetry."""
+    _execute_statements(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS cag_cache_entries (
+            id TEXT PRIMARY KEY,
+            cache_key TEXT NOT NULL UNIQUE,
+            artifact_type TEXT NOT NULL CHECK(artifact_type IN (
+                'context_pack', 'skill_render', 'skill_delta',
+                'context_delivery', 'reference_metadata'
+            )),
+            user_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            session_id TEXT,
+            agent_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            artifact_version TEXT,
+            schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+            policy_version TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            dependency_fingerprint TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            token_estimate INTEGER NOT NULL CHECK(token_estimate >= 0),
+            status TEXT NOT NULL DEFAULT 'fresh' CHECK(status IN (
+                'fresh', 'stale', 'expired', 'invalid', 'evicted'
+            )),
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            last_accessed_at REAL NOT NULL,
+            expires_at REAL,
+            stale_at REAL,
+            stale_reason TEXT,
+            access_count INTEGER NOT NULL DEFAULT 0 CHECK(access_count >= 0),
+            FOREIGN KEY (project_id, user_id, workspace_id)
+                REFERENCES projects(id, user_id, workspace_id),
+            FOREIGN KEY (repository_id, user_id, workspace_id, project_id)
+                REFERENCES repositories(id, user_id, workspace_id, project_id),
+            FOREIGN KEY (task_id, user_id, workspace_id, project_id, repository_id)
+                REFERENCES tasks(id, user_id, workspace_id, project_id, repository_id),
+            FOREIGN KEY (session_id, task_id) REFERENCES sessions(id, task_id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cag_cache_scope_status
+        ON cag_cache_entries(
+            user_id, workspace_id, project_id, repository_id,
+            task_id, session_id, agent_id, status
+        );
+        CREATE INDEX IF NOT EXISTS idx_cag_cache_artifact
+        ON cag_cache_entries(artifact_type, artifact_id, artifact_version);
+        CREATE INDEX IF NOT EXISTS idx_cag_cache_due
+        ON cag_cache_entries(status, expires_at, last_accessed_at);
+
+        CREATE TABLE IF NOT EXISTS cag_cache_dependencies (
+            cache_entry_id TEXT NOT NULL,
+            dependency_type TEXT NOT NULL CHECK(dependency_type IN (
+                'task', 'session_checkpoint', 'decision', 'constraint',
+                'memory', 'skill', 'handoff', 'repository_commit',
+                'policy', 'token_estimator', 'validation_state'
+            )),
+            dependency_id TEXT NOT NULL,
+            dependency_version TEXT,
+            dependency_hash TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (
+                cache_entry_id, dependency_type, dependency_id
+            ),
+            FOREIGN KEY (cache_entry_id) REFERENCES cag_cache_entries(id)
+                ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_cag_dependencies_lookup
+        ON cag_cache_dependencies(
+            dependency_type, dependency_id, dependency_version
+        );
+
+        CREATE TABLE IF NOT EXISTS cag_deliveries (
+            id TEXT PRIMARY KEY,
+            context_pack_id TEXT,
+            user_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            session_id TEXT,
+            agent_id TEXT NOT NULL,
+            client_id TEXT,
+            client_type TEXT,
+            delivery_mode TEXT NOT NULL CHECK(delivery_mode IN (
+                'full', 'delta', 'no_change', 'refresh_required',
+                'fallback_full'
+            )),
+            known_state_json TEXT NOT NULL DEFAULT '{}',
+            authoritative_state_json TEXT NOT NULL DEFAULT '{}',
+            response_json TEXT NOT NULL,
+            explanation_json TEXT NOT NULL DEFAULT '{}',
+            full_tokens INTEGER NOT NULL CHECK(full_tokens >= 0),
+            delivered_tokens INTEGER NOT NULL CHECK(delivered_tokens >= 0),
+            avoided_tokens INTEGER NOT NULL CHECK(avoided_tokens >= 0),
+            savings_ratio REAL NOT NULL CHECK(
+                savings_ratio >= 0.0 AND savings_ratio <= 1.0
+            ),
+            server_cache_hit INTEGER NOT NULL DEFAULT 0 CHECK(
+                server_cache_hit IN (0, 1)
+            ),
+            pack_reused INTEGER NOT NULL DEFAULT 0 CHECK(pack_reused IN (0, 1)),
+            fallback_reason TEXT,
+            estimator_version TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id),
+            FOREIGN KEY (project_id, user_id, workspace_id)
+                REFERENCES projects(id, user_id, workspace_id),
+            FOREIGN KEY (repository_id, user_id, workspace_id, project_id)
+                REFERENCES repositories(id, user_id, workspace_id, project_id),
+            FOREIGN KEY (task_id, user_id, workspace_id, project_id, repository_id)
+                REFERENCES tasks(id, user_id, workspace_id, project_id, repository_id),
+            FOREIGN KEY (session_id, task_id) REFERENCES sessions(id, task_id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cag_delivery_idempotency
+        ON cag_deliveries(user_id, client_id, idempotency_key)
+        WHERE client_id IS NOT NULL AND idempotency_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_cag_deliveries_scope_created
+        ON cag_deliveries(
+            user_id, project_id, repository_id, task_id, created_at
+        );
+        CREATE INDEX IF NOT EXISTS idx_cag_deliveries_mode_created
+        ON cag_deliveries(delivery_mode, created_at);
+
+        CREATE TABLE IF NOT EXISTS cag_delivery_feedback (
+            id TEXT PRIMARY KEY,
+            delivery_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            used_skill_versions_json TEXT NOT NULL DEFAULT '[]',
+            used_context_sections_json TEXT NOT NULL DEFAULT '[]',
+            expanded_references_json TEXT NOT NULL DEFAULT '[]',
+            outcome TEXT,
+            idempotency_key TEXT,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (delivery_id) REFERENCES cag_deliveries(id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cag_feedback_idempotency
+        ON cag_delivery_feedback(delivery_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS cag_invalidation_events (
+            id TEXT PRIMARY KEY,
+            cache_entry_id TEXT,
+            user_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT,
+            task_id TEXT,
+            session_id TEXT,
+            actor_id TEXT,
+            reason TEXT NOT NULL,
+            previous_status TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (cache_entry_id) REFERENCES cag_cache_entries(id)
+                ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cag_invalidations_scope_created
+        ON cag_invalidation_events(user_id, project_id, created_at);
+
+        CREATE TRIGGER IF NOT EXISTS cag_deliveries_no_update
+        BEFORE UPDATE ON cag_deliveries BEGIN
+            SELECT RAISE(ABORT, 'CAG deliveries are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS cag_deliveries_no_delete
+        BEFORE DELETE ON cag_deliveries BEGIN
+            SELECT RAISE(ABORT, 'CAG deliveries are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS cag_delivery_feedback_no_update
+        BEFORE UPDATE ON cag_delivery_feedback BEGIN
+            SELECT RAISE(ABORT, 'CAG delivery feedback is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS cag_delivery_feedback_no_delete
+        BEFORE DELETE ON cag_delivery_feedback BEGIN
+            SELECT RAISE(ABORT, 'CAG delivery feedback is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS cag_invalidations_no_update
+        BEFORE UPDATE ON cag_invalidation_events BEGIN
+            SELECT RAISE(ABORT, 'CAG invalidations are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS cag_invalidations_no_delete
+        BEFORE DELETE ON cag_invalidation_events BEGIN
+            SELECT RAISE(ABORT, 'CAG invalidations are append-only');
+        END;
+        """,
+    )
+    for table, columns in {
+        "cag_cache_entries": {
+            "id",
+            "cache_key",
+            "artifact_type",
+            "source_fingerprint",
+            "dependency_fingerprint",
+            "status",
+            "expires_at",
+        },
+        "cag_cache_dependencies": {
+            "cache_entry_id",
+            "dependency_type",
+            "dependency_id",
+            "dependency_hash",
+        },
+        "cag_deliveries": {
+            "id",
+            "context_pack_id",
+            "delivery_mode",
+            "known_state_json",
+            "authoritative_state_json",
+            "response_json",
+            "full_tokens",
+            "delivered_tokens",
+            "avoided_tokens",
+        },
+        "cag_delivery_feedback": {
+            "id",
+            "delivery_id",
+            "agent_id",
+            "used_skill_versions_json",
+            "used_context_sections_json",
+        },
+        "cag_invalidation_events": {
+            "id",
+            "cache_entry_id",
+            "project_id",
+            "reason",
+            "previous_status",
+        },
+    }.items():
+        _require_columns(conn, table, columns)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_memory", _migration_core_memory),
     Migration(2, "memory_v2", _migration_memory_v2),
@@ -1661,6 +1903,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(8, "context_pack_v2", _migration_context_pack_v2),
     Migration(9, "versioned_skills", _migration_versioned_skills),
     Migration(10, "agent_handoffs", _migration_agent_handoffs),
+    Migration(11, "cag_context_cache", _migration_cag_context_cache),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
 

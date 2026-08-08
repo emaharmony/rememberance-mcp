@@ -46,7 +46,7 @@ jobs:
           inputs: dist/*.whl
           verify: true
           verify-cert-identity: >-
-            https://github.com/emaharmony/remembrance/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
+            https://github.com/emaharmony/recall/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
           verify-oidc-issuer: https://token.actions.githubusercontent.com
       - name: Publish GitHub release
         env:

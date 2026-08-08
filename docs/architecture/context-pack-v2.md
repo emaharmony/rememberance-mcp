@@ -68,7 +68,8 @@ enable utility ranking.
 and fingerprints now carry optional Phase 4 approved skill versions. Skills use
 their own budget class and never displace mandatory context. Pending or stale
 versions are excluded, while exact selected versions and usage semantics remain
-auditable. Context Pack V2 still does not cache or automatically publish skills.
+auditable. Phase 6 may cache and delta-deliver this immutable output, but it does
+not automatically publish skills or change Context Pack V2 assembly rules.
 
 ## Deterministic benchmark
 
@@ -84,4 +85,5 @@ Known limitations are the approximate provider-neutral estimator, client-
 reported use feedback, no external client adapter changes in this repository,
 no automatic conversion of arbitrary memories into validation requests, no
 new NATS context lifecycle subjects, shadow-only utility by default, and no
-automatic skill approval or CAG skill caching.
+automatic skill approval. Phase 6 cache behavior is documented separately in
+[`cag-delivery.md`](cag-delivery.md).

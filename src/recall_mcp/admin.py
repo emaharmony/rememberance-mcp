@@ -201,6 +201,7 @@ def command_init(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
+    from recall_mcp.cag import CAGDeliveryService
     from recall_mcp.context import ContextPackService
     from recall_mcp.continuity import ContinuityStore, SessionService, TaskService
     from recall_mcp.feedback import RetrievalFeedbackService
@@ -251,6 +252,23 @@ def command_doctor(settings: Settings, args: argparse.Namespace) -> int:
             skills,
         ).health(),
     }
+    handoffs = HandoffService(
+        settings.DB_PATH,
+        settings,
+        tasks,
+        sessions,
+        context_service,
+        skills,
+    )
+    checks["cag_service"] = CAGDeliveryService(
+        settings.DB_PATH,
+        settings,
+        tasks,
+        sessions,
+        context_service,
+        skills,
+        handoffs,
+    ).health()
     token_file = args.token_file or settings.API_TOKEN_FILE
     checks["token_file"] = str(token_file) if token_file else None
     checks["token_present"] = bool(
@@ -500,6 +518,24 @@ def command_outbox(settings: Settings, args: argparse.Namespace) -> int:
     return 0 if retried else 1
 
 
+def command_install_hooks(_settings: Settings, args: argparse.Namespace) -> int:
+    """Wire up an agent's MCP registration and hooks with no hand-editing."""
+    from recall_mcp.install_hooks import run_install_hooks
+
+    result = run_install_hooks(
+        agents=args.agent,
+        dry_run=args.dry_run,
+        scope=args.scope,
+        force=args.force,
+        skip_mcp=args.skip_mcp,
+        skip_hooks=args.skip_hooks,
+        config_path=args.config_path,
+        settings_path=args.settings_path,
+    )
+    print(json.dumps(result, indent=2))
+    return 0 if result["ok"] else 1
+
+
 def command_utility(settings: Settings, args: argparse.Namespace) -> int:
     """Inspect shadow utility and perform audited, reversible lifecycle actions."""
     from recall_mcp.feedback import RetrievalFeedbackService
@@ -551,6 +587,92 @@ def command_context(settings: Settings, args: argparse.Namespace) -> int:
     )
     try:
         result = service.inspect(args.context_pack_id, explain=args.action == "explain")
+    except ContinuityError as exc:
+        print(json.dumps({"error": str(exc), "code": exc.code}))
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _cag_admin_scope(args: argparse.Namespace) -> dict[str, str | None]:
+    return {
+        "user_id": args.user_id,
+        "workspace_id": args.workspace_id,
+        "project_id": args.project_id,
+        "repository_id": args.repository_id,
+        "task_id": args.task_id,
+        "session_id": args.session_id,
+        "agent_id": args.agent_id,
+    }
+
+
+def command_cache(settings: Settings, args: argparse.Namespace) -> int:
+    """Inspect or invalidate disposable CAG cache metadata."""
+    from recall_mcp.continuity import ContinuityError
+    from recall_mcp.pipeline import MemoryPipeline
+
+    try:
+        with MemoryPipeline(settings, start_outbox_worker=False) as pipeline:
+            service = pipeline.cag_service
+            if args.action == "status":
+                result: object = service.stats()
+            elif args.action == "list":
+                result = {
+                    "entries": service.inspect_cache(
+                        _cag_admin_scope(args), status=args.status
+                    )
+                }
+            elif args.action == "inspect":
+                if not args.cache_entry_id:
+                    raise ContinuityError("cache inspect requires a cache entry ID")
+                result = service.inspect_cache_entry(
+                    args.cache_entry_id, _cag_admin_scope(args)
+                )
+            elif args.action == "invalidate":
+                result = service.invalidate_scope(
+                    user_id=args.user_id,
+                    workspace_id=args.workspace_id,
+                    project_id=args.project_id,
+                    repository_id=args.repository_id,
+                    task_id=args.task_id,
+                    session_id=args.session_id,
+                    agent_id=args.agent_id,
+                    cache_entry_id=args.cache_entry_id,
+                    reason=args.reason or "manual_invalidation",
+                    actor_id=args.actor_id,
+                )
+            elif args.action == "prune-expired":
+                result = service.prune_expired()
+            else:  # pragma: no cover - argparse enforces choices
+                raise ContinuityError("unsupported cache action")
+    except ContinuityError as exc:
+        print(json.dumps({"error": str(exc), "code": exc.code}))
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def command_delivery(settings: Settings, args: argparse.Namespace) -> int:
+    """Inspect persisted CAG deliveries without starting a worker."""
+    from recall_mcp.continuity import ContinuityError
+    from recall_mcp.pipeline import MemoryPipeline
+
+    try:
+        with MemoryPipeline(settings, start_outbox_worker=False) as pipeline:
+            if args.action == "stats":
+                result: object = pipeline.cag_service.stats()
+            elif not args.delivery_id:
+                raise ContinuityError("delivery ID is required for this action")
+            elif args.action == "inspect":
+                result = pipeline.cag_service.get_delivery(
+                    args.delivery_id, _cag_admin_scope(args)
+                )
+            elif args.action == "explain":
+                result = pipeline.cag_service.explain(
+                    args.delivery_id, _cag_admin_scope(args)
+                )
+            else:  # pragma: no cover - argparse enforces choices
+                raise ContinuityError("unsupported delivery action")
     except ContinuityError as exc:
         print(json.dumps({"error": str(exc), "code": exc.code}))
         return 1
@@ -781,6 +903,51 @@ def build_parser() -> argparse.ArgumentParser:
     outbox = subparsers.add_parser("outbox")
     outbox.add_argument("action", choices=["status", "retry"])
     outbox.add_argument("job_id", nargs="?")
+    install_hooks = subparsers.add_parser(
+        "install-hooks",
+        description=(
+            "Register the Recall MCP server and SessionStart/Stop hooks for an "
+            "agent (Claude Code, Codex) directly from an installed recall-mcp "
+            "-- no source checkout, no hand-editing of JSON/TOML."
+        ),
+    )
+    install_hooks.add_argument(
+        "--agent",
+        action="append",
+        required=True,
+        choices=["claude-code", "codex", "all"],
+        help="Agent to wire up. May be given more than once; 'all' wires up every known agent.",
+    )
+    install_hooks.add_argument(
+        "--dry-run", action="store_true", help="Print the plan; write nothing."
+    )
+    install_hooks.add_argument(
+        "--scope",
+        choices=["user", "local", "project"],
+        default="user",
+        help="MCP registration scope (claude-code only; ignored by codex, which has no scope concept).",
+    )
+    install_hooks.add_argument(
+        "--force",
+        action="store_true",
+        help="Attempt a best-effort rename for an unrecognized 'remembrance' command.",
+    )
+    install_hooks.add_argument(
+        "--skip-mcp", action="store_true", help="Skip MCP server registration."
+    )
+    install_hooks.add_argument(
+        "--skip-hooks", action="store_true", help="Skip SessionStart/Stop hook wiring."
+    )
+    install_hooks.add_argument(
+        "--config-path",
+        type=Path,
+        help="Override the MCP registration file (claude-code only; e.g. a scratch copy of ~/.claude.json).",
+    )
+    install_hooks.add_argument(
+        "--settings-path",
+        type=Path,
+        help="Override the hooks file (~/.claude/settings.json or ~/.codex/hooks.json).",
+    )
     utility = subparsers.add_parser("utility")
     utility.add_argument(
         "action",
@@ -792,6 +959,31 @@ def build_parser() -> argparse.ArgumentParser:
     context = subparsers.add_parser("context")
     context.add_argument("action", choices=["inspect", "explain"])
     context.add_argument("context_pack_id")
+    cache = subparsers.add_parser("cache")
+    cache.add_argument(
+        "action", choices=["status", "list", "inspect", "invalidate", "prune-expired"]
+    )
+    cache.add_argument("cache_entry_id", nargs="?")
+    cache.add_argument("--user-id")
+    cache.add_argument("--workspace-id")
+    cache.add_argument("--project-id")
+    cache.add_argument("--repository-id")
+    cache.add_argument("--task-id")
+    cache.add_argument("--session-id")
+    cache.add_argument("--agent-id")
+    cache.add_argument("--actor-id")
+    cache.add_argument("--status")
+    cache.add_argument("--reason")
+    delivery = subparsers.add_parser("delivery")
+    delivery.add_argument("action", choices=["inspect", "explain", "stats"])
+    delivery.add_argument("delivery_id", nargs="?")
+    delivery.add_argument("--user-id")
+    delivery.add_argument("--workspace-id")
+    delivery.add_argument("--project-id")
+    delivery.add_argument("--repository-id")
+    delivery.add_argument("--task-id")
+    delivery.add_argument("--session-id")
+    delivery.add_argument("--agent-id")
     skill = subparsers.add_parser("skill")
     skill.add_argument(
         "action",
@@ -892,6 +1084,7 @@ def main() -> None:
         "restore": command_restore,
         "integrity-check": command_integrity,
         "reembed": command_reembed,
+        "install-hooks": command_install_hooks,
     }
     if args.command == "models":
         code = command_models_pull(settings, args)
@@ -905,6 +1098,10 @@ def main() -> None:
         code = command_utility(settings, args)
     elif args.command == "context":
         code = command_context(settings, args)
+    elif args.command == "cache":
+        code = command_cache(settings, args)
+    elif args.command == "delivery":
+        code = command_delivery(settings, args)
     elif args.command == "skill":
         code = command_skill(settings, args)
     elif args.command == "handoff":

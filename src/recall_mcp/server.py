@@ -50,6 +50,7 @@ def create_server():
     from mcp.server import Server
     from mcp.types import Tool, TextContent
     from recall_mcp.config import Settings
+    from recall_mcp.cag import CAGRequest, ClientState
     from recall_mcp.continuity import ContinuityError
     from recall_mcp.context import ContextPackRequest
     from recall_mcp.handoff import (
@@ -955,6 +956,103 @@ def create_server():
                 },
             ),
             continuity_tool(
+                "recall_context_deliver",
+                "Deliver full, delta, no-change, refresh, or safe fallback context.",
+                [
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                    "agent_id",
+                ],
+                {
+                    **handoff_scope_properties,
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "max_tokens": {"type": "integer", "minimum": 1},
+                    "branch": {"type": "string"},
+                    "commit_sha": {"type": "string"},
+                    "requested_sections": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "client_capabilities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "retrieval_limit": {"type": "integer", "minimum": 1},
+                    "client_state": {
+                        "type": "object",
+                        "properties": {
+                            "client_id": {"type": "string"},
+                            "client_type": {"type": "string"},
+                            "known_checkpoint_version": {
+                                "type": "integer",
+                                "minimum": 0,
+                            },
+                            "known_context_pack_id": {"type": "string"},
+                            "known_context_pack_fingerprint": {"type": "string"},
+                            "known_skills": {"type": "object"},
+                            "known_handoffs": {"type": "object"},
+                            "capabilities": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_delivery_get",
+                "Fetch one persisted CAG delivery in its exact scope.",
+                [*handoff_scope_properties, "agent_id", "delivery_id"],
+                {
+                    **handoff_scope_properties,
+                    "agent_id": {"type": "string"},
+                    "delivery_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_delivery_explain",
+                "Explain a CAG mode, state validation, dependencies, and token estimate.",
+                [*handoff_scope_properties, "agent_id", "delivery_id"],
+                {
+                    **handoff_scope_properties,
+                    "agent_id": {"type": "string"},
+                    "delivery_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_cache_status",
+                "Return content-free durable and hot CAG cache diagnostics.",
+                [],
+                {},
+            ),
+            continuity_tool(
+                "recall_cache_invalidate",
+                "Audit and invalidate one scoped CAG cache entry.",
+                [*handoff_scope_properties, "agent_id", "cache_entry_id"],
+                {
+                    **handoff_scope_properties,
+                    "agent_id": {"type": "string"},
+                    "cache_entry_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_cache_inspect",
+                "Inspect one scoped cache entry and its content-free dependencies.",
+                [*handoff_scope_properties, "agent_id", "cache_entry_id"],
+                {
+                    **handoff_scope_properties,
+                    "agent_id": {"type": "string"},
+                    "cache_entry_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
                 "recall_task_outcome",
                 "Record a task outcome for context the task actually used.",
                 ["task_id", "status", "successful"],
@@ -1032,6 +1130,20 @@ def create_server():
                     task_id=str(arguments.get("task_id") or ""),
                     session_id=str(arguments.get("session_id") or ""),
                 )
+
+            def cag_scope() -> dict[str, str | None]:
+                return {
+                    key: arguments.get(key)
+                    for key in (
+                        "user_id",
+                        "workspace_id",
+                        "project_id",
+                        "repository_id",
+                        "task_id",
+                        "session_id",
+                        "agent_id",
+                    )
+                }
 
             if name == "recall_task_create":
                 result = pipeline.task_service.create_task(
@@ -1430,6 +1542,89 @@ def create_server():
                             retrieval_limit=int(arguments.get("retrieval_limit", 10)),
                             schema_version=int(arguments.get("schema_version", 2)),
                         )
+                    )
+                )
+
+            elif name == "recall_context_deliver":
+                state_body = arguments.get("client_state")
+                if state_body is not None and not isinstance(state_body, dict):
+                    raise ValueError("client_state must be an object")
+                client_state = None
+                if isinstance(state_body, dict):
+                    client_state = ClientState(
+                        client_id=state_body.get("client_id"),
+                        client_type=state_body.get("client_type"),
+                        known_checkpoint_version=state_body.get(
+                            "known_checkpoint_version"
+                        ),
+                        known_context_pack_id=state_body.get("known_context_pack_id"),
+                        known_context_pack_fingerprint=state_body.get(
+                            "known_context_pack_fingerprint"
+                        ),
+                        known_skills=state_body.get("known_skills", {}),
+                        known_handoffs=state_body.get("known_handoffs", {}),
+                        capabilities=tuple(state_body.get("capabilities", [])),
+                    )
+                return result_json(
+                    pipeline.deliver_context(
+                        CAGRequest(
+                            context=ContextPackRequest(
+                                user_id=arguments.get("user_id"),
+                                workspace_id=arguments.get("workspace_id"),
+                                project_id=arguments.get("project_id"),
+                                repository_id=arguments.get("repository_id"),
+                                task_id=arguments.get("task_id"),
+                                session_id=arguments.get("session_id"),
+                                agent_id=arguments.get("agent_id"),
+                                objective=arguments.get("objective"),
+                                max_tokens=arguments.get("max_tokens"),
+                                branch=arguments.get("branch"),
+                                commit_sha=arguments.get("commit_sha"),
+                                requested_sections=tuple(
+                                    arguments.get("requested_sections", [])
+                                ),
+                                client_capabilities=tuple(
+                                    arguments.get("client_capabilities", [])
+                                ),
+                                retrieval_limit=int(
+                                    arguments.get("retrieval_limit", 10)
+                                ),
+                            ),
+                            client_state=client_state,
+                            idempotency_key=arguments.get("idempotency_key"),
+                        )
+                    )
+                )
+
+            elif name == "recall_context_delivery_get":
+                return result_json(
+                    pipeline.cag_service.get_delivery(
+                        arguments["delivery_id"], cag_scope()
+                    )
+                )
+
+            elif name == "recall_context_delivery_explain":
+                return result_json(
+                    pipeline.cag_service.explain(arguments["delivery_id"], cag_scope())
+                )
+
+            elif name == "recall_cache_status":
+                return result_json(pipeline.cag_service.stats())
+
+            elif name == "recall_cache_invalidate":
+                return result_json(
+                    pipeline.cag_service.invalidate(
+                        scope=cag_scope(),
+                        cache_entry_id=arguments["cache_entry_id"],
+                        reason=arguments.get("reason", "manual_invalidation"),
+                        actor_id=arguments.get("agent_id"),
+                    )
+                )
+
+            elif name == "recall_cache_inspect":
+                return result_json(
+                    pipeline.cag_service.inspect_cache_entry(
+                        arguments["cache_entry_id"], cag_scope()
                     )
                 )
 

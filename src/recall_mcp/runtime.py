@@ -239,6 +239,32 @@ class Settings:
         default_factory=lambda: _integer("HANDOFF_TTL_SECONDS", 86_400)
     )
 
+    CAG_ENABLED: bool = field(default_factory=lambda: _boolean("CAG_ENABLED", True))
+    CAG_POLICY_VERSION: str = field(
+        default_factory=lambda: _text("CAG_POLICY_VERSION", "cag-v1")
+    )
+    CACHE_MAX_ENTRIES: int = field(
+        default_factory=lambda: _integer("CACHE_MAX_ENTRIES", 256)
+    )
+    CACHE_MAX_BYTES: int = field(
+        default_factory=lambda: _integer("CACHE_MAX_BYTES", 16 * 1024 * 1024)
+    )
+    CACHE_TTL_SECONDS: int = field(
+        default_factory=lambda: _integer("CACHE_TTL_SECONDS", 900)
+    )
+    CACHE_LAZY_REBUILD: bool = field(
+        default_factory=lambda: _boolean("CACHE_LAZY_REBUILD", True)
+    )
+    SKILL_DELTA_MAX_RATIO: float = field(
+        default_factory=lambda: _number("SKILL_DELTA_MAX_RATIO", 0.70)
+    )
+    CONTEXT_DELTA_MAX_RATIO: float = field(
+        default_factory=lambda: _number("CONTEXT_DELTA_MAX_RATIO", 0.70)
+    )
+    CACHE_METRICS_ENABLED: bool = field(
+        default_factory=lambda: _boolean("CACHE_METRICS_ENABLED", True)
+    )
+
     NATS_URL: str = field(
         default_factory=lambda: _text("NATS_URL", "nats://127.0.0.1:4222")
     )
@@ -343,6 +369,20 @@ class Settings:
             raise ValueError("RECALL_HANDOFF_POLICY_VERSION must not be empty")
         if self.HANDOFF_TTL_SECONDS <= 0:
             raise ValueError("RECALL_HANDOFF_TTL_SECONDS must be positive")
+        if not self.CAG_POLICY_VERSION.strip():
+            raise ValueError("RECALL_CAG_POLICY_VERSION must not be empty")
+        if self.CACHE_MAX_ENTRIES < 0 or self.CACHE_MAX_BYTES < 0:
+            raise ValueError("CAG cache capacities must not be negative")
+        if self.CAG_ENABLED and (
+            self.CACHE_MAX_ENTRIES == 0 or self.CACHE_MAX_BYTES == 0
+        ):
+            raise ValueError("enabled CAG cache capacities must be positive")
+        if self.CACHE_TTL_SECONDS <= 0:
+            raise ValueError("RECALL_CACHE_TTL_SECONDS must be positive")
+        if not 0.0 <= self.SKILL_DELTA_MAX_RATIO <= 1.0:
+            raise ValueError("RECALL_SKILL_DELTA_MAX_RATIO must be between 0 and 1")
+        if not 0.0 <= self.CONTEXT_DELTA_MAX_RATIO <= 1.0:
+            raise ValueError("RECALL_CONTEXT_DELTA_MAX_RATIO must be between 0 and 1")
         if self.OLLAMA_TIMEOUT_SECONDS <= 0:
             raise ValueError("RECALL_OLLAMA_TIMEOUT_SECONDS must be positive")
         if not self.OLLAMA_BASE_URL.startswith(("http://", "https://")):

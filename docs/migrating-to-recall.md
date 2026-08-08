@@ -99,7 +99,9 @@ Existing configurations that invoke remembrance-mcp continue to launch. MCP tool
 
 Use these canonical names:
 
-- integrations/claude-code/recall_mcp_stdio.cmd
+- src/recall_mcp/integrations/claude_code/recall_mcp_stdio.cmd (packaged with
+  `recall-mcp`; the old checkout-relative
+  `integrations/claude-code/recall_mcp_stdio.cmd` now just delegates to it)
 - integrations/windows/start_recall_rest.ps1
 - integrations/windows/start_recall_rest.vbs
 
@@ -118,7 +120,7 @@ Do not run the first command until the new URL is verified.
 
 ## Maintainer repository checklist
 
-- Rename the GitHub repository to recall
+- [x] Rename the GitHub repository to recall
 - Verify GitHub redirects
 - Update repository description and topics
 - Verify branch protections
