@@ -1,52 +1,50 @@
 name: CI
 
-# Phase 0 safety net (roadmap Phase 0 / deferred-hardening Concern C item 1):
-# run the test suite across Python 3.10-3.12 on both a minimal install and the
-# full [all] extras, so refactors can't silently break either configuration.
-
 on:
-  push:
-    branches: [main, autonomous-loop]
   pull_request:
-  workflow_dispatch:
+  push:
+    branches: ["main", "refactor/**", "codex/**"]
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
   test:
-    name: py${{ matrix.python-version }} · ${{ matrix.extras }}
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
-        extras: [minimal, all]
+        os: [ubuntu-22.04, ubuntu-24.04, windows-2022]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+      - run: python -m pip install --upgrade pip "setuptools>=83" wheel
+      - run: python -m pip install -e ".[dev]"
+      - run: ruff format --check src tests
+      - run: ruff check src tests
+      - run: pytest --cov=recall_mcp --cov-branch --cov-report=xml --cov-report=term
+      - if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
 
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
-
-      # "minimal" = base package + pytest only (no mcp/torch/nats). Proves the
-      # core imports and the heuristic gate fallback work without any extras.
-      - name: Install (minimal)
-        if: matrix.extras == 'minimal'
-        run: pip install -e ".[dev]"
-
-      # "all" = every optional dependency (mcp, nats, torch, transformers, pytest).
-      - name: Install (all extras)
-        if: matrix.extras == 'all'
-        run: pip install -e ".[all]"
-
-      # Coverage + fail-under gate (floor in [tool.coverage.report] fail_under).
-      - name: Run test suite (with coverage gate)
-        run: python -m pytest -q --cov=remembrance_mcp --cov-report=term-missing
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - run: python -m build
+      - run: python -m pip install dist/*.whl
+      - run: recall-admin version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-artifacts
+          path: dist/*

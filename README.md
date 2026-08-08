@@ -1,417 +1,239 @@
-# Remembrance MCP
+# Recall
 
-Universal memory for AI agents. Remembrance stores useful context in SQLite, links entities into a small knowledge graph, exposes memory through MCP and REST, and can run locally without API keys.
+Recall is persistent semantic memory infrastructure for AI agents.
 
-The Python package name is `remembrance-mcp` and the import/module path is `remembrance_mcp`.
+Recall is a local-first memory system that gives AI agents durable context through structured extraction, hybrid retrieval, knowledge graphs, temporal facts, and maintenance workflows. It stores data in SQLite, exposes MCP and REST interfaces, and works without an external database.
 
-## What It Provides
+## Project identity
 
-- MCP stdio server for agent clients such as Claude Desktop, Cursor, and other MCP-compatible tools.
-- REST API for scripts, local apps, and services.
-- Python library entry point through `MemoryPipeline`.
-- SQLite memory storage with TTL tiers: `cold`, `active`, and `persist`.
-- Gate classification with a default `dilbert -> heuristic` fallback chain. The heuristic backend works with no model downloads.
-- Optional local Ollama extraction using `nemotron-3-nano:4b`.
-- Entity detection, graph wiring, hybrid keyword/graph search, fact storage, markdown export/import, and dream-cycle maintenance.
+| Surface | Canonical value |
+| --- | --- |
+| Product | Recall |
+| Distribution | recall-mcp |
+| Python package | recall_mcp |
+| Primary CLI | recall |
+| MCP CLI | recall-mcp |
+| Service CLI | recall-service |
+| Environment prefix | RECALL_ |
+| Default data directory | ~/.recall |
+
+See [Migrating to Recall](docs/migrating-to-recall.md) for the temporary compatibility layer and safe migration behavior.
 
 ## Requirements
 
-- Python 3.10 or newer.
-- `pip` or `uv`.
-- Optional: Ollama for LLM-based extraction and dream phases.
-- Optional: a local DistilBERT gate model if you install the `gate` extra.
-- Optional: NATS if you want event-bus capture through `remembrance_mcp.server.serve`.
+- Python 3.10 or newer
+- Optional: Ollama for local structured extraction and LLM-backed dream phases
+- Optional: MCP dependencies for stdio server use
+- Optional: NATS dependencies for event-bus capture
 
-No API key is required for the default local/heuristic path. The OpenAI gate backend is available only when `OPENAI_API_KEY` is set and `REMEMBRANCE_GATE_BACKENDS` includes `openai`.
+The default heuristic path needs no API key.
 
-## Quick Start
+## Install
 
-```bash
-git clone https://github.com/emaharmony/remembrance-mcp.git
-cd remembrance-mcp
+From a repository checkout:
 
+~~~bash
 python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+# Windows
+.venv\Scripts\python -m pip install -e ".[mcp]"
+# macOS/Linux
+.venv/bin/python -m pip install -e ".[mcp]"
+~~~
 
-# REST and Python library usage
-pip install -e .
+Useful extras:
 
-# Add MCP server support
-pip install -e ".[mcp]"
+~~~bash
+python -m pip install -e ".[nats]"
+python -m pip install -e ".[gate]"
+python -m pip install -e ".[all]"
+~~~
 
-# Add test tooling
-pip install -e ".[dev]"
-```
+## Commands
 
-On Windows PowerShell:
+~~~bash
+recall --help
+recall-mcp --help
+recall-service --help
+recall-admin --help
+~~~
 
-```powershell
-git clone https://github.com/emaharmony/remembrance-mcp.git
-cd remembrance-mcp
+The stdio MCP server also runs as:
 
-py -3.10 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -e ".[mcp,dev]"
-```
+~~~bash
+python -m recall_mcp
+~~~
 
-If PowerShell blocks virtualenv activation:
+Start the combined REST/NATS service:
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
+~~~bash
+recall-service --host 127.0.0.1 --port 8788 --no-nats
+# equivalent
+python -m recall_mcp.serve --host 127.0.0.1 --port 8788 --no-nats
+~~~
 
-## Optional Ollama Setup
+Start only the REST API:
 
-Remembrance works without Ollama by falling back to heuristic/default extraction. Install Ollama only if you want local model extraction and LLM-backed dream phases.
+~~~bash
+python -m recall_mcp.api --host 127.0.0.1 --port 8788
+~~~
 
-```bash
-ollama pull nemotron-3-nano:4b
-```
+Ports and REST routes are unchanged by the rename.
 
-Current vector query generation is not wired into the default search path, so `nomic-embed-text` is not required for setup.
+## MCP configuration
 
-## Run It
+A canonical client configuration is:
 
-### REST API
-
-Start REST only:
-
-```bash
-python -m remembrance_mcp.api
-```
-
-Equivalent service command, with NATS disabled:
-
-```bash
-python -m remembrance_mcp.server.serve --no-nats
-```
-
-Installing the package also exposes a `remembrance-service` console script that
-is equivalent to `python -m remembrance_mcp.server.serve`:
-
-```bash
-remembrance-service --no-nats
-```
-
-Custom host and port:
-
-```bash
-python -m remembrance_mcp.api --host 127.0.0.1 --port 9000
-```
-
-Try the API:
-
-```bash
-curl http://127.0.0.1:8788/health
-
-curl -X POST http://127.0.0.1:8788/capture \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Ema decided to keep Remembrance backed by SQLite", "source": "setup-test"}'
-
-curl "http://127.0.0.1:8788/search?q=SQLite&mode=keyword"
-```
-
-### MCP Server
-
-Install the MCP extra first:
-
-```bash
-pip install -e ".[mcp]"
-```
-
-Then run:
-
-```bash
-python -m remembrance_mcp
-```
-
-Installing the package also exposes a `remembrance-mcp` console script that
-starts the same stdio MCP server.
-
-Example MCP client configuration:
-
-```json
+~~~json
 {
   "mcpServers": {
-    "remembrance": {
-      "command": "python",
-      "args": ["-m", "remembrance_mcp"],
-      "env": {
-        "REMEMBRANCE_HOME": "~/.remembrance"
-      }
+    "recall": {
+      "command": "recall-mcp"
     }
   }
 }
-```
+~~~
 
-On Windows, use the virtualenv interpreter if your MCP client does not inherit the activated shell:
+The MCP tools remain memory_search, memory_capture, memory_context_build, memory_get, memory_delete, memory_consolidate, memory_graph_query, memory_entity_get, memory_entity_search, and memory_dream.
 
-```json
-{
-  "mcpServers": {
-    "remembrance": {
-      "command": "D:\\_projects_\\remembrance-mcp\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "remembrance_mcp"],
-      "env": {
-        "REMEMBRANCE_HOME": "C:\\Users\\you\\.remembrance"
-      }
-    }
-  }
-}
-```
+## Python API
 
-### Python Library
-
-```python
-from remembrance_mcp import MemoryPipeline
+~~~python
+from recall_mcp import MemoryPipeline
 
 pipeline = MemoryPipeline()
 result = pipeline.capture(
-    "Ema decided to keep Remembrance backed by SQLite",
+    "We decided Recall remains backed by SQLite",
     source="example",
+    tier="persist",
 )
-results = pipeline.search("SQLite", limit=5)
-stats = pipeline.stats()
-```
+context = pipeline.build_context("SQLite architecture")
+~~~
+
+Public exports from the former package remain available from recall_mcp.
 
 ## Configuration
 
-Environment variables read by the current code:
+Canonical environment variables use RECALL_. New variables always win over their legacy equivalents.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REMEMBRANCE_HOME` | `~/.remembrance` | Base directory for databases and model files. |
-| `REMEMBRANCE_GATE_BACKENDS` | `dilbert,heuristic` | Ordered gate backend list, for example `heuristic` or `openai,heuristic`. |
-| `OPENAI_API_KEY` | unset | Enables the optional OpenAI gate backend when requested. |
+| RECALL_HOME | resolution described below | Databases, models, and generated brain files |
+| RECALL_GATE_BACKENDS | dilbert,heuristic | Ordered gate backend list |
+| RECALL_URL | http://127.0.0.1:18790 in integration hooks | REST service URL |
+| RECALL_TIMEOUT | integration-specific | Hook HTTP timeout |
+| RECALL_INJECT_LIMIT | 8 | Maximum memories injected by hooks |
+| OPENAI_API_KEY | unset | Optional OpenAI gate credential |
 
-Other settings are available through `remembrance_mcp.config.Settings`:
+Home-directory resolution is deliberately migration-safe:
 
-| Setting | Default |
-| --- | --- |
-| `DB_PATH` | `<REMEMBRANCE_HOME>/memory.db` |
-| `GATE_MODEL_PATH` | `<REMEMBRANCE_HOME>/models/distilbert-memory-gate` |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` |
-| `EXTRACT_MODEL` | `nemotron-3-nano:4b` |
-| `SEARCH_MODEL` | `all-MiniLM-L6-v2` |
-| `COLD_TTL` | `86400` seconds |
-| `ACTIVE_TTL` | `2592000` seconds |
-| `PERSIST_TTL` | `-1`, meaning no expiry |
+1. Explicit RECALL_HOME
+2. Existing ~/.recall
+3. Explicit legacy home variable
+4. Existing legacy default directory
+5. New ~/.recall
 
-REST host, REST port, NATS URL, and NATS enablement are CLI arguments on `remembrance_mcp.api` or `remembrance_mcp.server.serve`; they are not environment variables in the current implementation.
+When Recall selects a legacy directory, it continues using that directory in place and emits a warning to stderr. It never moves files or creates a competing empty database.
 
-Default data layout:
+Derived paths include:
 
-```text
-~/.remembrance/
+~~~text
+<RECALL_HOME>/
   memory.db
   metrics.db
-  entities.db
   models/
-    distilbert-memory-gate/
-```
+  brain/
+~~~
 
 ## REST API
 
-Implemented endpoints:
+The default standalone port is 8788. Existing integrations may continue using 18790.
 
-| Method | Path | Description |
+| Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Health check and version. |
-| `GET` | `/stats` | Memory, entity, fact, and V2 store stats. |
-| `POST` | `/capture` | Capture text through gate, extraction, storage, and graph wiring. |
-| `GET` | `/search?q=...&mode=...` | Search memories. Modes: `keyword`, `balanced`, `vector`, `deep`. |
-| `GET` | `/memory/{id}` | Fetch one memory and linked entities. |
-| `GET` | `/entity/{slug}` | Fetch one entity and edges. |
-| `GET` | `/graph/{slug}?depth=1` | Traverse the graph from one entity. |
-| `GET` | `/context/build?task=...` | Build context for a task. |
-| `POST` | `/dream` | Run dream-cycle phases. |
+| GET | /health | Service health |
+| GET | /health/live | Process liveness |
+| GET | /health/ready | Local dependency readiness |
+| GET | /metrics | Authenticated Prometheus metrics |
+| POST | /capture | Capture text |
+| GET | /search | Search memories |
+| POST | /context/build | Build task context |
+| GET | /memory/{id} | Read a memory |
+| DELETE | /memory/{id} | Delete a memory |
+| POST | /dream | Run maintenance phases |
 
-Example dream request:
+The Prism /v1 compatibility routes remain unchanged.
 
-```bash
-curl -X POST http://127.0.0.1:8788/dream \
-  -H "Content-Type: application/json" \
-  -d '{"phases": ["orphan_detect"], "dry_run": false}'
-```
+Configure RECALL_API_TOKEN_FILE for production and send its bearer token on every data, administration, and metrics request.
 
-## MCP Tools
+~~~bash
+curl http://127.0.0.1:8788/health
+curl -X POST http://127.0.0.1:8788/capture -H "Content-Type: application/json" -d '{"text":"Recall uses SQLite","source":"example"}'
+curl "http://127.0.0.1:8788/search?q=SQLite&mode=keyword"
+~~~
 
-Current MCP tools:
+## Optional gate model
 
-| Tool | Description |
-| --- | --- |
-| `memory_capture` | Capture text as a memory. |
-| `memory_search` | Search stored memories by keyword and filters. |
-| `memory_consolidate` | Run TTL cleanup and promotion/demotion. |
-| `memory_get` | Fetch one memory by ID. |
-| `memory_delete` | Delete one memory by ID. |
-| `memory_metrics` | Inspect gate backend metrics. |
-| `memory_graph_query` | Query graph neighbors from an entity. |
-| `memory_entity_get` | Fetch one entity. |
-| `memory_entity_search` | Search entities. |
-| `memory_dream` | Run dream-cycle maintenance. |
-| `memory_context_build` | Build task context from search and graph data. |
+Install gate dependencies and download the existing release asset:
 
-## Optional Features
-
-### NATS Subscriber
-
-Install the extra:
-
-```bash
-pip install -e ".[nats]"
-```
-
-Run the combined REST service and NATS subscriber:
-
-```bash
-python -m remembrance_mcp.server.serve --nats nats://localhost:4222
-```
-
-Use REST only:
-
-```bash
-python -m remembrance_mcp.server.serve --no-nats
-```
-
-### DilBert v3 Gate
-
-The DilBert gate is a fine-tuned DistilBertForSequenceClassification model that classifies text into four memory tiers: `skip`, `cold`, `active`, and `persist`. It runs locally with no API keys required.
-
-**Model stats:** 90.1% accuracy, macro F1 0.88, PERSIST recall 0.91.
-
-#### Install gate dependencies
-
-```bash
-pip install -e ".[gate]"
-```
-
-#### Download the model
-
-Use the included download script:
-
-```bash
+~~~bash
+python -m pip install -e ".[gate]"
 bash scripts/download-dilbert.sh
-```
+~~~
 
-Or download to a custom path:
-
-```bash
-bash scripts/download-dilbert.sh /path/to/models/distilbert-memory-gate
-```
-
-The script downloads four files (~256MB total) to `~/.remembrance/models/distilbert-memory-gate/`:
-
-```text
-config.json           — model architecture config (1KB)
-tokenizer.json        — tokenizer vocabulary (696KB)
-tokenizer_config.json — tokenizer settings (1KB)
-model.safetensors     — fine-tuned weights (255MB)
-```
-
-**Manual download:** If the script fails (e.g., unstable connection on the 255MB model file), download directly from the [GitHub release](https://github.com/emaharmony/remembrance-mcp/releases/tag/v3.0-dilbert-gate) and place the files in `~/.remembrance/models/distilbert-memory-gate/`.
-
-#### Verify installation
-
-```bash
-python -c "
-from transformers import DistilBertForSequenceClassification, DistilBertTokenizer
-model = DistilBertForSequenceClassification.from_pretrained('~/.remembrance/models/distilbert-memory-gate')
-tokenizer = DistilBertTokenizer.from_pretrained('~/.remembrance/models/distilbert-memory-gate')
-print('Model loaded successfully:', model.config.id2label)
-"
-```
-
-Expected output:
-
-```text
-Model loaded successfully: {0: 'skip', 1: 'cold', 2: 'active', 3: 'persist'}
-```
-
-Without the model, the default gate chain (`dilbert,heuristic`) falls back to the heuristic backend automatically.
-
-### OpenAI Gate
-
-```bash
-export OPENAI_API_KEY="..."
-export REMEMBRANCE_GATE_BACKENDS="openai,heuristic"
-```
-
-PowerShell:
-
-```powershell
-$env:OPENAI_API_KEY="..."
-$env:REMEMBRANCE_GATE_BACKENDS="openai,heuristic"
-```
+The downloader uses the safe home-resolution order and defaults new installations to ~/.recall/models/distilbert-memory-gate. Release assets are hosted under the renamed emaharmony/recall repository.
 
 ## Integrations
 
-The `integrations/` directory contains drop-in setups for running Remembrance as
-a background service and wiring it into agent clients. These integrations use
-port **18790** by convention (the REST default for standalone use remains 8788).
+- One-command setup for any agent: `recall-admin install-hooks --agent claude-code|codex|all` registers the MCP server and hooks (and migrates a stale `remembrance` registration) with no source checkout and no hand-editing of JSON. Run with `--dry-run` first to preview.
+- Claude Code: [integration guide](integrations/claude-code/README.md)
+- Codex: [integration guide](integrations/codex/README.md)
+- Windows hidden REST startup: start_recall_rest.ps1 and start_recall_rest.vbs
+- Claude stdio wrapper: recall_mcp_stdio.cmd
 
-### Windows autostart
+Deprecated script names remain as small delegating wrappers during the compatibility window.
 
-`integrations/windows/` starts the REST service at login, hidden, on port 18790
-with NATS disabled:
+## Compatibility
 
-- `start_remembrance_rest.ps1` — starts the service if port 18790 is not already
-  listening, logging to `.tmp/remembrance-flow/`.
-- `start_remembrance_rest.vbs` — launches the PowerShell script with no visible
-  window; point a Startup-folder shortcut or Task Scheduler entry at this file.
+The migration layer currently preserves:
 
-The repo path inside both scripts is hard-coded; edit it if your checkout lives
-elsewhere.
+- import remembrance_mcp and documented nested imports
+- python -m remembrance_mcp
+- remembrance-mcp and remembrance-service
+- REMEMBRANCE_* environment fallbacks
+- existing ~/.remembrance databases in place
+- old Windows and Claude wrapper filenames
+- unchanged REST routes, ports, MCP tool names, NATS behavior, table names, and memory IDs
 
-### Claude Code
+Warnings use stderr and never write to MCP protocol stdout.
 
-`integrations/claude-code/` gives any Claude Code session shared, persistent
-memory backed by Remembrance, in three composable layers:
+## Production deployment
 
-1. **MCP server** — exposes `memory_search`, `memory_capture`,
-   `memory_context_build`, `memory_graph_query`, and `memory_dream` as tools.
-2. **SessionStart hook** (`inject_context.py`) — injects recalled memory for the
-   current project at the start of every session.
-3. **Stop hook** (`capture_transcript.py`) — captures new conversation at the end
-   of each turn; the gate decides what is worth keeping.
+Recall 2.1 ships a pinned Ubuntu Compose stack and a native Windows service installer. Both keep Recall, Ollama, and NATS on loopback and use Tailscale Serve for private HTTPS.
 
-Both hooks are pure stdlib and never block a session — if Remembrance is down
-they exit silently. They expect the service on `http://127.0.0.1:18790`
-(override with `REMEMBRANCE_URL`). Register the MCP server with:
-
-```bash
-claude mcp add remembrance --scope user -- \
-  "/path/to/remembrance-mcp/.venv/Scripts/python.exe" -m remembrance_mcp
-```
-
-Then merge `integrations/claude-code/settings.snippet.json` into your
-`~/.claude/settings.json` (all projects) or a project `.claude/settings.json`.
-See `integrations/claude-code/README.md` for full details.
+- [Architecture](docs/architecture.md)
+- [Ubuntu deployment](docs/deployment/ubuntu.md)
+- [Windows deployment](docs/deployment/windows.md)
+- [Upgrade to 2.1](docs/upgrading-to-2.1.md)
+- [Configuration](docs/configuration.md)
+- [Security model](docs/security.md)
+- [Operations and monitoring](docs/operations.md)
+- [Backup and restore](docs/backup-restore.md)
+- [Release readiness and remaining gates](docs/release-readiness.md)
+- [Production certification plan](docs/production-certification-plan.md)
+- [REST examples](docs/api-examples.md)
+- [Changelog](CHANGELOG.md)
 
 ## Development
 
-```bash
-pip install -e ".[mcp,nats,dev]"
+~~~bash
 python -m pytest
-```
+python -m ruff check .
+python -m ruff format --check .
+python -m compileall src
+python -m build
+~~~
 
-Useful targeted test commands:
-
-```bash
-python -m pytest tests/test_rest_api.py -v
-python -m pytest tests/test_integration.py -v
-python -m pytest tests/test_hybrid_search.py -v
-```
-
-The repository currently contains tests for entity detection and storage, facts, hybrid search, integration behavior, markdown sync, Ollama gate parsing, REST API behavior, and RRF edge cases.
-
-## Current Limitations
-
-- Balanced search currently uses FTS5/LIKE plus graph augmentation. Query embedding generation is not wired into the default `search()` path yet.
-- The package has optional MCP, NATS, and gate-model dependencies. Install the matching extra before using those features.
-- Only `REMEMBRANCE_HOME`, `REMEMBRANCE_GATE_BACKENDS`, and `OPENAI_API_KEY` are read from the environment in the current code.
+The package build must be installed into a clean temporary environment before release. Smoke-test both canonical and legacy commands from the installed wheel.
 
 ## License
 

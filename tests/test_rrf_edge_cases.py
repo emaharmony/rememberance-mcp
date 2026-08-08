@@ -2,7 +2,7 @@
 RRF Fusion + Search Edge Case Tests
 """
 
-from remembrance_mcp.search.hybrid import TIER_BOOST, HybridSearch
+from recall_mcp.search.hybrid import HybridSearch, TIER_BOOST
 
 
 class TestRRFFusion:

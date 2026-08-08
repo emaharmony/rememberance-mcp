@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"D:/path/to/recall/.venv/Scripts/python.exe\" \"D:/path/to/recall/src/recall_mcp/integrations/codex/recall_session.py\"",
+            "timeoutSec": 10,
+            "statusMessage": "Recalling Recall memory"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"D:/path/to/recall/.venv/Scripts/python.exe\" \"D:/path/to/recall/src/recall_mcp/integrations/codex/capture_turn.py\"",
+            "timeoutSec": 10,
+            "statusMessage": "Capturing turn to Recall"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,77 +1,109 @@
-# Remembrance ↔ Codex integration
+# Recall and Codex
 
-Give any Codex CLI session shared, persistent memory backed by Remembrance —
-the same store Claude Code writes to. Three layers, use any combination:
+Give Codex sessions durable context backed by the same Recall store used by other agents.
 
-1. **MCP server** — exposes `memory_search`, `memory_capture`,
-   `memory_context_build`, `memory_graph_query`, `memory_dream` as tools Codex
-   can call on demand.
-2. **SessionStart hook** (`recall_session.py`) — automatically injects recalled
-   memory for the current project at the start of every session
-   (Codex fires this on `startup` and `resume`). No model decision required.
-3. **Stop hook** (`capture_turn.py`) — automatically captures each turn's final
-   assistant message into Remembrance. The gate decides what is worth keeping,
-   so it is safe to forward everything.
+The integration has three independent layers:
 
-There is also a `remembrance-flow` **skill** (under `~/.codex/skills/`) for
-model-driven recall/capture over REST. The hooks make capture/recall
-*automatic* instead of relying on the model to invoke the skill.
+1. The Recall MCP server exposes memory tools on demand.
+2. recall_session.py injects project context at SessionStart for startup and resume.
+3. capture_turn.py sends the final assistant message at Stop.
 
-Both hook scripts are pure stdlib, run under any Python 3, and **never block a
-session** — if Remembrance is down they exit 0 silently.
+The hooks are best-effort. Failures do not block the session, and compatibility warnings go to stderr.
 
 ## Prerequisites
 
-Remembrance running on `http://127.0.0.1:18790` (override with `REMEMBRANCE_URL`):
-
-```
-python -m remembrance_mcp.server.serve --host 127.0.0.1 --port 18790 --no-nats
-```
-
-Codex hooks must be enabled (they are `stable` and on by default in recent
-builds; this makes it explicit):
-
-```
+~~~bash
+recall-service --host 127.0.0.1 --port 18790 --no-nats
 codex features enable hooks
-```
+~~~
 
-## 1. Register the MCP server
+## Register the MCP server
 
-```powershell
-codex mcp add remembrance -- `
-  D:\_projects_\remembrance-mcp\.venv\Scripts\python.exe -m remembrance_mcp
-```
+~~~powershell
+codex mcp add recall -- recall-mcp
+~~~
 
-This writes `[mcp_servers.remembrance]` into `~/.codex/config.toml`. The server
-uses `REMEMBRANCE_HOME=~/.remembrance` by default — the same SQLite store as the
-REST service and the Claude Code MCP server.
+This creates a recall MCP server entry. Existing entries that invoke remembrance-mcp remain supported during migration.
 
-## 2. Add the hooks
+## Install hooks
 
-Copy `hooks.json` to `~/.codex/hooks.json` (user scope = all projects), or merge
-its `hooks` table into the `[hooks]` section of `~/.codex/config.toml`. Paths
-must be absolute. The `project_id`/category is derived automatically from each
-session's working directory.
+The hook scripts (`recall_session.py`, `capture_turn.py`) and their shared
+helpers now ship inside the installed `recall_mcp` package at
+`src/recall_mcp/integrations/codex/` and
+`src/recall_mcp/integrations/compat_env.py` -- `pip install recall-mcp` is
+enough to get them; there is nothing left to copy alongside the scripts.
 
-Then **trust** the hooks — Codex refuses to run an untrusted command hook:
+Edit the repository paths in `hooks.json` (shipped at
+`src/recall_mcp/integrations/codex/hooks.json`), then copy it to
+~/.codex/hooks.json or merge its hooks table into your Codex configuration.
+Review and trust the hook definitions with /hooks.
 
-```
-codex            # start a session
-/hooks           # review and trust the two remembrance hooks
-```
+`integrations/codex/recall_session.py` and `capture_turn.py` still exist at
+their old checkout-relative paths as thin backward-compat shims that
+delegate to the packaged implementation, so existing hook registrations
+keep working -- but new installs should point at the packaged module paths
+above.
 
-For non-interactive/automation use, `codex exec --dangerously-bypass-hook-trust`
-skips the trust requirement for one invocation.
+## Environment
 
-## Differences from the Claude Code integration
+| Variable | Default |
+| --- | --- |
+| RECALL_URL | http://127.0.0.1:18790 |
+| RECALL_TIMEOUT | 30 seconds for capture, 6 seconds for injection |
+| RECALL_MAX_TOKENS | unset (server default) |
+| RECALL_INJECT_LIMIT | 8 |
+| RECALL_HOME | safe home-resolution order |
+| RECALL_USER_ID | unset |
+| RECALL_WORKSPACE_ID | unset |
+| RECALL_PROJECT_ID | unset |
+| RECALL_REPOSITORY_ID | unset |
 
-- **Capture granularity.** Claude's Stop hook reads the transcript file and
-  forwards *both* new user and assistant text (cursor-tracked). Codex's Stop
-  payload exposes only `last_assistant_message`, so this captures the assistant's
-  final message per turn — one memory per Stop, no cursor needed. User-prompt
-  text is not captured on the Codex side.
-- **Events.** Codex supports `SessionStart` (startup/resume/clear/compact),
-  `Stop`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse`. `PreToolUse`/
-  `PostToolUse` match shell commands only.
-- **Trust.** Codex requires explicit per-definition hook trust via `/hooks`;
-  Claude Code does not.
+Matching REMEMBRANCE_* names remain lower-priority fallbacks during migration.
+
+RECALL_USER_ID, RECALL_WORKSPACE_ID, RECALL_PROJECT_ID, and RECALL_REPOSITORY_ID
+are all optional and pin the Recall scope identity used by this client; each
+has a matching REMEMBRANCE_* legacy fallback. These are shared with the
+Claude Code adapter -- both clients derive the same scope for the same
+repository, since scope identifies the repository, not the tool talking to it.
+
+## Session injection behavior
+
+`recall_session.py` now prefers CAG (context-aware generation) delivery via
+`POST /v2/context/deliver`, using the same shared `recall_client` module as
+the Claude Code adapter, and falls back to the v1 keyword `/search` route if
+the v2 endpoint is unavailable (task bootstrap failed, delivery failed, or
+the server is down). Both paths failing emits nothing; a down or absent
+Recall server never delays or blocks a Codex session.
+
+Codex fires `SessionStart` for `startup`, `resume`, `clear`, and `compact`;
+this hook only injects for `startup` and `resume` -- `clear`/`compact`
+already carry the session's own context, so re-injecting there would just be
+noise.
+
+Two things are intentionally namespaced separately from Claude Code:
+
+- **On-disk CAG client state** (`known_context_pack_id`, fingerprints, etc.)
+  is stored under `<RECALL_HOME>/.cc_cag_state/codex_<repository_id>.json`,
+  distinct from Claude Code's
+  `<RECALL_HOME>/.cc_cag_state/claude-code_<repository_id>.json` for the same
+  repository, so the two clients never read or overwrite each other's cached
+  delivery state.
+- **`agent_id`** sent on every context-delivery request is `"codex"`, not
+  `"claude-code"`.
+
+One thing is intentionally *shared* with Claude Code: the `/v2/tasks`
+continuity task backing a repository. Both adapters derive the same
+idempotency key, title, objective, and `created_by` (an agent-neutral
+`"recall-ambient"` identity, not either agent's own id -- see
+`recall_client._AMBIENT_TASK_IDENTITY`), so they always converge on one
+continuity task per repository regardless of which adapter bootstraps it
+first, with no `idempotency_conflict`. This is required, not just
+convenient: handoffs are task-scoped (see
+`docs/architecture/agent-handoffs.md`), so per-agent tasks would make a
+Claude Code <-> Codex handoff impossible. Per-agent attribution is preserved
+where it actually matters -- the `agent_id` on every context-delivery
+request, above.
+
+## Capture behavior
+
+Codex Stop events expose last_assistant_message rather than the entire transcript, so one assistant response is considered per Stop event. Claude Code uses cursor-tracked transcript lines and can capture both user and assistant text.

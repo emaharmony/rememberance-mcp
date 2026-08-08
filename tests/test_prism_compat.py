@@ -9,7 +9,7 @@ They guard the failure modes that previously slipped through unit tests:
   - /v1/context/build returning empty context_markdown,
   - the Prism CaptureRequest shape not mapping onto the pipeline.
 
-Isolation: REMEMBRANCE_HOME points at a tmp dir, so the gate falls back to the
+Isolation: RECALL_HOME points at a tmp dir, so the gate falls back to the
 heuristic backend (no DilBERT model needed) and no real data is touched.
 """
 
@@ -31,22 +31,24 @@ def server():
     """Start the REST API on an ephemeral port against an isolated pipeline.
 
     Uses tempfile.mkdtemp (not pytest's tmp_path) so it runs even where the
-    pytest temp factory can't scan its base dir. REMEMBRANCE_HOME isolation
+    pytest temp factory can't scan its base dir. RECALL_HOME isolation
     means the gate falls back to heuristic — no torch/model needed.
     """
-    home = tempfile.mkdtemp(prefix="remembrance-test-")
-    saved = {k: os.environ.get(k) for k in ("REMEMBRANCE_HOME", "REMEMBRANCE_GATE_BACKENDS")}
-    os.environ["REMEMBRANCE_HOME"] = home
-    os.environ["REMEMBRANCE_GATE_BACKENDS"] = "heuristic"
+    home = tempfile.mkdtemp(prefix="recall-test-")
+    saved = {k: os.environ.get(k) for k in ("RECALL_HOME", "RECALL_GATE_BACKENDS")}
+    os.environ["RECALL_HOME"] = home
+    os.environ["RECALL_GATE_BACKENDS"] = "heuristic"
 
-    from remembrance_mcp.api.rest import RemembranceHandler
-    from remembrance_mcp.config import Settings
-    from remembrance_mcp.pipeline import MemoryPipeline
+    from recall_mcp.config import Settings
+    from recall_mcp.extract import StubExtractor
+    from recall_mcp.pipeline import MemoryPipeline
+    from recall_mcp.api.rest import RecallHandler
 
     pipeline = MemoryPipeline(settings=Settings())
-    RemembranceHandler.pipeline = pipeline
+    pipeline.extractor = StubExtractor()
+    RecallHandler.pipeline = pipeline
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), RemembranceHandler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), RecallHandler)
     httpd.daemon_threads = True
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -56,6 +58,7 @@ def server():
     finally:
         httpd.shutdown()
         httpd.server_close()
+        pipeline.close()
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -155,7 +158,11 @@ def test_v1_memory_ingest_prism_shape(server):
 
 def test_v1_health_reports_fts_ok(server):
     """/v1/health must report fts_ok True once a memory exists and is indexed."""
-    _post(server, "/capture", {"text": "We decided healthmarker is persisted.", "source": "test"})
+    _post(
+        server,
+        "/capture",
+        {"text": "We decided healthmarker is persisted.", "source": "test"},
+    )
     status, res = _get(server, "/v1/health")
     assert status == 200
     assert res["status"] == "ok"

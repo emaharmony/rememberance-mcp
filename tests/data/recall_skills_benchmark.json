@@ -1,0 +1,19 @@
+{
+  "policy_version": "skill-compiler-v1",
+  "cases": [
+    {"id": "stable-reused", "candidate": true, "reason": "cross-session successful reuse"},
+    {"id": "approved-decision", "candidate": true, "reason": "user-approved decision"},
+    {"id": "pinned-constraint", "candidate": true, "reason": "rare durable constraint"},
+    {"id": "corrected-frequent", "candidate": false, "reason": "user correction"},
+    {"id": "unverified-agent", "candidate": false, "reason": "unverified suggestion"},
+    {"id": "stale-summary", "candidate": false, "reason": "source fingerprint changed"},
+    {"id": "cross-project", "candidate": false, "reason": "scope mismatch"},
+    {"id": "contradicted-fact", "candidate": false, "reason": "unresolved contradiction"}
+  ],
+  "expected": {
+    "candidate_precision": 1.0,
+    "stale_detection": 1.0,
+    "evidence_traceability": 1.0,
+    "cross_project_leakage": 0
+  }
+}

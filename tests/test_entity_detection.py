@@ -3,8 +3,7 @@ Tests for EntityDetector — Zero-LLM Entity Extraction
 """
 
 import pytest
-
-from remembrance_mcp.graph.entity import EntityDetector
+from recall_mcp.graph.entity import EntityDetector
 
 
 @pytest.fixture
@@ -87,7 +86,9 @@ class TestEntityTypes:
 
 class TestContextExtraction:
     def test_context_snippet(self, detector):
-        result = detector.detect("Ema decided Prism stays domain-agnostic for all adapters")
+        result = detector.detect(
+            "Ema decided Prism stays domain-agnostic for all adapters"
+        )
         ema = [e for e in result if e.name == "ema"][0]
         assert "decided" in ema.context or "Prism" in ema.context
 
@@ -95,10 +96,9 @@ class TestContextExtraction:
 class TestRegistryLookup:
     def test_uses_entity_store(self):
         """When entity_store is provided, detect registered entities."""
+        from recall_mcp.store.edges import EntityStore
         import tempfile
         from pathlib import Path
-
-        from remembrance_mcp.store.edges import EntityStore
 
         with tempfile.TemporaryDirectory() as d:
             store = EntityStore(Path(d) / "test.db")

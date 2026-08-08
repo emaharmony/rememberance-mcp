@@ -1,2 +1,5 @@
+Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
-shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""D:\_projects_\remembrance-mcp\integrations\windows\start_remembrance_rest.ps1""", 0, False
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+scriptPath = fso.BuildPath(scriptDir, "start_recall_rest.vbs")
+shell.Run "wscript.exe """ & scriptPath & """", 0, False

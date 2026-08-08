@@ -1,0 +1,1943 @@
+"""
+MCP Server — Model Context Protocol Interface
+
+PATTERN: Protocol Server (Adapter Pattern)
+============================================
+
+This module adapts our internal MemoryPipeline into the MCP protocol.
+The MCP protocol is a standard that AI agents (Claude, GPT, etc.) use
+to call tools on external systems.
+
+HOW MCP WORKS:
+  1. Client (Claude Desktop, Cursor, etc.) starts our server as a subprocess
+  2. Client sends JSON-RPC messages over stdin/stdout
+  3. Server responds with tool results
+  4. When client disconnects, server shuts down
+
+MESSAGE FORMAT (JSON-RPC 2.0):
+  Request:  {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "memory_capture", "arguments": {...}}}
+  Response: {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": "..."}]}}
+
+  This is the same format used by JSON-RPC APIs everywhere (Ethereum, etc.)
+
+KEY CONCEPT: Tools vs Resources vs Prompts
+  MCP defines three types of server capabilities:
+  - Tools: Functions the AI can CALL (capture, search, consolidate)
+  - Resources: Data the AI can READ (like files, but structured)
+  - Prompts: Template messages the AI can use (not needed here)
+
+  We only expose Tools because memory is action-oriented:
+  you capture, you search, you consolidate.
+
+WHY NOT REST API?
+  REST requires a running server, port management, auth, CORS...
+  MCP over stdio requires: nothing. Just launch the process.
+  It's simpler, more secure (no network exposure), and faster (no HTTP overhead).
+"""
+
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def create_server():
+    """
+    Create and configure the MCP server with all memory tools.
+
+    Returns an MCP Server instance ready to run.
+    """
+    from mcp.server import Server
+    from mcp.types import Tool, TextContent
+    from recall_mcp.config import Settings
+    from recall_mcp.cag import CAGRequest, ClientState
+    from recall_mcp.continuity import ContinuityError
+    from recall_mcp.context import ContextPackRequest
+    from recall_mcp.handoff import (
+        HandoffCompletion,
+        HandoffRequest,
+        HandoffScope,
+    )
+    from recall_mcp.pipeline import MemoryPipeline
+    from recall_mcp.skills import SkillProposal, SkillScope
+
+    settings = Settings()
+    pipeline = MemoryPipeline(settings=settings)
+
+    server = Server(settings.MCP_SERVER_NAME)
+    server.settings = settings  # type: ignore[attr-defined]
+    server.recall_pipeline = pipeline  # type: ignore[attr-defined]
+
+    def continuity_tool(
+        name: str,
+        description: str,
+        required: list[str],
+        properties: dict,
+    ):
+        return Tool(
+            name=name,
+            description=description,
+            inputSchema={
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        )
+
+    @server.list_tools()
+    async def list_tools():
+        """
+        Called by the client to discover available tools.
+
+        This is like an OpenAPI spec — it tells the AI what it can do,
+        what parameters each tool takes, and what it returns.
+        The AI uses this to decide which tool to call.
+        """
+        skill_scope_properties = {
+            "user_id": {"type": "string"},
+            "workspace_id": {"type": "string"},
+            "project_id": {"type": "string"},
+            "repository_id": {"type": "string"},
+        }
+        handoff_scope_properties = {
+            **skill_scope_properties,
+            "repository_id": {"type": "string"},
+            "task_id": {"type": "string"},
+            "session_id": {"type": "string"},
+        }
+        return [
+            Tool(
+                name="memory_capture",
+                description=(
+                    "Capture a piece of text as a memory. The system automatically "
+                    "classifies its importance (skip/cold/active/persist), extracts "
+                    "structured data (summary, category, topics), and stores it with "
+                    "tier-based TTL. Use this for anything worth remembering: decisions, "
+                    "project state, user preferences, important facts."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "maxLength": pipeline.settings.MAX_CAPTURE_CHARS,
+                            "description": "The text to capture as a memory",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Where this came from (discord, cli, api, email, etc.)",
+                            "default": "cli",
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "project",
+                                "person",
+                                "preference",
+                                "decision",
+                                "task",
+                                "strategy",
+                                "session",
+                            ],
+                            "description": "Override auto-detected category (optional)",
+                        },
+                        "tier": {
+                            "type": "string",
+                            "enum": ["cold", "active", "persist"],
+                            "description": "Override auto-detected tier (optional)",
+                            "project": {
+                                "type": "string",
+                                "description": "Project scope (optional)",
+                            },
+                            "agent": {
+                                "type": "string",
+                                "description": "Agent scope (optional)",
+                            },
+                        },
+                    },
+                    "required": ["text"],
+                },
+            ),
+            Tool(
+                name="memory_search",
+                description=(
+                    "Search stored memories by keyword and metadata filters. "
+                    "Returns matching memories sorted by recency."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (keyword matching)",
+                            "mode": {
+                                "type": "string",
+                                "enum": ["keyword", "vector", "balanced", "deep"],
+                                "default": "balanced",
+                                "minimum": 1,
+                                "maximum": pipeline.settings.MAX_RESULTS,
+                            },
+                            "project": {
+                                "type": "string",
+                                "description": "Project scope (optional)",
+                            },
+                            "agent": {
+                                "type": "string",
+                                "description": "Agent scope (optional)",
+                            },
+                        },
+                        "category": {
+                            "type": "string",
+                            "description": "Filter by category (optional)",
+                        },
+                        "tier": {
+                            "type": "string",
+                            "description": "Filter by tier (optional)",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results to return",
+                            "default": 10,
+                        },
+                    },
+                    "required": ["query"],
+                },
+            ),
+            Tool(
+                name="memory_consolidate",
+                description=(
+                    "Run the decay/promotion cycle. Deletes expired cold memories, "
+                    "promotes frequently-accessed active memories to persist, and "
+                    "demotes rarely-accessed persist memories to active. Run this "
+                    "periodically (e.g., daily) to keep the memory store healthy."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="memory_get",
+                description="Get a specific memory by its ID.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "The memory ID (e.g., mem_1234567890_abc123)",
+                        },
+                    },
+                    "required": ["id"],
+                },
+            ),
+            Tool(
+                name="memory_delete",
+                description="Delete a specific memory by its ID.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "The memory ID to delete",
+                        },
+                    },
+                    "required": ["id"],
+                },
+            ),
+            Tool(
+                name="memory_metrics",
+                description=(
+                    "Get effectiveness metrics for the gate classifier. "
+                    "Shows classification distribution, backend performance, "
+                    "skip rate, fallback rate, and average confidence over the "
+                    "specified time period. Use this to monitor and compare "
+                    "gate backends (dilbert vs heuristic vs openai)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "hours": {
+                            "type": "integer",
+                            "description": "Look back period in hours (default: 24)",
+                            "default": 24,
+                        },
+                    },
+                },
+            ),
+            # ── V2 Tools ──────────────────────────────────────────────
+            Tool(
+                name="memory_graph_query",
+                description=(
+                    "Traverse the knowledge graph from an entity. Returns "
+                    "connected entities and edges within N hops. Use this "
+                    "to find relationships: 'Show me everything related to Prism'"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "entity": {
+                            "type": "string",
+                            "description": "Entity name or slug to start from",
+                        },
+                        "depth": {
+                            "type": "integer",
+                            "description": "Number of hops (default: 1)",
+                            "default": 1,
+                        },
+                        "edge_types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Filter by edge types (optional)",
+                        },
+                    },
+                    "required": ["entity"],
+                },
+            ),
+            Tool(
+                name="memory_entity_get",
+                description=(
+                    "Get an entity's compiled truth and timeline. Returns "
+                    "the always-current synthesis of what we know about "
+                    "a person, project, concept, etc."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Entity name or slug",
+                        },
+                    },
+                    "required": ["name"],
+                },
+            ),
+            Tool(
+                name="memory_entity_search",
+                description=(
+                    "Search entities by name or type. Returns matching "
+                    "entities with their compiled truth."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (entity name)",
+                        },
+                        "entity_type": {
+                            "type": "string",
+                            "description": "Filter by type: person, project, concept, tool, decision, preference",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default: 10)",
+                            "default": 10,
+                        },
+                    },
+                    "required": ["query"],
+                },
+            ),
+            Tool(
+                name="memory_dream",
+                description=(
+                    "Trigger the dream cycle manually. Runs maintenance "
+                    "phases: entity sweep, backlink audit, truth re-synthesis, "
+                    "pattern detection, orphan detection, and purge."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "phases": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Specific phases to run (default: all)",
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "Report without making changes (default: false)",
+                            "default": False,
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="memory_context_build",
+                description=(
+                    "Build context for a task. Returns relevant memories, "
+                    "entities, and open threads. This is what agents call "
+                    "before working on a task to load relevant context."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "Task description to find context for",
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Project name (optional)",
+                        },
+                        "agent": {
+                            "type": "string",
+                            "description": "Agent name (optional)",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max memories to return (default: 10)",
+                            "default": 10,
+                        },
+                        "user_id": {"type": "string"},
+                        "workspace_id": {"type": "string"},
+                        "project_id": {"type": "string"},
+                        "repository_id": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "session_id": {"type": "string"},
+                        "agent_id": {"type": "string"},
+                        "known_checkpoint_version": {
+                            "type": "integer",
+                            "minimum": 0,
+                        },
+                    },
+                    "anyOf": [{"required": ["task"]}, {"required": ["task_id"]}],
+                },
+            ),
+            continuity_tool(
+                "recall_task_create",
+                "Create an agent-neutral task in a validated repository scope.",
+                [
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "title",
+                    "objective",
+                    "agent_id",
+                ],
+                {
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "agent_system_type": {"type": "string", "default": "other"},
+                    "status": {"type": "string", "default": "active"},
+                    "idempotency_key": {"type": "string"},
+                    "canonical_path": {"type": "string"},
+                    "remote_url": {"type": "string"},
+                    "default_branch": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_task_get",
+                "Read a task and optionally verify its scope.",
+                ["task_id"],
+                {
+                    "task_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_task_update",
+                "Update task title, objective, or lifecycle status.",
+                ["task_id"],
+                {
+                    "task_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_start",
+                "Start a shared task session and join its initiating agent.",
+                ["task_id", "agent_id"],
+                {
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "role": {"type": "string", "default": "owner"},
+                    "agent_system_type": {"type": "string", "default": "other"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_join",
+                "Join another agent to an existing shared session.",
+                ["session_id", "agent_id"],
+                {
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "role": {"type": "string", "default": "implementer"},
+                    "agent_system_type": {"type": "string", "default": "other"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_event",
+                "Append one ordered, attributed event to a session.",
+                ["session_id", "agent_id", "event_type"],
+                {
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "event_type": {"type": "string"},
+                    "payload": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_checkpoint",
+                "Create a deterministic structured session checkpoint.",
+                ["session_id", "agent_id"],
+                {
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "completed": {"type": "array"},
+                    "remaining": {"type": "array"},
+                    "constraints": {"type": "array"},
+                    "approved_decisions": {"type": "array"},
+                    "proposed_decisions": {"type": "array"},
+                    "open_questions": {"type": "array"},
+                    "blockers": {"type": "array"},
+                    "important_files": {"type": "array"},
+                    "known_failures": {"type": "array"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_delta",
+                "Return ordered session changes after a known checkpoint version.",
+                ["session_id", "known_version"],
+                {
+                    "session_id": {"type": "string"},
+                    "known_version": {"type": "integer", "minimum": 0},
+                    "agent_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_session_close",
+                "Close a session without deleting its events or checkpoints.",
+                ["session_id", "agent_id"],
+                {
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_list",
+                "List scope-filtered Recall Skills before any relevance ranking.",
+                ["user_id", "workspace_id", "project_id"],
+                {**skill_scope_properties, "status": {"type": "string"}},
+            ),
+            continuity_tool(
+                "recall_skill_get",
+                "Fetch one exact immutable skill version or the current approved version.",
+                ["skill_id", "user_id", "workspace_id", "project_id"],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_propose",
+                "Compile a deterministic skill candidate from scoped evidence.",
+                [
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "slug",
+                    "title",
+                    "purpose",
+                    "agent_id",
+                    "sources",
+                ],
+                {
+                    **skill_scope_properties,
+                    "slug": {"type": "string"},
+                    "title": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "sources": {"type": "array", "items": {"type": "object"}},
+                    "summary": {"type": "string"},
+                    "instructions": {"type": "array"},
+                    "facts": {"type": "array"},
+                    "decisions": {"type": "array"},
+                    "constraints": {"type": "array"},
+                    "open_questions": {"type": "array"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_approve",
+                "Manually approve one exact immutable skill version.",
+                [
+                    "skill_id",
+                    "version",
+                    "reviewer_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                    "reviewer_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_reject",
+                "Reject one exact skill version while retaining its audit history.",
+                [
+                    "skill_id",
+                    "version",
+                    "reviewer_id",
+                    "reason",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                    "reviewer_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_refresh",
+                "Refresh a skill from current evidence without rewriting history.",
+                [
+                    "skill_id",
+                    "agent_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "sources": {"type": "array", "items": {"type": "object"}},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_explain",
+                "Explain a skill version, evidence, review state, and staleness.",
+                ["skill_id", "user_id", "workspace_id", "project_id"],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_evidence",
+                "Expand the supporting evidence for an exact skill version.",
+                [
+                    "skill_id",
+                    "version",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                    "agent_id": {"type": "string"},
+                    "context_pack_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_skill_feedback",
+                "Record attributed feedback for one exact skill version.",
+                [
+                    "skill_id",
+                    "version",
+                    "usage_type",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                ],
+                {
+                    **skill_scope_properties,
+                    "skill_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                    "usage_type": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "context_pack_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "metadata": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_create",
+                "Build and persist an immutable, target-authorized agent handoff.",
+                [
+                    *handoff_scope_properties,
+                    "source_agent_id",
+                    "target_agent_id",
+                    "requested_by",
+                    "expected_output",
+                ],
+                {
+                    **handoff_scope_properties,
+                    "source_agent_id": {"type": "string"},
+                    "target_agent_id": {"type": "string"},
+                    "requested_by": {"type": "string"},
+                    "expected_output": {"type": "string"},
+                    "known_checkpoint_version": {"type": "integer", "minimum": 0},
+                    "max_tokens": {"type": "integer", "minimum": 1},
+                    "capabilities": {"type": "array", "items": {"type": "string"}},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_get",
+                "Fetch an authorized immutable handoff version.",
+                [*handoff_scope_properties, "handoff_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_claim",
+                "Exclusively claim a ready handoff as its assigned target agent.",
+                [*handoff_scope_properties, "handoff_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_progress",
+                "Record target-agent progress without changing canonical task truth.",
+                [*handoff_scope_properties, "handoff_id", "agent_id", "progress"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "progress": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_block",
+                "Block a claimed handoff and append an attributed session blocker.",
+                [*handoff_scope_properties, "handoff_id", "agent_id", "blocker"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "blocker": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_complete",
+                "Submit a structured completion and create the next shared checkpoint.",
+                [*handoff_scope_properties, "handoff_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "files_changed": {"type": "array"},
+                    "work_completed": {"type": "array"},
+                    "tests": {"type": "object"},
+                    "blockers": {"type": "array"},
+                    "remaining_work": {"type": "array"},
+                    "new_decisions": {"type": "array"},
+                    "new_questions": {"type": "array"},
+                    "used_skill_versions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "used_memory_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "expanded_references": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_cancel",
+                "Cancel a non-terminal handoff as its source or requester.",
+                [*handoff_scope_properties, "handoff_id", "agent_id", "reason"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_delta",
+                "Return compact handoff and optional session changes without transcript replay.",
+                [*handoff_scope_properties, "handoff_id", "known_version", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "known_version": {"type": "integer", "minimum": 0},
+                    "known_checkpoint_version": {"type": "integer", "minimum": 0},
+                    "agent_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_explain",
+                "Explain scope, priority, skill versions, fingerprints, and warnings.",
+                [*handoff_scope_properties, "handoff_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "version": {"type": "integer", "minimum": 1},
+                },
+            ),
+            continuity_tool(
+                "recall_handoff_expand_reference",
+                "Expand one authorized handoff evidence reference.",
+                [*handoff_scope_properties, "handoff_id", "reference_id", "agent_id"],
+                {
+                    **handoff_scope_properties,
+                    "handoff_id": {"type": "string"},
+                    "reference_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_build",
+                "Build and persist a scope-safe provider-neutral Context Pack V2.",
+                [
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                    "agent_id",
+                ],
+                {
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "max_tokens": {"type": "integer", "minimum": 1},
+                    "known_checkpoint_version": {"type": "integer", "minimum": 0},
+                    "known_context_pack_id": {"type": "string"},
+                    "branch": {"type": "string"},
+                    "commit_sha": {"type": "string"},
+                    "requested_sections": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "client_capabilities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "idempotency_key": {"type": "string"},
+                    "retrieval_limit": {"type": "integer", "minimum": 1},
+                    "schema_version": {"type": "integer", "default": 2},
+                },
+            ),
+            continuity_tool(
+                "recall_context_get",
+                "Fetch a persisted Context Pack V2 in its validated scope.",
+                [
+                    "context_pack_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                ],
+                {
+                    "context_pack_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_explain",
+                "Explain scope filters, inclusion, omission, and token allocation.",
+                [
+                    "context_pack_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                ],
+                {
+                    "context_pack_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_expand_reference",
+                "Expand one Context Pack V2 evidence reference and record expansion.",
+                [
+                    "context_pack_id",
+                    "reference_id",
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                ],
+                {
+                    "context_pack_id": {"type": "string"},
+                    "reference_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_feedback",
+                "Record attributed retrieval and context usage feedback.",
+                ["context_pack_id"],
+                {
+                    "context_pack_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "used_memory_ids": {"type": "array"},
+                    "ignored_memory_ids": {"type": "array"},
+                    "expanded_memory_ids": {"type": "array"},
+                    "corrected_memory_ids": {"type": "array"},
+                    "rejected_memory_ids": {"type": "array"},
+                    "used_skill_versions": {"type": "array"},
+                    "ignored_skill_versions": {"type": "array"},
+                    "corrected_skill_versions": {"type": "array"},
+                    "rejected_skill_versions": {"type": "array"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_deliver",
+                "Deliver full, delta, no-change, refresh, or safe fallback context.",
+                [
+                    "user_id",
+                    "workspace_id",
+                    "project_id",
+                    "repository_id",
+                    "task_id",
+                    "agent_id",
+                ],
+                {
+                    **handoff_scope_properties,
+                    "session_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "max_tokens": {"type": "integer", "minimum": 1},
+                    "branch": {"type": "string"},
+                    "commit_sha": {"type": "string"},
+                    "requested_sections": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "client_capabilities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "retrieval_limit": {"type": "integer", "minimum": 1},
+                    "client_state": {
+                        "type": "object",
+                        "properties": {
+                            "client_id": {"type": "string"},
+                            "client_type": {"type": "string"},
+                            "known_checkpoint_version": {
+                                "type": "integer",
+                                "minimum": 0,
+                            },
+                            "known_context_pack_id": {"type": "string"},
+                            "known_context_pack_fingerprint": {"type": "string"},
+                            "known_skills": {"type": "object"},
+                            "known_handoffs": {"type": "object"},
+                            "capabilities": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_delivery_get",
+                "Fetch one persisted CAG delivery in its exact scope.",
+                [*handoff_scope_properties, "agent_id", "delivery_id"],
+                {
+                    **handoff_scope_properties,
+                    "agent_id": {"type": "string"},
+                    "delivery_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_context_delivery_explain",
+                "Explain a CAG mode, state validation, dependencies, and token estimate.",
+                [*handoff_scope_properties, "agent_id", "delivery_id"],
+                {
+                    **handoff_scope_properties,
+                    "agent_id": {"type": "string"},
+                    "delivery_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_cache_status",
+                "Return content-free durable and hot CAG cache diagnostics.",
+                [],
+                {},
+            ),
+            continuity_tool(
+                "recall_cache_invalidate",
+                "Audit and invalidate one scoped CAG cache entry.",
+                [*handoff_scope_properties, "agent_id", "cache_entry_id"],
+                {
+                    **handoff_scope_properties,
+                    "agent_id": {"type": "string"},
+                    "cache_entry_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_cache_inspect",
+                "Inspect one scoped cache entry and its content-free dependencies.",
+                [*handoff_scope_properties, "agent_id", "cache_entry_id"],
+                {
+                    **handoff_scope_properties,
+                    "agent_id": {"type": "string"},
+                    "cache_entry_id": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_task_outcome",
+                "Record a task outcome for context the task actually used.",
+                ["task_id", "status", "successful"],
+                {
+                    "task_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "successful": {"type": "boolean"},
+                    "agent_id": {"type": "string"},
+                    "user_correction_count": {"type": "integer", "minimum": 0},
+                    "rework_required": {"type": "boolean"},
+                    "metadata": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+            ),
+            continuity_tool(
+                "recall_memory_utility",
+                "Explain a memory's versioned utility components.",
+                ["memory_id"],
+                {
+                    "memory_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "repository_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+            ),
+        ]
+
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict):
+        """
+        Called by the client when the AI decides to use a tool.
+
+        This is the "router" — it dispatches to the right pipeline method
+        based on the tool name the AI selected.
+        """
+        try:
+            if not isinstance(arguments, dict):
+                raise ValueError("arguments must be an object")
+
+            def result_json(result: object):
+                return [
+                    TextContent(
+                        type="text", text=json.dumps(result, indent=2, default=str)
+                    )
+                ]
+
+            def context_scope() -> dict[str, str | None]:
+                return {
+                    key: arguments.get(key)
+                    for key in (
+                        "user_id",
+                        "workspace_id",
+                        "project_id",
+                        "repository_id",
+                        "task_id",
+                    )
+                }
+
+            def skill_scope() -> SkillScope:
+                return SkillScope(
+                    user_id=str(arguments.get("user_id") or ""),
+                    workspace_id=str(arguments.get("workspace_id") or ""),
+                    project_id=str(arguments.get("project_id") or ""),
+                    repository_id=arguments.get("repository_id"),
+                )
+
+            def handoff_scope() -> HandoffScope:
+                return HandoffScope(
+                    user_id=str(arguments.get("user_id") or ""),
+                    workspace_id=str(arguments.get("workspace_id") or ""),
+                    project_id=str(arguments.get("project_id") or ""),
+                    repository_id=str(arguments.get("repository_id") or ""),
+                    task_id=str(arguments.get("task_id") or ""),
+                    session_id=str(arguments.get("session_id") or ""),
+                )
+
+            def cag_scope() -> dict[str, str | None]:
+                return {
+                    key: arguments.get(key)
+                    for key in (
+                        "user_id",
+                        "workspace_id",
+                        "project_id",
+                        "repository_id",
+                        "task_id",
+                        "session_id",
+                        "agent_id",
+                    )
+                }
+
+            if name == "recall_task_create":
+                result = pipeline.task_service.create_task(
+                    user_id=arguments["user_id"],
+                    workspace_id=arguments["workspace_id"],
+                    project_id=arguments["project_id"],
+                    repository_id=arguments["repository_id"],
+                    title=arguments["title"],
+                    objective=arguments["objective"],
+                    created_by=arguments["agent_id"],
+                    status=arguments.get("status", "active"),
+                    idempotency_key=arguments.get("idempotency_key"),
+                    agent_system_type=arguments.get("agent_system_type", "other"),
+                    canonical_path=arguments.get("canonical_path"),
+                    remote_url=arguments.get("remote_url"),
+                    default_branch=arguments.get("default_branch"),
+                )
+                return result_json(result)
+
+            elif name == "recall_task_get":
+                return result_json(
+                    pipeline.task_service.get_task(
+                        arguments["task_id"],
+                        user_id=arguments.get("user_id"),
+                        project_id=arguments.get("project_id"),
+                        repository_id=arguments.get("repository_id"),
+                    )
+                )
+
+            elif name == "recall_task_update":
+                return result_json(
+                    pipeline.task_service.update_task(
+                        arguments["task_id"],
+                        title=arguments.get("title"),
+                        objective=arguments.get("objective"),
+                        status=arguments.get("status"),
+                    )
+                )
+
+            elif name == "recall_session_start":
+                return result_json(
+                    pipeline.session_service.start_session(
+                        task_id=arguments["task_id"],
+                        agent_id=arguments["agent_id"],
+                        role=arguments.get("role", "owner"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                        agent_system_type=arguments.get("agent_system_type", "other"),
+                    )
+                )
+
+            elif name == "recall_session_join":
+                return result_json(
+                    pipeline.session_service.join_session(
+                        arguments["session_id"],
+                        agent_id=arguments["agent_id"],
+                        role=arguments.get("role", "implementer"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                        agent_system_type=arguments.get("agent_system_type", "other"),
+                    )
+                )
+
+            elif name == "recall_session_event":
+                return result_json(
+                    pipeline.session_service.append_event(
+                        arguments["session_id"],
+                        agent_id=arguments["agent_id"],
+                        event_type=arguments["event_type"],
+                        payload=arguments.get("payload"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_session_checkpoint":
+                return result_json(
+                    pipeline.session_service.create_checkpoint(
+                        arguments["session_id"],
+                        agent_id=arguments["agent_id"],
+                        summary=arguments.get("summary", ""),
+                        completed=arguments.get("completed"),
+                        remaining=arguments.get("remaining"),
+                        constraints=arguments.get("constraints"),
+                        approved_decisions=arguments.get("approved_decisions"),
+                        proposed_decisions=arguments.get("proposed_decisions"),
+                        open_questions=arguments.get("open_questions"),
+                        blockers=arguments.get("blockers"),
+                        important_files=arguments.get("important_files"),
+                        known_failures=arguments.get("known_failures"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_session_delta":
+                return result_json(
+                    pipeline.session_service.get_delta(
+                        arguments["session_id"],
+                        known_version=int(arguments["known_version"]),
+                        agent_id=arguments.get("agent_id"),
+                    )
+                )
+
+            elif name == "recall_session_close":
+                return result_json(
+                    pipeline.session_service.close_session(
+                        arguments["session_id"],
+                        agent_id=arguments["agent_id"],
+                        summary=arguments.get("summary"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_skill_list":
+                return result_json(
+                    {
+                        "skills": pipeline.skill_service.list_skills(
+                            scope=skill_scope(), status=arguments.get("status")
+                        )
+                    }
+                )
+
+            elif name == "recall_skill_get":
+                return result_json(
+                    pipeline.skill_service.get(
+                        arguments["skill_id"],
+                        scope=skill_scope(),
+                        version=(
+                            int(arguments["version"])
+                            if arguments.get("version") is not None
+                            else None
+                        ),
+                    )
+                )
+
+            elif name == "recall_skill_propose":
+                return result_json(
+                    pipeline.skill_service.propose(
+                        SkillProposal(
+                            scope=skill_scope(),
+                            slug=arguments["slug"],
+                            title=arguments["title"],
+                            purpose=arguments["purpose"],
+                            created_by_agent_id=arguments["agent_id"],
+                            sources=tuple(arguments["sources"]),
+                            summary=arguments.get("summary", ""),
+                            instructions=tuple(arguments.get("instructions", [])),
+                            facts=tuple(arguments.get("facts", [])),
+                            decisions=tuple(arguments.get("decisions", [])),
+                            constraints=tuple(arguments.get("constraints", [])),
+                            open_questions=tuple(arguments.get("open_questions", [])),
+                            idempotency_key=arguments.get("idempotency_key"),
+                        )
+                    )
+                )
+
+            elif name == "recall_skill_approve":
+                return result_json(
+                    pipeline.skill_service.approve(
+                        arguments["skill_id"],
+                        int(arguments["version"]),
+                        scope=skill_scope(),
+                        reviewer_id=arguments["reviewer_id"],
+                        reason=arguments.get("reason", ""),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_skill_reject":
+                return result_json(
+                    pipeline.skill_service.reject(
+                        arguments["skill_id"],
+                        int(arguments["version"]),
+                        scope=skill_scope(),
+                        reviewer_id=arguments["reviewer_id"],
+                        reason=arguments["reason"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_skill_refresh":
+                return result_json(
+                    pipeline.skill_service.refresh(
+                        arguments["skill_id"],
+                        scope=skill_scope(),
+                        created_by_agent_id=arguments["agent_id"],
+                        source_overrides=arguments.get("sources"),
+                    )
+                )
+
+            elif name == "recall_skill_explain":
+                return result_json(
+                    pipeline.skill_service.explain(
+                        arguments["skill_id"],
+                        scope=skill_scope(),
+                        version=(
+                            int(arguments["version"])
+                            if arguments.get("version") is not None
+                            else None
+                        ),
+                    )
+                )
+
+            elif name == "recall_skill_evidence":
+                return result_json(
+                    pipeline.skill_service.expand_evidence(
+                        arguments["skill_id"],
+                        int(arguments["version"]),
+                        scope=skill_scope(),
+                        agent_id=arguments.get("agent_id"),
+                        context_pack_id=arguments.get("context_pack_id"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_skill_feedback":
+                return result_json(
+                    pipeline.skill_service.record_usage(
+                        arguments["skill_id"],
+                        int(arguments["version"]),
+                        scope=skill_scope(),
+                        usage_type=arguments["usage_type"],
+                        agent_id=arguments.get("agent_id"),
+                        context_pack_id=arguments.get("context_pack_id"),
+                        task_id=arguments.get("task_id"),
+                        session_id=arguments.get("session_id"),
+                        metadata=arguments.get("metadata"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_create":
+                return result_json(
+                    pipeline.handoff_service.create(
+                        HandoffRequest(
+                            scope=handoff_scope(),
+                            source_agent_id=arguments["source_agent_id"],
+                            target_agent_id=arguments["target_agent_id"],
+                            requested_by=arguments["requested_by"],
+                            expected_output=arguments["expected_output"],
+                            known_checkpoint_version=int(
+                                arguments.get("known_checkpoint_version", 0)
+                            ),
+                            max_tokens=arguments.get("max_tokens"),
+                            capabilities=tuple(arguments.get("capabilities", [])),
+                            idempotency_key=arguments.get("idempotency_key"),
+                        )
+                    )
+                )
+
+            elif name == "recall_handoff_get":
+                return result_json(
+                    pipeline.handoff_service.get(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        version=int(arguments["version"])
+                        if arguments.get("version") is not None
+                        else None,
+                        agent_id=arguments["agent_id"],
+                    )
+                )
+
+            elif name == "recall_handoff_claim":
+                return result_json(
+                    pipeline.handoff_service.claim(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_progress":
+                return result_json(
+                    pipeline.handoff_service.progress(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        progress=arguments["progress"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_block":
+                return result_json(
+                    pipeline.handoff_service.block(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        blocker=arguments["blocker"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_complete":
+                return result_json(
+                    pipeline.handoff_service.complete(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        completion=HandoffCompletion(
+                            files_changed=tuple(arguments.get("files_changed", [])),
+                            work_completed=tuple(arguments.get("work_completed", [])),
+                            tests=arguments.get("tests", {}),
+                            blockers=tuple(arguments.get("blockers", [])),
+                            remaining_work=tuple(arguments.get("remaining_work", [])),
+                            new_decisions=tuple(arguments.get("new_decisions", [])),
+                            new_questions=tuple(arguments.get("new_questions", [])),
+                            used_skill_versions=tuple(
+                                arguments.get("used_skill_versions", [])
+                            ),
+                            used_memory_ids=tuple(arguments.get("used_memory_ids", [])),
+                            expanded_references=tuple(
+                                arguments.get("expanded_references", [])
+                            ),
+                        ),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_cancel":
+                return result_json(
+                    pipeline.handoff_service.cancel(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                        reason=arguments["reason"],
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_handoff_delta":
+                return result_json(
+                    pipeline.handoff_service.get_delta(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        known_version=int(arguments["known_version"]),
+                        known_checkpoint_version=(
+                            int(arguments["known_checkpoint_version"])
+                            if arguments.get("known_checkpoint_version") is not None
+                            else None
+                        ),
+                        agent_id=arguments["agent_id"],
+                    )
+                )
+
+            elif name == "recall_handoff_explain":
+                return result_json(
+                    pipeline.handoff_service.explain(
+                        arguments["handoff_id"],
+                        scope=handoff_scope(),
+                        version=(
+                            int(arguments["version"])
+                            if arguments.get("version") is not None
+                            else None
+                        ),
+                        agent_id=arguments["agent_id"],
+                    )
+                )
+
+            elif name == "recall_handoff_expand_reference":
+                return result_json(
+                    pipeline.handoff_service.expand_reference(
+                        arguments["handoff_id"],
+                        arguments["reference_id"],
+                        scope=handoff_scope(),
+                        agent_id=arguments["agent_id"],
+                    )
+                )
+
+            elif name == "recall_context_build":
+                return result_json(
+                    pipeline.build_context_v2(
+                        ContextPackRequest(
+                            user_id=arguments.get("user_id"),
+                            workspace_id=arguments.get("workspace_id"),
+                            project_id=arguments.get("project_id"),
+                            repository_id=arguments.get("repository_id"),
+                            task_id=arguments.get("task_id"),
+                            session_id=arguments.get("session_id"),
+                            agent_id=arguments.get("agent_id"),
+                            objective=arguments.get("objective"),
+                            max_tokens=arguments.get("max_tokens"),
+                            known_checkpoint_version=arguments.get(
+                                "known_checkpoint_version"
+                            ),
+                            known_context_pack_id=arguments.get(
+                                "known_context_pack_id"
+                            ),
+                            branch=arguments.get("branch"),
+                            commit_sha=arguments.get("commit_sha"),
+                            requested_sections=tuple(
+                                arguments.get("requested_sections", [])
+                            ),
+                            client_capabilities=tuple(
+                                arguments.get("client_capabilities", [])
+                            ),
+                            idempotency_key=arguments.get("idempotency_key"),
+                            retrieval_limit=int(arguments.get("retrieval_limit", 10)),
+                            schema_version=int(arguments.get("schema_version", 2)),
+                        )
+                    )
+                )
+
+            elif name == "recall_context_deliver":
+                state_body = arguments.get("client_state")
+                if state_body is not None and not isinstance(state_body, dict):
+                    raise ValueError("client_state must be an object")
+                client_state = None
+                if isinstance(state_body, dict):
+                    client_state = ClientState(
+                        client_id=state_body.get("client_id"),
+                        client_type=state_body.get("client_type"),
+                        known_checkpoint_version=state_body.get(
+                            "known_checkpoint_version"
+                        ),
+                        known_context_pack_id=state_body.get("known_context_pack_id"),
+                        known_context_pack_fingerprint=state_body.get(
+                            "known_context_pack_fingerprint"
+                        ),
+                        known_skills=state_body.get("known_skills", {}),
+                        known_handoffs=state_body.get("known_handoffs", {}),
+                        capabilities=tuple(state_body.get("capabilities", [])),
+                    )
+                return result_json(
+                    pipeline.deliver_context(
+                        CAGRequest(
+                            context=ContextPackRequest(
+                                user_id=arguments.get("user_id"),
+                                workspace_id=arguments.get("workspace_id"),
+                                project_id=arguments.get("project_id"),
+                                repository_id=arguments.get("repository_id"),
+                                task_id=arguments.get("task_id"),
+                                session_id=arguments.get("session_id"),
+                                agent_id=arguments.get("agent_id"),
+                                objective=arguments.get("objective"),
+                                max_tokens=arguments.get("max_tokens"),
+                                branch=arguments.get("branch"),
+                                commit_sha=arguments.get("commit_sha"),
+                                requested_sections=tuple(
+                                    arguments.get("requested_sections", [])
+                                ),
+                                client_capabilities=tuple(
+                                    arguments.get("client_capabilities", [])
+                                ),
+                                retrieval_limit=int(
+                                    arguments.get("retrieval_limit", 10)
+                                ),
+                            ),
+                            client_state=client_state,
+                            idempotency_key=arguments.get("idempotency_key"),
+                        )
+                    )
+                )
+
+            elif name == "recall_context_delivery_get":
+                return result_json(
+                    pipeline.cag_service.get_delivery(
+                        arguments["delivery_id"], cag_scope()
+                    )
+                )
+
+            elif name == "recall_context_delivery_explain":
+                return result_json(
+                    pipeline.cag_service.explain(arguments["delivery_id"], cag_scope())
+                )
+
+            elif name == "recall_cache_status":
+                return result_json(pipeline.cag_service.stats())
+
+            elif name == "recall_cache_invalidate":
+                return result_json(
+                    pipeline.cag_service.invalidate(
+                        scope=cag_scope(),
+                        cache_entry_id=arguments["cache_entry_id"],
+                        reason=arguments.get("reason", "manual_invalidation"),
+                        actor_id=arguments.get("agent_id"),
+                    )
+                )
+
+            elif name == "recall_cache_inspect":
+                return result_json(
+                    pipeline.cag_service.inspect_cache_entry(
+                        arguments["cache_entry_id"], cag_scope()
+                    )
+                )
+
+            elif name == "recall_context_get":
+                return result_json(
+                    pipeline.context_service.get(
+                        arguments["context_pack_id"], context_scope()
+                    )
+                )
+
+            elif name == "recall_context_explain":
+                return result_json(
+                    pipeline.context_service.explain(
+                        arguments["context_pack_id"], context_scope()
+                    )
+                )
+
+            elif name == "recall_context_expand_reference":
+                return result_json(
+                    pipeline.context_service.expand_reference(
+                        arguments["context_pack_id"],
+                        arguments["reference_id"],
+                        context_scope(),
+                        agent_id=arguments.get("agent_id"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_context_feedback":
+                return result_json(
+                    pipeline.context_service.record_feedback(
+                        context_pack_id=arguments["context_pack_id"],
+                        scope=context_scope(),
+                        agent_id=arguments.get("agent_id"),
+                        used_memory_ids=arguments.get("used_memory_ids", []),
+                        ignored_memory_ids=arguments.get("ignored_memory_ids", []),
+                        expanded_memory_ids=arguments.get("expanded_memory_ids", []),
+                        corrected_memory_ids=arguments.get("corrected_memory_ids", []),
+                        rejected_memory_ids=arguments.get("rejected_memory_ids", []),
+                        used_skill_versions=arguments.get("used_skill_versions", []),
+                        ignored_skill_versions=arguments.get(
+                            "ignored_skill_versions", []
+                        ),
+                        corrected_skill_versions=arguments.get(
+                            "corrected_skill_versions", []
+                        ),
+                        rejected_skill_versions=arguments.get(
+                            "rejected_skill_versions", []
+                        ),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_task_outcome":
+                return result_json(
+                    pipeline.feedback_service.record_task_outcome(
+                        task_id=arguments["task_id"],
+                        session_id=arguments.get("session_id"),
+                        status=arguments["status"],
+                        successful=bool(arguments["successful"]),
+                        agent_id=arguments.get("agent_id"),
+                        user_correction_count=int(
+                            arguments.get("user_correction_count", 0)
+                        ),
+                        rework_required=bool(arguments.get("rework_required", False)),
+                        metadata=arguments.get("metadata"),
+                        idempotency_key=arguments.get("idempotency_key"),
+                    )
+                )
+
+            elif name == "recall_memory_utility":
+                scope = {
+                    key: arguments[key]
+                    for key in ("user_id", "project_id", "repository_id", "task_id")
+                    if arguments.get(key) is not None
+                }
+                return result_json(
+                    pipeline.feedback_service.explain_utility(
+                        arguments["memory_id"], scope=scope
+                    )
+                )
+
+            elif name == "memory_capture":
+                text = arguments["text"]
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("text must be a non-empty string")
+                if len(text) > pipeline.settings.MAX_CAPTURE_CHARS:
+                    raise ValueError("capture exceeds the configured character limit")
+                result = pipeline.capture(
+                    text=text,
+                    source=arguments.get("source", "cli"),
+                    category=arguments.get("category"),
+                    tier=arguments.get("tier"),
+                    project=arguments.get("project"),
+                    agent=arguments.get("agent"),
+                    user_id=arguments.get("user_id"),
+                    workspace_id=arguments.get("workspace_id"),
+                    project_id=arguments.get("project_id"),
+                    repository_id=arguments.get("repository_id"),
+                    task_id=arguments.get("task_id"),
+                    session_id=arguments.get("session_id"),
+                )
+                if result["decision"] == "SKIP":
+                    return [
+                        TextContent(
+                            type="text", text="Skipped — not important enough to store."
+                        )
+                    ]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2),
+                    )
+                ]
+
+            elif name == "memory_search":
+                results = pipeline.search(
+                    query=arguments["query"],
+                    category=arguments.get("category"),
+                    tier=arguments.get("tier"),
+                    limit=min(
+                        int(arguments.get("limit", 10)),
+                        pipeline.settings.MAX_RESULTS,
+                    ),
+                    mode=arguments.get("mode", "balanced"),
+                    project=arguments.get("project"),
+                    agent=arguments.get("agent"),
+                )
+                if not results:
+                    return [
+                        TextContent(
+                            type="text", text="No memories found matching that query."
+                        )
+                    ]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(results, indent=2, default=str),
+                    )
+                ]
+
+            elif name == "memory_consolidate":
+                result = pipeline.consolidate()
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2),
+                    )
+                ]
+
+            elif name == "memory_get":
+                memory = pipeline.get(arguments["id"])
+                if not memory:
+                    return [
+                        TextContent(
+                            type="text", text=f"Memory {arguments['id']} not found."
+                        )
+                    ]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(memory, indent=2, default=str),
+                    )
+                ]
+
+            elif name == "memory_delete":
+                deleted = pipeline.delete(arguments["id"])
+                if deleted:
+                    return [
+                        TextContent(
+                            type="text", text=f"Deleted memory {arguments['id']}."
+                        )
+                    ]
+                return [
+                    TextContent(
+                        type="text", text=f"Memory {arguments['id']} not found."
+                    )
+                ]
+
+            elif name == "memory_metrics":
+                metrics = pipeline.metrics_summary(hours=arguments.get("hours", 24))
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(metrics, indent=2),
+                    )
+                ]
+
+            # ── V2 Tool Handlers ──────────────────────────────────────────
+            elif name == "memory_graph_query":
+                entity_name = arguments["entity"]
+                depth = max(
+                    1,
+                    min(
+                        int(arguments.get("depth", 1)),
+                        pipeline.settings.MAX_GRAPH_DEPTH,
+                    ),
+                )
+                edge_types = arguments.get("edge_types")
+                # Find entity
+                entity = pipeline.entity_store.find_entity(entity_name)
+                if not entity:
+                    return [
+                        TextContent(
+                            type="text", text=f"Entity '{entity_name}' not found."
+                        )
+                    ]
+                # Traverse
+                result = pipeline.entity_store.get_neighbors(
+                    entity["id"], depth=depth, edge_types=edge_types
+                )
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2, default=str),
+                    )
+                ]
+
+            elif name == "memory_entity_get":
+                entity_name = arguments["name"]
+                entity = pipeline.entity_get(entity_name)
+                if not entity:
+                    return [
+                        TextContent(
+                            type="text", text=f"Entity '{entity_name}' not found."
+                        )
+                    ]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(entity, indent=2, default=str),
+                    )
+                ]
+
+            elif name == "memory_entity_search":
+                results = pipeline.entity_store.search_entities(
+                    query=arguments["query"],
+                    entity_type=arguments.get("entity_type"),
+                    limit=max(
+                        1,
+                        min(
+                            int(arguments.get("limit", 10)),
+                            pipeline.settings.MAX_RESULTS,
+                        ),
+                    ),
+                )
+                if not results:
+                    return [TextContent(type="text", text="No entities found.")]
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(results, indent=2, default=str),
+                    )
+                ]
+
+            elif name == "memory_dream":
+                phases = arguments.get("phases")
+                dry_run = arguments.get("dry_run", False)
+                result = pipeline.dream_cycle.run(phases=phases, dry_run=dry_run)
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2, default=str),
+                    )
+                ]
+
+            elif name == "memory_context_build":
+                result = pipeline.build_context(
+                    task=arguments.get("task", ""),
+                    project=arguments.get("project"),
+                    agent=arguments.get("agent"),
+                    limit=max(
+                        1,
+                        min(
+                            int(arguments.get("limit", 10)),
+                            pipeline.settings.MAX_RESULTS,
+                        ),
+                    ),
+                    user_id=arguments.get("user_id"),
+                    workspace_id=arguments.get("workspace_id"),
+                    project_id=arguments.get("project_id"),
+                    repository_id=arguments.get("repository_id"),
+                    task_id=arguments.get("task_id"),
+                    session_id=arguments.get("session_id"),
+                    agent_id=arguments.get("agent_id"),
+                    known_checkpoint_version=arguments.get("known_checkpoint_version"),
+                    token_budget=arguments.get("token_budget"),
+                    include_cold=bool(arguments.get("include_cold", False)),
+                    retrieval_idempotency_key=arguments.get("idempotency_key"),
+                )
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2, default=str),
+                    )
+                ]
+
+            else:
+                return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+        except ContinuityError as exc:
+            logger.info("Context or continuity request rejected for %s: %s", name, exc)
+            return result_json({"error": str(exc), "code": exc.code})
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.info("Invalid tool request for %s: %s", name, exc)
+            return [TextContent(type="text", text=f"Invalid request: {exc}")]
+        except Exception:
+            logger.exception("Tool call failed for %s", name)
+            return [
+                TextContent(
+                    type="text",
+                    text="Error: request could not be completed; consult server logs.",
+                )
+            ]
+
+    return server

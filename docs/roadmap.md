@@ -1,4 +1,4 @@
-# Roadmap: remembrance-mcp → Shared Semantic Memory Server
+# Roadmap: recall-mcp → Shared Semantic Memory Server
 
 Sequenced plan from the current single-user keyword store to a networked, multi-user, semantically-retrieving office memory server. Ordered so **every phase ships something working** and nothing forces a destructive rewrite later.
 

@@ -4,6 +4,42 @@
 **Scope:** Complete the retrieval ("R") capability with provider-agnostic vector search, designed to grow into a shared, networked, multi-user memory server.
 **Supersedes:** the initial single-user 384-dim draft.
 
+**Merge note (revall-v2):** memory-level vector search (§5.1–5.3) already shipped
+independently in `recall_mcp` via `embeddings.py` + `search/hybrid.py` — that part
+of this design is done, just not via the code this doc originally described.
+Chunk-level retrieval (§5.4 chunking, §5.5 chunk backfill) did **not** carry over
+in the initial reconciliation: it depended on modules (`chunk/chunk.py`,
+`embed/embed.py`) that only existed on the pre-rename `remembrance_mcp` codebase
+and were removed as part of reconciling with `recall_mcp`'s independent rewrite.
+**Chunking has since been re-implemented against `recall_mcp`'s actual
+architecture** rather than ported verbatim:
+
+- `chunking.py::chunk_text()` — the splitter itself, unchanged in behavior; env
+  vars renamed to `RECALL_CHUNK_*` (with `REMEMBRANCE_CHUNK_*` fallback via
+  `recall_mcp.compat.get_env`, like every other Recall setting).
+- Migration 12 (`memory_chunks`) — uses `recall_mcp`'s actual naming
+  (`embedding_dimensions`, not the draft's `embedding_dim`) and does **not**
+  duplicate `owner_id`/`scope` on chunks: `recall_mcp` already implemented the
+  full formal-scope columns (§6 below) on `memories` itself, so chunks inherit
+  scope through `memory_id` and cascade-delete with their parent instead.
+- `MemoryStoreV2.store_chunks()` / `stale_chunk_memories()` — chunk persistence
+  and backfill-candidate lookup, following the `MemoryStoreV2` (not raw SQL)
+  convention the rest of the store layer uses.
+- `HybridSearch.search_chunks_with_embedding()` — additive, not a replacement:
+  it is merged into `_search_vector()`/`_search_balanced()` alongside the
+  existing sqlite-vec-backed whole-memory path (best score per memory wins),
+  so installs that never chunk see byte-identical behavior to before this
+  feature existed.
+- Dream-cycle `chunk_backfill` phase — gated by its own `chunking_enabled` flag
+  (wired from `RECALL_CHUNKING_ENABLED`), independent of `embedding_provider`
+  presence, so enabling `RECALL_EMBEDDINGS_ENABLED` alone never triggers a
+  backfill for installs that haven't opted into chunking.
+- Chunk-on-write in `pipeline.py::_finish_capture()` — gated by
+  `RECALL_CHUNKING_ENABLED` (default **off**; see docs/configuration.md).
+  Enabling it changes retrieval results (chunk hits merge into vector/balanced
+  search) and queues a one-time backfill workload for pre-existing memories on
+  installs that opt in later, so it is not on by default.
+
 ---
 
 ## 1. Summary
@@ -87,7 +123,7 @@ BaseEmbedBackend (ABC): embed(text)->bytes ; dim:int ; model_id:str
 OllamaEmbedBackend    : POST /api/embeddings ; model+host from config
 OpenAIEmbedBackend    : text-embedding-3-* ; api key from config
 HashEmbedBackend      : dependency-free deterministic fallback (offline tests)
-EmbedFallbackChain    : ordered, first success wins ; env REMEMBRANCE_EMBED_BACKENDS
+EmbedFallbackChain    : ordered, first success wins ; env RECALL_EMBED_BACKENDS
   public: embed_text(text)->(bytes, dim, model_id)
 ```
 
@@ -95,24 +131,25 @@ Fallback caveat (must be in README): the hash backend produces correctly-shaped 
 
 ### 5.3 Config
 
-- `REMEMBRANCE_EMBED_BACKENDS` (default `"hash"`; opt into `"ollama,hash"` or `"openai,hash"`).
-- `REMEMBRANCE_EMBED_MODEL`, `REMEMBRANCE_EMBED_HOST`/key as relevant.
-- No `REMEMBRANCE_EMBED_DIM` needed — dimension is discovered from the model and stored per row.
+- `RECALL_EMBED_BACKENDS` (default `"hash"`; opt into `"ollama,hash"` or `"openai,hash"`).
+- `RECALL_EMBED_MODEL`, `RECALL_EMBED_HOST`/key as relevant.
+- No `RECALL_EMBED_DIM` needed — dimension is discovered from the model and stored per row.
 
 ### 5.4 Chunking (makes "all context sizes" real)
 
 One vector per long memory averages everything into mush. Instead:
 - On write, if content exceeds a token threshold, split into overlapping chunks.
-- Embed each chunk; store chunks in a `memory_chunks` table (`chunk_id`, `memory_id`, `chunk_index`, `content`, `embedding`, `embedding_dim`, `embedding_model`).
+- Embed each chunk; store chunks in a `memory_chunks` table (`chunk_id`, `memory_id`, `chunk_index`, `content`, `embedding`, `embedding_dimensions`, `embedding_model` — `embedding_dimensions` to match the naming `recall_mcp` already uses on `memories`, not this draft's original `embedding_dim`).
 - Search matches at the **chunk** level, then resolves to parent memories (dedup, keep best-scoring chunk per memory).
 - Short memories → a single chunk (uniform code path).
+- Gated by `RECALL_CHUNKING_ENABLED` (default **off** — see §5.3/docs/configuration.md): both chunk-on-write and the backfill phase are opt-in, since enabling them changes retrieval results and queues a one-time backfill for existing installs.
 
 This is the mechanism that lets small notes and long documents coexist accurately.
 
 ### 5.5 Wiring (three call sites)
-- **Write** — `pipeline.py capture()` Stage 3: chunk → embed chunks → store parent + chunks. Non-blocking: embed failure logs a warning and stores with null embedding; the memory is never lost.
-- **Query** — `hybrid.py _search_vector()`: embed query → match against chunks of the active model → resolve to parents. Falls back to keyword if no embedder/vector.
-- **Backfill** — `dream/cycle.py`: find rows/chunks with null or wrong-model embeddings, embed in bounded batches, report a true `embeddings_refreshed` count.
+- **Write** — `pipeline.py::_finish_capture()`: chunk → embed chunks → store parent + chunks. Non-blocking: embed failure logs a warning and stores with null embedding; the memory is never lost.
+- **Query** — `hybrid.py::_search_vector()`: embed query → match against chunks of the active model via `search_chunks_with_embedding()` → resolve to parents → merge additively with the existing whole-memory `search_with_embedding()` results (best score per memory wins). Falls back to keyword if no embedder/vector at all. The merge is additive by design: an install that never chunks sees `chunk_results == []` and gets byte-identical behavior to before chunking existed.
+- **Backfill** — `dream/cycle.py::_phase_chunk_backfill()`: find memories with no current-model embedded chunk, (re)chunk + embed in bounded batches, report true `memories_chunked`/`chunks_written` counts. Gated by its own `chunking_enabled` flag, independent of `embedding_provider` presence.
 
 ### 5.6 Fusion
 `_search_balanced()` already RRF-fuses via variadic `_rrf_fuse()`. Add vector results as an additional list. No change to the fusion algorithm.
@@ -129,7 +166,7 @@ The shared-server target has requirements SQLite handles poorly:
 **Direction:** migrate the store to **Postgres + pgvector** for the multi-user phase. pgvector gives real concurrency, network access, and native ANN indexing in one move.
 
 **Forward-compatibility we bake in now (so v1 doesn't block the migration):**
-- Add an `owner_id TEXT` (nullable in single-user v1) and a `scope TEXT` (`private`/`shared`) to memories + chunks. Unused in v1, structurally present.
+- `memories` already carries full formal-scope columns (`user_id`, `workspace_id`, `project_id`, `repository_id`, `task_id`, `session_id` — migration 6 `task_session_continuity`), superseding this draft's originally-proposed `owner_id`/`scope` pair. `memory_chunks` does **not** duplicate scope columns: chunks cascade-delete with their parent memory and inherit its scope through `memory_id`, so a chunk is never orphaned from — or scoped differently than — the memory it came from.
 - Keep all storage access behind the existing store interface so the engine can be swapped without touching pipeline/search/API.
 - Avoid SQLite-only SQL idioms in the store layer where a portable form exists.
 
@@ -143,15 +180,16 @@ This means single-user v1 ships clean, and the Postgres cutover is an adapter sw
 
 ---
 
-## 8. Testing (offline via hash backend)
-1. Round-trip: embed → store → `_search_vector` returns closest seeded memory.
-2. Provider-agnostic: two models with different dims coexist; search only compares within the active model.
-3. Chunking: a long memory findable by a query matching only one of its chunks; parent resolution dedups.
-4. Fusion: vector-only-findable memory surfaces via `_search_balanced`.
-5. Write resilience: embed failure → memory still stored, no exception escapes.
-6. Backfill: dream embeds null/wrong-model rows, accurate count.
-7. No-cap regression: >500 memories, target accessed last, still retrievable.
-8. Forward-compat: `owner_id`/`scope` columns present and default correctly in single-user mode.
+## 8. Testing (offline via a deterministic hash-based `EmbeddingProvider`)
+1. Round-trip: embed → store → `_search_vector` returns closest seeded memory (`tests/test_chunk_on_write.py`).
+2. Provider-agnostic: two models with different dims coexist; search only compares within the active model (`tests/test_hybrid_search.py`, `tests/test_chunk_search.py`).
+3. Chunking: a long memory findable by a query matching only one of its chunks; parent resolution dedups (`tests/test_chunk_search.py`).
+4. Fusion: vector-only/chunk-only-findable memory surfaces via `_search_balanced` (`tests/test_chunk_search.py`).
+5. Write resilience: embed/chunk failure → memory still stored, no exception escapes (`tests/test_chunk_on_write.py`).
+6. Backfill: dream chunk_backfill (re)chunks null/wrong-model rows, accurate count, gated independently of `embedding_provider` (`tests/test_dream_chunk_backfill.py`).
+7. No-cap regression: >500 memories, target accessed last, still retrievable (`tests/test_production_hardening.py`).
+8. Forward-compat: formal-scope columns present and default correctly in single-user mode (`tests/test_task_session_continuity.py`); chunk cascade-delete verified in `tests/test_schema_migrations.py`.
+9. Migration: clean `11 -> 12`, idempotent `12 -> 12`, existing rows preserved (`tests/test_schema_migrations.py`).
 
 ---
 

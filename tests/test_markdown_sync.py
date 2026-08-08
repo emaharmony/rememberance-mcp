@@ -5,11 +5,9 @@ Tests for MarkdownSync — SQLite ↔ Brain Repo
 import tempfile
 import time
 from pathlib import Path
-
 import pytest
-
-from remembrance_mcp.store.edges import EntityStore
-from remembrance_mcp.store.markdown import MarkdownSync
+from recall_mcp.store.edges import EntityStore
+from recall_mcp.store.markdown import MarkdownSync
 
 
 @pytest.fixture
@@ -30,7 +28,7 @@ class TestExportEntity:
     def test_export_person(self, sync_env):
         store = sync_env["entity_store"]
         sync = sync_env["sync"]
-        brain_dir = sync_env["brain_dir"]
+        sync_env["brain_dir"]
 
         store.create_entity(
             "Ema",
@@ -48,9 +46,11 @@ class TestExportEntity:
     def test_export_project(self, sync_env):
         store = sync_env["entity_store"]
         sync = sync_env["sync"]
-        brain_dir = sync_env["brain_dir"]
+        sync_env["brain_dir"]
 
-        store.create_entity("Prism", "project", compiled_truth="Event-driven AI framework")
+        store.create_entity(
+            "Prism", "project", compiled_truth="Event-driven AI framework"
+        )
 
         path = sync.export_entity("prism")
         assert path is not None

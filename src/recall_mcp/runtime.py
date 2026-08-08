@@ -1,0 +1,417 @@
+"""Environment-backed production settings for Recall."""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from recall_mcp.compat import get_env, resolve_home
+
+
+def _text(name: str, default: str) -> str:
+    return str(get_env(name, default))
+
+
+def _optional_text(name: str) -> str | None:
+    value = get_env(name)
+    return value.strip() if value and value.strip() else None
+
+
+def _integer(name: str, default: int) -> int:
+    value = get_env(name)
+    return default if value is None else int(value)
+
+
+def _number(name: str, default: float) -> float:
+    value = get_env(name)
+    return default if value is None else float(value)
+
+
+def _boolean(name: str, default: bool) -> bool:
+    value = get_env(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"RECALL_{name} must be a boolean")
+
+
+def _path(name: str) -> Path | None:
+    value = get_env(name)
+    return Path(value).expanduser() if value else None
+
+
+def _csv(name: str) -> tuple[str, ...]:
+    value = get_env(name, "") or ""
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _number_mapping(name: str) -> dict[str, float]:
+    value = get_env(name)
+    if not value:
+        return {}
+    decoded = json.loads(value)
+    if not isinstance(decoded, dict):
+        raise ValueError(f"RECALL_{name} must be a JSON object")
+    result: dict[str, float] = {}
+    for key, weight in decoded.items():
+        if not isinstance(key, str) or not isinstance(weight, (int, float)):
+            raise ValueError(f"RECALL_{name} values must be numeric")
+        result[key] = float(weight)
+    return result
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@dataclass
+class Settings:
+    """Typed settings whose defaults are read from RECALL_* variables."""
+
+    BASE_DIR: Path = field(default_factory=lambda: _path("HOME"))  # type: ignore[assignment]
+    DB_PATH: Path = field(default_factory=lambda: _path("DB_PATH"))  # type: ignore[assignment]
+    GATE_MODEL_PATH: Path = field(  # type: ignore[assignment]
+        default_factory=lambda: _path("GATE_MODEL_PATH")
+    )
+
+    SKIP_THRESHOLD: float = field(
+        default_factory=lambda: _number("SKIP_THRESHOLD", 0.7)
+    )
+    COLD_THRESHOLD: float = field(
+        default_factory=lambda: _number("COLD_THRESHOLD", 0.5)
+    )
+    ACTIVE_THRESHOLD: float = field(
+        default_factory=lambda: _number("ACTIVE_THRESHOLD", 0.5)
+    )
+    PERSIST_THRESHOLD: float = field(
+        default_factory=lambda: _number("PERSIST_THRESHOLD", 0.7)
+    )
+
+    COLD_TTL: int = field(default_factory=lambda: _integer("COLD_TTL", 86400))
+    ACTIVE_TTL: int = field(default_factory=lambda: _integer("ACTIVE_TTL", 30 * 86400))
+    PERSIST_TTL: int = field(default_factory=lambda: _integer("PERSIST_TTL", -1))
+
+    EXTRACT_MODEL: str = field(
+        default_factory=lambda: _text("EXTRACT_MODEL", "nemotron-3-nano:4b")
+    )
+    EMBED_MODEL: str = field(
+        default_factory=lambda: _text("EMBED_MODEL", "embeddinggemma")
+    )
+    OLLAMA_BASE_URL: str = field(
+        default_factory=lambda: _text("OLLAMA_URL", "http://127.0.0.1:11434")
+    )
+    OLLAMA_TIMEOUT_SECONDS: float = field(
+        default_factory=lambda: _number("OLLAMA_TIMEOUT_SECONDS", 15.0)
+    )
+    OLLAMA_MAX_CONCURRENCY: int = field(
+        default_factory=lambda: _integer("OLLAMA_MAX_CONCURRENCY", 2)
+    )
+    EMBEDDINGS_ENABLED: bool = field(
+        default_factory=lambda: _boolean("EMBEDDINGS_ENABLED", False)
+    )
+    # Per-chunk embeddings (chunk-on-write, chunk-level vector search, and the
+    # dream-cycle chunk_backfill phase — semantic-retrieval.md §5.4/§5.5).
+    # Defaults off: it only does useful work once EMBEDDINGS_ENABLED is also
+    # true, and flipping it on changes retrieval results (chunk hits merge
+    # into vector/balanced search) and queues a one-time backfill workload
+    # for every pre-existing memory on installs that opt in later.
+    CHUNKING_ENABLED: bool = field(
+        default_factory=lambda: _boolean("CHUNKING_ENABLED", False)
+    )
+    SEARCH_MODEL: str = field(
+        default_factory=lambda: _text("SEARCH_MODEL", "embeddinggemma")
+    )
+    SEARCH_RESULTS_LIMIT: int = field(
+        default_factory=lambda: _integer("SEARCH_RESULTS_LIMIT", 10)
+    )
+
+    HOST: str = field(default_factory=lambda: _text("HOST", "127.0.0.1"))
+    PORT: int = field(default_factory=lambda: _integer("PORT", 8788))
+    API_TOKEN: str | None = field(default_factory=lambda: _optional_text("API_TOKEN"))
+    API_TOKEN_FILE: Path | None = field(default_factory=lambda: _path("API_TOKEN_FILE"))
+    PREVIOUS_API_TOKEN_FILE: Path | None = field(
+        default_factory=lambda: _path("PREVIOUS_API_TOKEN_FILE")
+    )
+    ALLOWED_ORIGINS: tuple[str, ...] = field(
+        default_factory=lambda: _csv("ALLOWED_ORIGINS")
+    )
+    MAX_BODY_BYTES: int = field(
+        default_factory=lambda: _integer("MAX_BODY_BYTES", 1_048_576)
+    )
+    MAX_CAPTURE_CHARS: int = field(
+        default_factory=lambda: _integer("MAX_CAPTURE_CHARS", 262_144)
+    )
+    MAX_RESULTS: int = field(default_factory=lambda: _integer("MAX_RESULTS", 100))
+    MAX_GRAPH_DEPTH: int = field(default_factory=lambda: _integer("MAX_GRAPH_DEPTH", 4))
+    READS_PER_MINUTE: int = field(
+        default_factory=lambda: _integer("READS_PER_MINUTE", 120)
+    )
+    WRITES_PER_MINUTE: int = field(
+        default_factory=lambda: _integer("WRITES_PER_MINUTE", 30)
+    )
+    CAPTURE_PROCESSING_TIMEOUT: float = field(
+        default_factory=lambda: _number("CAPTURE_PROCESSING_TIMEOUT", 15.0)
+    )
+    PROCESSING_QUEUE_LIMIT: int = field(
+        default_factory=lambda: _integer("PROCESSING_QUEUE_LIMIT", 64)
+    )
+    OUTBOX_POLL_INTERVAL: float = field(
+        default_factory=lambda: _number("OUTBOX_POLL_INTERVAL", 0.25)
+    )
+    OUTBOX_LEASE_SECONDS: float = field(
+        default_factory=lambda: _number("OUTBOX_LEASE_SECONDS", 300.0)
+    )
+    OUTBOX_MAX_ATTEMPTS: int = field(
+        default_factory=lambda: _integer("OUTBOX_MAX_ATTEMPTS", 10)
+    )
+    OUTBOX_RETRY_BASE_SECONDS: float = field(
+        default_factory=lambda: _number("OUTBOX_RETRY_BASE_SECONDS", 2.0)
+    )
+
+    UTILITY_POLICY_VERSION: str = field(
+        default_factory=lambda: _text("UTILITY_POLICY_VERSION", "utility-v1")
+    )
+    UTILITY_SHADOW_MODE: bool = field(
+        default_factory=lambda: _boolean("UTILITY_SHADOW_MODE", True)
+    )
+    UTILITY_RANKING_WEIGHT: float = field(
+        default_factory=lambda: _number("UTILITY_RANKING_WEIGHT", 0.0)
+    )
+    UTILITY_WEIGHTS: dict[str, float] = field(
+        default_factory=lambda: _number_mapping("UTILITY_WEIGHTS")
+    )
+    RETENTION_SELECTION_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_SELECTION_SECONDS", 86400)
+    )
+    RETENTION_INJECTION_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_INJECTION_SECONDS", 3 * 86400)
+    )
+    RETENTION_EXPANSION_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_EXPANSION_SECONDS", 14 * 86400)
+    )
+    RETENTION_USE_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_USE_SECONDS", 30 * 86400)
+    )
+    RETENTION_SUCCESS_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_SUCCESS_SECONDS", 90 * 86400)
+    )
+    RETENTION_REVIEW_SECONDS: int = field(
+        default_factory=lambda: _integer("RETENTION_REVIEW_SECONDS", 30 * 86400)
+    )
+
+    CONTEXT_POLICY_VERSION: str = field(
+        default_factory=lambda: _text("CONTEXT_POLICY_VERSION", "context-v2")
+    )
+    CONTEXT_TOKEN_ESTIMATOR_VERSION: str = field(
+        default_factory=lambda: _text("CONTEXT_TOKEN_ESTIMATOR_VERSION", "chars-v1")
+    )
+    CONTEXT_DEFAULT_MAX_TOKENS: int = field(
+        default_factory=lambda: _integer("CONTEXT_DEFAULT_MAX_TOKENS", 3000)
+    )
+    CONTEXT_MAX_TOKENS: int = field(
+        default_factory=lambda: _integer("CONTEXT_MAX_TOKENS", 100_000)
+    )
+    CONTEXT_PACK_TTL_SECONDS: int = field(
+        default_factory=lambda: _integer("CONTEXT_PACK_TTL_SECONDS", 900)
+    )
+    CONTEXT_INLINE_EVIDENCE_MAX_TOKENS: int = field(
+        default_factory=lambda: _integer("CONTEXT_INLINE_EVIDENCE_MAX_TOKENS", 180)
+    )
+    CONTEXT_BUDGET_WEIGHTS: dict[str, float] = field(
+        default_factory=lambda: _number_mapping("CONTEXT_BUDGET_WEIGHTS")
+    )
+
+    SKILL_COMPILER_POLICY_VERSION: str = field(
+        default_factory=lambda: _text(
+            "SKILL_COMPILER_POLICY_VERSION", "skill-compiler-v1"
+        )
+    )
+    SKILL_CONTEXT_BUDGET_RATIO: float = field(
+        default_factory=lambda: _number("SKILL_CONTEXT_BUDGET_RATIO", 0.15)
+    )
+
+    HANDOFF_POLICY_VERSION: str = field(
+        default_factory=lambda: _text("HANDOFF_POLICY_VERSION", "handoff-v1")
+    )
+    HANDOFF_TTL_SECONDS: int = field(
+        default_factory=lambda: _integer("HANDOFF_TTL_SECONDS", 86_400)
+    )
+
+    CAG_ENABLED: bool = field(default_factory=lambda: _boolean("CAG_ENABLED", True))
+    CAG_POLICY_VERSION: str = field(
+        default_factory=lambda: _text("CAG_POLICY_VERSION", "cag-v1")
+    )
+    CACHE_MAX_ENTRIES: int = field(
+        default_factory=lambda: _integer("CACHE_MAX_ENTRIES", 256)
+    )
+    CACHE_MAX_BYTES: int = field(
+        default_factory=lambda: _integer("CACHE_MAX_BYTES", 16 * 1024 * 1024)
+    )
+    CACHE_TTL_SECONDS: int = field(
+        default_factory=lambda: _integer("CACHE_TTL_SECONDS", 900)
+    )
+    CACHE_LAZY_REBUILD: bool = field(
+        default_factory=lambda: _boolean("CACHE_LAZY_REBUILD", True)
+    )
+    SKILL_DELTA_MAX_RATIO: float = field(
+        default_factory=lambda: _number("SKILL_DELTA_MAX_RATIO", 0.70)
+    )
+    CONTEXT_DELTA_MAX_RATIO: float = field(
+        default_factory=lambda: _number("CONTEXT_DELTA_MAX_RATIO", 0.70)
+    )
+    CACHE_METRICS_ENABLED: bool = field(
+        default_factory=lambda: _boolean("CACHE_METRICS_ENABLED", True)
+    )
+
+    NATS_URL: str = field(
+        default_factory=lambda: _text("NATS_URL", "nats://127.0.0.1:4222")
+    )
+    NATS_CREDS_FILE: Path | None = field(
+        default_factory=lambda: _path("NATS_CREDS_FILE")
+    )
+    NATS_SUBJECT: str = field(
+        default_factory=lambda: _text("NATS_SUBJECT", "*.agent.output")
+    )
+    NATS_STREAM: str = field(
+        default_factory=lambda: _text("NATS_STREAM", "RECALL_AGENT_OUTPUT")
+    )
+    NATS_CONSUMER: str = field(
+        default_factory=lambda: _text("NATS_CONSUMER", "recall-capture-v1")
+    )
+    NATS_DLQ_SUBJECT: str = field(
+        default_factory=lambda: _text("NATS_DLQ_SUBJECT", "recall.agent.output.dlq")
+    )
+
+    MCP_SERVER_NAME: str = field(
+        default_factory=lambda: _text("MCP_SERVER_NAME", "recall")
+    )
+    MCP_SERVER_VERSION: str = field(
+        default_factory=lambda: _text("MCP_SERVER_VERSION", "2.1.0")
+    )
+    JSON_LOGS: bool = field(default_factory=lambda: _boolean("JSON_LOGS", False))
+
+    _instance = None
+
+    def __post_init__(self) -> None:
+        if self.BASE_DIR is None:
+            self.BASE_DIR = self.DB_PATH.parent if self.DB_PATH else resolve_home()
+        if self.DB_PATH is None:
+            self.DB_PATH = self.BASE_DIR / "memory.db"
+        if self.GATE_MODEL_PATH is None:
+            self.GATE_MODEL_PATH = self.BASE_DIR / "models" / "distilbert-memory-gate"
+
+        self.BASE_DIR = Path(self.BASE_DIR)
+        self.DB_PATH = Path(self.DB_PATH)
+        self.GATE_MODEL_PATH = Path(self.GATE_MODEL_PATH)
+
+        if not 1 <= self.PORT <= 65535:
+            raise ValueError("RECALL_PORT must be between 1 and 65535")
+        if self.MAX_BODY_BYTES <= 0 or self.MAX_CAPTURE_CHARS <= 0:
+            raise ValueError("request and capture limits must be positive")
+        if self.MAX_RESULTS <= 0 or self.MAX_GRAPH_DEPTH < 1:
+            raise ValueError("search and graph limits must be positive")
+        if self.OLLAMA_MAX_CONCURRENCY < 1:
+            raise ValueError("RECALL_OLLAMA_MAX_CONCURRENCY must be positive")
+        if self.READS_PER_MINUTE <= 0 or self.WRITES_PER_MINUTE <= 0:
+            raise ValueError("request rate limits must be positive")
+        if self.CAPTURE_PROCESSING_TIMEOUT <= 0:
+            raise ValueError("RECALL_CAPTURE_PROCESSING_TIMEOUT must be positive")
+        if self.PROCESSING_QUEUE_LIMIT < self.OLLAMA_MAX_CONCURRENCY:
+            raise ValueError("processing queue limit must cover worker concurrency")
+        if self.OUTBOX_POLL_INTERVAL <= 0 or self.OUTBOX_LEASE_SECONDS <= 0:
+            raise ValueError("outbox polling and lease durations must be positive")
+        if self.OUTBOX_MAX_ATTEMPTS < 1 or self.OUTBOX_RETRY_BASE_SECONDS <= 0:
+            raise ValueError("outbox retry settings must be positive")
+        if not 0 <= self.UTILITY_RANKING_WEIGHT <= 0.1:
+            raise ValueError("RECALL_UTILITY_RANKING_WEIGHT must be between 0 and 0.1")
+        if not self.UTILITY_POLICY_VERSION.strip():
+            raise ValueError("RECALL_UTILITY_POLICY_VERSION must not be empty")
+        retention_windows = (
+            self.RETENTION_SELECTION_SECONDS,
+            self.RETENTION_INJECTION_SECONDS,
+            self.RETENTION_EXPANSION_SECONDS,
+            self.RETENTION_USE_SECONDS,
+            self.RETENTION_SUCCESS_SECONDS,
+            self.RETENTION_REVIEW_SECONDS,
+        )
+        if any(window < 0 for window in retention_windows):
+            raise ValueError("retention windows must not be negative")
+        if not self.CONTEXT_POLICY_VERSION.strip():
+            raise ValueError("RECALL_CONTEXT_POLICY_VERSION must not be empty")
+        if not self.CONTEXT_TOKEN_ESTIMATOR_VERSION.strip():
+            raise ValueError("RECALL_CONTEXT_TOKEN_ESTIMATOR_VERSION must not be empty")
+        if self.CONTEXT_DEFAULT_MAX_TOKENS <= 0 or self.CONTEXT_MAX_TOKENS <= 0:
+            raise ValueError("context token budgets must be positive")
+        if self.CONTEXT_DEFAULT_MAX_TOKENS > self.CONTEXT_MAX_TOKENS:
+            raise ValueError("default context budget must not exceed the maximum")
+        if self.CONTEXT_PACK_TTL_SECONDS <= 0:
+            raise ValueError("RECALL_CONTEXT_PACK_TTL_SECONDS must be positive")
+        if self.CONTEXT_INLINE_EVIDENCE_MAX_TOKENS <= 0:
+            raise ValueError(
+                "RECALL_CONTEXT_INLINE_EVIDENCE_MAX_TOKENS must be positive"
+            )
+        context_budget_keys = {"continuity", "retrieval", "references", "reserve"}
+        if set(self.CONTEXT_BUDGET_WEIGHTS) - context_budget_keys:
+            raise ValueError("RECALL_CONTEXT_BUDGET_WEIGHTS contains unknown classes")
+        if any(value < 0 for value in self.CONTEXT_BUDGET_WEIGHTS.values()):
+            raise ValueError("context budget weights must not be negative")
+        if sum(self.CONTEXT_BUDGET_WEIGHTS.values()) > 1.0:
+            raise ValueError("context budget weights must total at most 1.0")
+        if not self.SKILL_COMPILER_POLICY_VERSION.strip():
+            raise ValueError("RECALL_SKILL_COMPILER_POLICY_VERSION must not be empty")
+        if not 0 <= self.SKILL_CONTEXT_BUDGET_RATIO <= 0.25:
+            raise ValueError(
+                "RECALL_SKILL_CONTEXT_BUDGET_RATIO must be between 0 and 0.25"
+            )
+        if not self.HANDOFF_POLICY_VERSION.strip():
+            raise ValueError("RECALL_HANDOFF_POLICY_VERSION must not be empty")
+        if self.HANDOFF_TTL_SECONDS <= 0:
+            raise ValueError("RECALL_HANDOFF_TTL_SECONDS must be positive")
+        if not self.CAG_POLICY_VERSION.strip():
+            raise ValueError("RECALL_CAG_POLICY_VERSION must not be empty")
+        if self.CACHE_MAX_ENTRIES < 0 or self.CACHE_MAX_BYTES < 0:
+            raise ValueError("CAG cache capacities must not be negative")
+        if self.CAG_ENABLED and (
+            self.CACHE_MAX_ENTRIES == 0 or self.CACHE_MAX_BYTES == 0
+        ):
+            raise ValueError("enabled CAG cache capacities must be positive")
+        if self.CACHE_TTL_SECONDS <= 0:
+            raise ValueError("RECALL_CACHE_TTL_SECONDS must be positive")
+        if not 0.0 <= self.SKILL_DELTA_MAX_RATIO <= 1.0:
+            raise ValueError("RECALL_SKILL_DELTA_MAX_RATIO must be between 0 and 1")
+        if not 0.0 <= self.CONTEXT_DELTA_MAX_RATIO <= 1.0:
+            raise ValueError("RECALL_CONTEXT_DELTA_MAX_RATIO must be between 0 and 1")
+        if self.OLLAMA_TIMEOUT_SECONDS <= 0:
+            raise ValueError("RECALL_OLLAMA_TIMEOUT_SECONDS must be positive")
+        if not self.OLLAMA_BASE_URL.startswith(("http://", "https://")):
+            raise ValueError("RECALL_OLLAMA_URL must be an HTTP(S) URL")
+        if not self.NATS_URL.startswith(("nats://", "tls://")):
+            raise ValueError("RECALL_NATS_URL must be a NATS URL")
+        if not _is_loopback(self.HOST) and not (self.API_TOKEN or self.API_TOKEN_FILE):
+            raise ValueError(
+                "Refusing a non-loopback RECALL_HOST without RECALL_API_TOKEN_FILE"
+            )
+
+        self.BASE_DIR.mkdir(parents=True, exist_ok=True)
+        (self.BASE_DIR / "models").mkdir(parents=True, exist_ok=True)
+
+    @property
+    def auth_configured(self) -> bool:
+        return bool(self.API_TOKEN or self.API_TOKEN_FILE)
+
+    @classmethod
+    def get(cls) -> "Settings":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance

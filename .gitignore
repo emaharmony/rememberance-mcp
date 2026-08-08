@@ -36,7 +36,7 @@ Thumbs.db
 *.bak
 *.log
 
-# Remembrance runtime data (lives in ~/.remembrance/)
+# Recall runtime data (lives in ~/.recall/, with ~/.remembrance/ as the legacy fallback)
 memory.db
 metrics.db
 *.db

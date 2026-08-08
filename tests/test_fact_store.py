@@ -6,10 +6,8 @@ import tempfile
 import time
 from contextlib import closing
 from pathlib import Path
-
 import pytest
-
-from remembrance_mcp.store.facts import FactStore
+from recall_mcp.store.facts import FactStore
 
 
 @pytest.fixture
@@ -100,6 +98,12 @@ class TestContradictions:
         contradictions = fact_store.find_contradictions()
         assert len(contradictions) == 1
         assert contradictions[0]["entity_id"] == "ema"
+        resolution = fact_store.resolve_contradictions()
+        assert resolution["facts_superseded"] == 1
+        current = fact_store.get_current_fact("ema", "role")
+        assert current["id"] == "f1"
+        history = fact_store.get_fact_history("ema", "role")
+        assert sum(fact["superseded_at"] is not None for fact in history) == 1
 
 
 class TestStats:
