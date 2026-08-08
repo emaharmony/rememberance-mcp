@@ -10,6 +10,12 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
+dependencies = [
+    # SQL-side cosine ANN for vector/hybrid search. Base dependency (not
+    # optional) so the Python brute-force cosine fallback in search/hybrid.py
+    # stays a rare, truly-last-resort path rather than the default.
+    "sqlite-vec==0.1.9",
+]
 
 [project.optional-dependencies]
 mcp = [

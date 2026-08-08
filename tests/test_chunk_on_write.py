@@ -61,6 +61,9 @@ class HashEmbeddingProvider:
         vector = [x / norm for x in out]
         return EmbeddingResult(vector, self.model, hashlib.sha256(data).hexdigest())
 
+    def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
+        return [self.embed(text) for text in texts]
+
 
 _PIPELINES: list[MemoryPipeline] = []
 

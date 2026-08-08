@@ -37,6 +37,9 @@ class EmbeddingProvider(Protocol):
     def embed(self, text: str) -> EmbeddingResult:
         """Return a normalized embedding for text."""
 
+    def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
+        """Return normalized embeddings for multiple texts, order preserved."""
+
 
 class OllamaEmbeddingProvider:
     """Generate embeddings with Ollama's /api/embed endpoint."""
@@ -57,9 +60,40 @@ class OllamaEmbeddingProvider:
     def embed(self, text: str) -> EmbeddingResult:
         if not text or not text.strip():
             raise EmbeddingError("cannot embed empty text")
+        body = self._call_embed_api([text])
+        embeddings = body.get("embeddings")
+        if not isinstance(embeddings, list) or not embeddings:
+            raise EmbeddingError("Ollama returned no embeddings")
+        return self._finalize(text, embeddings[0])
 
+    def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
+        """Embed multiple texts in a single Ollama request.
+
+        Order-preserving: result[i] corresponds to texts[i]. Raises
+        EmbeddingError (rather than returning a partial list) if any input
+        text is empty or the response shape doesn't match the request —
+        callers doing bulk backfill should catch this per-batch and fall
+        back to one-at-a-time `embed()` if they need partial-failure
+        tolerance for a specific text.
+        """
+        if not texts:
+            return []
+        for text in texts:
+            if not text or not text.strip():
+                raise EmbeddingError("cannot embed empty text")
+
+        body = self._call_embed_api(texts)
+        embeddings = body.get("embeddings")
+        if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+            raise EmbeddingError("Ollama returned a mismatched batch of embeddings")
+        return [
+            self._finalize(text, vector) for text, vector in zip(texts, embeddings)
+        ]
+
+    def _call_embed_api(self, texts: list[str]) -> dict:
+        payload_input = texts[0] if len(texts) == 1 else texts
         payload = json.dumps(
-            {"model": self.model, "input": text, "truncate": True}
+            {"model": self.model, "input": payload_input, "truncate": True}
         ).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/api/embed",
@@ -67,11 +101,10 @@ class OllamaEmbeddingProvider:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-
         try:
             with self._semaphore:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    body = json.loads(response.read().decode("utf-8"))
+                    return json.loads(response.read().decode("utf-8"))
         except (
             OSError,
             TimeoutError,
@@ -80,10 +113,7 @@ class OllamaEmbeddingProvider:
         ) as exc:
             raise EmbeddingError(f"Ollama embedding failed: {exc}") from exc
 
-        embeddings = body.get("embeddings")
-        if not isinstance(embeddings, list) or not embeddings:
-            raise EmbeddingError("Ollama returned no embeddings")
-        vector = embeddings[0]
+    def _finalize(self, text: str, vector: object) -> EmbeddingResult:
         if not isinstance(vector, list) or not vector:
             raise EmbeddingError("Ollama returned an invalid embedding")
 

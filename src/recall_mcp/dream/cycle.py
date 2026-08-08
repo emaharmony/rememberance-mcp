@@ -418,13 +418,26 @@ class DreamCycle:
             **result,
         }
 
+    # Ollama embed calls per HTTP request during backfill. Small enough to
+    # keep a single request fast on CPU, large enough to cut round-trips
+    # meaningfully versus one-text-per-call.
+    _EMBED_BATCH_SIZE = 25
+    # Safety cap on stale_embeddings() page fetches per phase run, so a
+    # pathological backlog can't loop forever.
+    _EMBED_STALE_MAX_PAGES = 1000
+
     def _phase_embed_stale(self, dry_run: bool = False) -> dict:
         """
         Phase 6: Re-embed memories whose content changed but
         embedding is stale.
 
-        The embedding provider refreshes missing, stale-model, and
-        content-hash-mismatched vectors in bounded batches.
+        Pages through `stale_embeddings()` (missing, stale-model, and
+        content-hash-mismatched vectors) until the backlog is drained or the
+        page-count safety cap is hit, batching each page into
+        `_EMBED_BATCH_SIZE`-sized Ollama requests via `embed_batch()`. If a
+        batch call fails outright (e.g. one bad row), falls back to
+        embedding that batch one-at-a-time so a single failure doesn't lose
+        the rest of the page's progress.
         """
         if self.memory_store is None or self.embedding_provider is None:
             return {
@@ -433,10 +446,10 @@ class DreamCycle:
                 "reason": "embedding provider is disabled",
             }
 
-        candidates = self.memory_store.stale_embeddings(
-            self.embedding_provider.model, limit=100
-        )
         if dry_run:
+            candidates = self.memory_store.stale_embeddings(
+                self.embedding_provider.model, limit=100
+            )
             return {
                 "status": "ok",
                 "embeddings_refreshed": len(candidates),
@@ -445,26 +458,66 @@ class DreamCycle:
 
         refreshed = 0
         failed = 0
-        for memory in candidates:
-            try:
-                embedded = self.embedding_provider.embed(memory["content"])
-                self.memory_store.set_embedding(
-                    memory["id"],
-                    embedded.to_bytes(),
-                    model=embedded.model,
-                    dimensions=embedded.dimensions,
-                    content_hash=embedded.content_hash,
-                )
-                refreshed += 1
-            except EmbeddingError as exc:
-                self.memory_store.mark_embedding_error(memory["id"], str(exc))
-                failed += 1
+        for _ in range(self._EMBED_STALE_MAX_PAGES):
+            candidates = self.memory_store.stale_embeddings(
+                self.embedding_provider.model, limit=100
+            )
+            if not candidates:
+                break
+
+            for start in range(0, len(candidates), self._EMBED_BATCH_SIZE):
+                chunk = candidates[start : start + self._EMBED_BATCH_SIZE]
+                chunk_refreshed, chunk_failed = self._embed_chunk(chunk)
+                refreshed += chunk_refreshed
+                failed += chunk_failed
+
+            if len(candidates) < 100:
+                break  # short page: backlog drained, no need to re-query
 
         return {
             "status": "ok" if failed == 0 else "partial",
             "embeddings_refreshed": refreshed,
             "embeddings_failed": failed,
         }
+
+    def _embed_chunk(self, chunk: list[dict]) -> tuple[int, int]:
+        """Embed one batch of stale-embedding candidates. Returns (refreshed, failed)."""
+        try:
+            embedded_list = self.embedding_provider.embed_batch(
+                [memory["content"] for memory in chunk]
+            )
+        except EmbeddingError:
+            # Whole-batch failure (e.g. one empty/invalid text) — fall back
+            # to per-item embedding so one bad row doesn't sink the batch.
+            refreshed = 0
+            failed = 0
+            for memory in chunk:
+                try:
+                    embedded = self.embedding_provider.embed(memory["content"])
+                    self.memory_store.set_embedding(
+                        memory["id"],
+                        embedded.to_bytes(),
+                        model=embedded.model,
+                        dimensions=embedded.dimensions,
+                        content_hash=embedded.content_hash,
+                    )
+                    refreshed += 1
+                except EmbeddingError as exc:
+                    self.memory_store.mark_embedding_error(memory["id"], str(exc))
+                    failed += 1
+            return refreshed, failed
+
+        refreshed = 0
+        for memory, embedded in zip(chunk, embedded_list):
+            self.memory_store.set_embedding(
+                memory["id"],
+                embedded.to_bytes(),
+                model=embedded.model,
+                dimensions=embedded.dimensions,
+                content_hash=embedded.content_hash,
+            )
+            refreshed += 1
+        return refreshed, 0
 
     def _phase_chunk_backfill(self, dry_run: bool = False) -> dict:
         """

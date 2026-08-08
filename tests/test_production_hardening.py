@@ -52,6 +52,9 @@ class FakeEmbeddingProvider:
             hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
+    def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
+        return [self.embed(text) for text in texts]
+
 
 def make_pipeline(tmp_path: Path, **settings_overrides) -> MemoryPipeline:
     settings = Settings(

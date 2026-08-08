@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from recall_mcp.store.edges import EntityStore
 from recall_mcp.store.facts import FactStore
 from recall_mcp.embeddings import EmbeddingError, EmbeddingProvider
+from recall_mcp.fts_query import build_fts_match
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,16 @@ TIER_BOOST = {
     "skip": 0.1,
 }
 
+# ── Python-cosine fallback scan cap ────────────────────────────
+# Only used when sqlite-vec fails to load (should be rare now that it's a
+# hard dependency). Correctness matters more than speed on this path, so
+# rather than pre-filtering by recency (which can miss the true top-K by
+# similarity), scan everything up to this safety cap.
+PYTHON_COSINE_FALLBACK_LIMIT = 20000
+
 # ── RRF Constant ───────────────────────────────────────────────
 # Standard RRF constant (k=60 is the literature default)
 RRF_K = 60
-
 
 @dataclass
 class SearchResult:
@@ -229,6 +236,57 @@ class HybridSearch:
                 query, category, tier, limit, project, agent, scope, include_cold
             )
 
+    def _like_fallback(
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        category: Optional[str],
+        tier: Optional[str],
+        limit: int,
+        project: Optional[str],
+        agent: Optional[str],
+        formal_scope: Optional[dict[str, str]],
+        scope_columns: set[str],
+        include_cold: bool,
+    ) -> list[dict]:
+        results: list[dict] = []
+        sql = "SELECT * FROM memories WHERE 1=1"
+        params: list[object] = []
+
+        if query:
+            sql += " AND (content LIKE ? OR compiled_truth LIKE ?)"
+            params.extend([f"%{query}%", f"%{query}%"])
+
+        if category:
+            sql += " AND category = ?"
+            params.append(category)
+        if tier:
+            sql += " AND tier = ?"
+            params.append(tier)
+
+        if project and "project" in scope_columns:
+            sql += " AND (project = ? OR project = '')"
+            params.append(project)
+        if agent and "agent" in scope_columns:
+            sql += " AND (agent = ? OR agent = '')"
+            params.append(agent)
+        sql = self._append_scope_sql(sql, params, formal_scope or {})
+        sql = self._append_eligibility_sql(
+            sql, params, scope_columns, include_cold=include_cold
+        )
+
+        sql += " ORDER BY accessed_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = conn.execute(sql, params).fetchall()
+        for r in rows:
+            d = dict(r)
+            d["score"] = 0.5  # Lower than FTS5 matches
+            d["keyword_score"] = d["score"]
+            d["sources"] = ["like"]
+            results.append(d)
+        return results
+
     def _search_keyword(
         self,
         query: str,
@@ -245,16 +303,24 @@ class HybridSearch:
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             scope_columns = self._scope_columns(conn)
+
+            fts_match = build_fts_match(query)
+            if fts_match is None:
+                # No usable tokens (empty/whitespace/punctuation-only query) —
+                # an empty MATCH would error, so go straight to LIKE.
+                return self._like_fallback(
+                    conn, query, category, tier, limit, project, agent,
+                    formal_scope, scope_columns, include_cold,
+                )
+
             try:
-                # Escape FTS5 special chars: hyphens become spaces, quotes escaped
-                safe_query = query.replace("-", " ").replace('"', '""')
                 sql = """
                     SELECT m.*, fts.rank as fts_rank
                     FROM memories m
                     JOIN memories_fts fts ON m.rowid = fts.rowid
                     WHERE memories_fts MATCH ?
                 """
-                params: list[object] = [safe_query]
+                params: list[object] = [fts_match]
 
                 if category:
                     sql += " AND m.category = ?"
@@ -299,42 +365,10 @@ class HybridSearch:
                     )
                 else:
                     logger.warning(f"FTS5 search failed: {e}, using LIKE fallback")
-                # LIKE fallback
-                sql = "SELECT * FROM memories WHERE 1=1"
-                params = []
-
-                if query:
-                    sql += " AND (content LIKE ? OR compiled_truth LIKE ?)"
-                    params.extend([f"%{query}%", f"%{query}%"])
-
-                if category:
-                    sql += " AND category = ?"
-                    params.append(category)
-                if tier:
-                    sql += " AND tier = ?"
-                    params.append(tier)
-
-                if project and "project" in scope_columns:
-                    sql += " AND (project = ? OR project = '')"
-                    params.append(project)
-                if agent and "agent" in scope_columns:
-                    sql += " AND (agent = ? OR agent = '')"
-                    params.append(agent)
-                sql = self._append_scope_sql(sql, params, formal_scope or {})
-                sql = self._append_eligibility_sql(
-                    sql, params, scope_columns, include_cold=include_cold
+                results = self._like_fallback(
+                    conn, query, category, tier, limit, project, agent,
+                    formal_scope, scope_columns, include_cold,
                 )
-
-                sql += " ORDER BY accessed_at DESC LIMIT ?"
-                params.append(limit)
-
-                rows = conn.execute(sql, params).fetchall()
-                for r in rows:
-                    d = dict(r)
-                    d["score"] = 0.5  # Lower than FTS5 matches
-                    d["keyword_score"] = d["score"]
-                    d["sources"] = ["like"]
-                    results.append(d)
 
         return results
 
@@ -502,9 +536,12 @@ class HybridSearch:
                 )
 
             if rows is None:
+                # No recency bias here: this is the last-resort fallback, so
+                # correctness (scan everything, rank by true similarity)
+                # matters more than speed. Capped only as an OOM safety net.
                 rows = conn.execute(
-                    "SELECT * " + where_sql + " ORDER BY accessed_at DESC LIMIT 500",
-                    params,
+                    "SELECT * " + where_sql + " LIMIT ?",
+                    [*params, PYTHON_COSINE_FALLBACK_LIMIT],
                 ).fetchall()
 
             for row in rows:
@@ -571,18 +608,59 @@ class HybridSearch:
         with _connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             scope_columns = self._scope_columns(conn)
-            sql = "SELECT memory_id, embedding FROM memory_chunks WHERE embedding IS NOT NULL"
+            where_sql = "FROM memory_chunks WHERE embedding IS NOT NULL"
             params: list[object] = []
             if model is not None:
-                sql += " AND embedding_model = ?"
+                where_sql += " AND embedding_model = ?"
                 params.append(model)
-            sql += " ORDER BY created_at DESC LIMIT 2000"
-            for row in conn.execute(sql, params).fetchall():
-                chunk_vec = self._bytes_to_vector(row["embedding"])
-                if not chunk_vec:
-                    continue
-                similarity = self._cosine_similarity(query_vec, chunk_vec)
+
+            rows = None
+            sqlite_vec_enabled = False
+            try:
+                import sqlite_vec
+
+                conn.enable_load_extension(True)
+                try:
+                    sqlite_vec.load(conn)
+                finally:
+                    conn.enable_load_extension(False)
+                vector_sql = (
+                    "SELECT memory_id, vec_distance_cosine(embedding, ?) "
+                    "AS vector_distance "
+                    + where_sql
+                    + " ORDER BY vector_distance ASC LIMIT 2000"
+                )
+                rows = conn.execute(
+                    vector_sql, [query_embedding, *params]
+                ).fetchall()
+                sqlite_vec_enabled = True
+            except (ImportError, AttributeError, sqlite3.Error) as exc:
+                logger.debug(
+                    "sqlite-vec unavailable; using exact Python cosine for chunks: %s",
+                    exc,
+                )
+
+            if rows is None:
+                # No recency bias here either — see search_with_embedding's
+                # fallback comment above for why.
+                sql = (
+                    "SELECT memory_id, embedding "
+                    + where_sql
+                    + " LIMIT ?"
+                )
+                rows = conn.execute(
+                    sql, [*params, PYTHON_COSINE_FALLBACK_LIMIT]
+                ).fetchall()
+
+            for row in rows:
                 memory_id = row["memory_id"]
+                if sqlite_vec_enabled:
+                    similarity = 1.0 - float(row["vector_distance"])
+                else:
+                    chunk_vec = self._bytes_to_vector(row["embedding"])
+                    if not chunk_vec:
+                        continue
+                    similarity = self._cosine_similarity(query_vec, chunk_vec)
                 # Keep only the best-scoring chunk per parent memory (dedup).
                 if (
                     memory_id not in best_by_memory

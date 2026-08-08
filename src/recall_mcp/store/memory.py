@@ -14,6 +14,8 @@ import time
 import logging
 from typing import Optional
 
+from recall_mcp.fts_query import build_fts_match
+
 logger = logging.getLogger(__name__)
 
 
@@ -172,14 +174,15 @@ class MemoryStoreV2:
         with self.store._connect() as conn:
             conn.row_factory = sqlite3.Row
 
-            if query:
+            fts_match = build_fts_match(query) if query else None
+            if fts_match:
                 try:
                     fts_sql = """
                         SELECT m.* FROM memories m
                         JOIN memories_fts fts ON m.rowid = fts.rowid
                         WHERE memories_fts MATCH ?
                     """
-                    params: list[object] = [query]
+                    params: list[object] = [fts_match]
 
                     if category:
                         fts_sql += " AND m.category = ?"

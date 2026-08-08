@@ -353,6 +353,9 @@ class _StableEmbeddingProvider:
         self.calls += 1
         return EmbeddingResult([1.0, 0.0], self.model, "stable-content-hash")
 
+    def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
+        return [self.embed(text) for text in texts]
+
 
 @pytest.mark.parametrize("failure_stage", ["memory", "graph", "fact", "embedding"])
 def test_partial_derived_work_is_idempotent_on_retry(
