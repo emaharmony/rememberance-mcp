@@ -19,6 +19,15 @@
 
 ### Fixed
 
+- Claude Code and Codex CAG adapters no longer attribute the shared
+  per-repository continuity task to a hardcoded `"claude-code"` identity;
+  `created_by`/idempotency-key/title/objective are now agent-neutral
+  (`recall-ambient`), so whichever adapter bootstraps a repository first
+  never causes the other to fail with `idempotency_conflict` and silently
+  fall back to v1 keyword search. On-disk CAG client-state files are now
+  namespaced per agent (`claude-code_<repository_id>.json` /
+  `codex_<repository_id>.json`) via an explicit agent parameter instead of a
+  per-adapter workaround.
 - Preference category validation.
 - Vector-mode positional fallback.
 - Immediate active-memory promotion.

@@ -518,6 +518,24 @@ def command_outbox(settings: Settings, args: argparse.Namespace) -> int:
     return 0 if retried else 1
 
 
+def command_install_hooks(_settings: Settings, args: argparse.Namespace) -> int:
+    """Wire up an agent's MCP registration and hooks with no hand-editing."""
+    from recall_mcp.install_hooks import run_install_hooks
+
+    result = run_install_hooks(
+        agents=args.agent,
+        dry_run=args.dry_run,
+        scope=args.scope,
+        force=args.force,
+        skip_mcp=args.skip_mcp,
+        skip_hooks=args.skip_hooks,
+        config_path=args.config_path,
+        settings_path=args.settings_path,
+    )
+    print(json.dumps(result, indent=2))
+    return 0 if result["ok"] else 1
+
+
 def command_utility(settings: Settings, args: argparse.Namespace) -> int:
     """Inspect shadow utility and perform audited, reversible lifecycle actions."""
     from recall_mcp.feedback import RetrievalFeedbackService
@@ -885,6 +903,51 @@ def build_parser() -> argparse.ArgumentParser:
     outbox = subparsers.add_parser("outbox")
     outbox.add_argument("action", choices=["status", "retry"])
     outbox.add_argument("job_id", nargs="?")
+    install_hooks = subparsers.add_parser(
+        "install-hooks",
+        description=(
+            "Register the Recall MCP server and SessionStart/Stop hooks for an "
+            "agent (Claude Code, Codex) directly from an installed recall-mcp "
+            "-- no source checkout, no hand-editing of JSON/TOML."
+        ),
+    )
+    install_hooks.add_argument(
+        "--agent",
+        action="append",
+        required=True,
+        choices=["claude-code", "codex", "all"],
+        help="Agent to wire up. May be given more than once; 'all' wires up every known agent.",
+    )
+    install_hooks.add_argument(
+        "--dry-run", action="store_true", help="Print the plan; write nothing."
+    )
+    install_hooks.add_argument(
+        "--scope",
+        choices=["user", "local", "project"],
+        default="user",
+        help="MCP registration scope (claude-code only; ignored by codex, which has no scope concept).",
+    )
+    install_hooks.add_argument(
+        "--force",
+        action="store_true",
+        help="Attempt a best-effort rename for an unrecognized 'remembrance' command.",
+    )
+    install_hooks.add_argument(
+        "--skip-mcp", action="store_true", help="Skip MCP server registration."
+    )
+    install_hooks.add_argument(
+        "--skip-hooks", action="store_true", help="Skip SessionStart/Stop hook wiring."
+    )
+    install_hooks.add_argument(
+        "--config-path",
+        type=Path,
+        help="Override the MCP registration file (claude-code only; e.g. a scratch copy of ~/.claude.json).",
+    )
+    install_hooks.add_argument(
+        "--settings-path",
+        type=Path,
+        help="Override the hooks file (~/.claude/settings.json or ~/.codex/hooks.json).",
+    )
     utility = subparsers.add_parser("utility")
     utility.add_argument(
         "action",
@@ -1021,6 +1084,7 @@ def main() -> None:
         "restore": command_restore,
         "integrity-check": command_integrity,
         "reembed": command_reembed,
+        "install-hooks": command_install_hooks,
     }
     if args.command == "models":
         code = command_models_pull(settings, args)

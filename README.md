@@ -180,10 +180,11 @@ python -m pip install -e ".[gate]"
 bash scripts/download-dilbert.sh
 ~~~
 
-The downloader uses the safe home-resolution order and defaults new installations to ~/.recall/models/distilbert-memory-gate. Until the remote repository is manually renamed, it intentionally downloads release assets from the existing remote location.
+The downloader uses the safe home-resolution order and defaults new installations to ~/.recall/models/distilbert-memory-gate. Release assets are hosted under the renamed emaharmony/recall repository.
 
 ## Integrations
 
+- One-command setup for any agent: `recall-admin install-hooks --agent claude-code|codex|all` registers the MCP server and hooks (and migrates a stale `remembrance` registration) with no source checkout and no hand-editing of JSON. Run with `--dry-run` first to preview.
 - Claude Code: [integration guide](integrations/claude-code/README.md)
 - Codex: [integration guide](integrations/codex/README.md)
 - Windows hidden REST startup: start_recall_rest.ps1 and start_recall_rest.vbs
