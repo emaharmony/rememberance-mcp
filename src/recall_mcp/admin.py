@@ -484,6 +484,52 @@ def command_integrity(settings: Settings, _args: argparse.Namespace) -> int:
     return 0 if result["ok"] else 1
 
 
+def command_import_legacy(settings: Settings, args: argparse.Namespace) -> int:
+    """Import memories, provenance, and orphaned-chunk salvage from a legacy store.
+
+    See docs/migrating-to-recall.md for when this is needed instead of the
+    normal in-place ``migrate`` path. The source is always opened read-only
+    and is never written to, regardless of ``--dry-run``.
+    """
+    from recall_mcp.legacy_import import LegacyImportError, import_legacy_store
+
+    # Deliberately does NOT construct a Settings(BASE_DIR=...) for
+    # --target-home: Settings.__post_init__ unconditionally mkdirs BASE_DIR
+    # and BASE_DIR/models as a side effect, which would make even
+    # --dry-run create the target home on disk. Plain path arithmetic keeps
+    # dry-run honestly writing nothing; import_legacy_store()/run_migrations()
+    # create the directory themselves, but only for a real (non-dry-run) import.
+    target_db_path = (
+        settings.DB_PATH if args.target_home is None else args.target_home / "memory.db"
+    )
+    source_exists_before = args.source.exists()
+    source_sha256_before = _sha256(args.source) if source_exists_before else None
+
+    try:
+        report = import_legacy_store(
+            args.source,
+            target_db_path,
+            dry_run=args.dry_run,
+            skip_expired=args.skip_expired,
+            dedupe_exact=args.dedupe_exact,
+            dedupe_near=args.dedupe_near,
+            salvage_orphan_chunks=args.salvage_orphan_chunks,
+            limit=args.limit,
+        )
+    except LegacyImportError as exc:
+        print(json.dumps({"error": str(exc)}))
+        return 1
+
+    source_sha256_after = _sha256(args.source) if args.source.exists() else None
+    report["source"] = str(args.source)
+    report["target"] = str(target_db_path)
+    report["source_sha256_before"] = source_sha256_before
+    report["source_sha256_after"] = source_sha256_after
+    report["source_unmodified"] = source_sha256_before == source_sha256_after
+    print(json.dumps(report, indent=2))
+    return 0 if report["source_unmodified"] else 1
+
+
 def command_reembed(settings: Settings, args: argparse.Namespace) -> int:
     from recall_mcp.pipeline import MemoryPipeline
 
@@ -1063,6 +1109,71 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("integrity-check")
     reembed = subparsers.add_parser("reembed")
     reembed.add_argument("--dry-run", action="store_true")
+    import_legacy = subparsers.add_parser(
+        "import-legacy",
+        description=(
+            "Import memories, provenance, and orphaned-chunk salvage from a "
+            "legacy Recall/Remembrance store whose migration history can't "
+            "be brought to head in place (see docs/migrating-to-recall.md). "
+            "The source is always opened read-only; --dry-run writes "
+            "nothing anywhere."
+        ),
+    )
+    import_legacy.add_argument(
+        "--source",
+        type=Path,
+        required=True,
+        help="Path to the legacy memory.db. Always opened read-only.",
+    )
+    import_legacy.add_argument(
+        "--target-home",
+        type=Path,
+        help="Recall home to import into (default: the resolved --home/RECALL_HOME).",
+    )
+    import_legacy.add_argument(
+        "--dry-run", action="store_true", help="Print the full plan; write nothing."
+    )
+    import_legacy.add_argument(
+        "--skip-expired",
+        dest="skip_expired",
+        action="store_true",
+        default=True,
+        help="Skip memories whose expires_at is already in the past (default).",
+    )
+    import_legacy.add_argument(
+        "--include-expired",
+        dest="skip_expired",
+        action="store_false",
+        help="Import expired memories instead of skipping them.",
+    )
+    import_legacy.add_argument(
+        "--dedupe-exact",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Drop all but the earliest of exact-duplicate content (default: on).",
+    )
+    import_legacy.add_argument(
+        "--dedupe-near",
+        action="store_true",
+        help=(
+            "Also drop near-duplicates (same first 120 chars) beyond the "
+            "earliest. Off by default: near-dupes are only reported."
+        ),
+    )
+    import_legacy.add_argument(
+        "--salvage-orphan-chunks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Reassemble orphaned memory_chunks (surviving a failed dream-"
+            "purge cascade) into recovered memories (default: on)."
+        ),
+    )
+    import_legacy.add_argument(
+        "--limit",
+        type=int,
+        help="Import at most N source memory rows (does not limit salvage).",
+    )
     subparsers.add_parser("version")
     return parser
 
@@ -1085,6 +1196,7 @@ def main() -> None:
         "integrity-check": command_integrity,
         "reembed": command_reembed,
         "install-hooks": command_install_hooks,
+        "import-legacy": command_import_legacy,
     }
     if args.command == "models":
         code = command_models_pull(settings, args)
