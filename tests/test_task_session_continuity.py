@@ -49,7 +49,7 @@ def test_current_migration_is_fresh_and_idempotent(tmp_path):
     db_path = tmp_path / "memory.db"
     first = run_migrations(db_path)
     repeated = run_migrations(db_path)
-    assert first.to_version == CURRENT_SCHEMA_VERSION == 12
+    assert first.to_version == CURRENT_SCHEMA_VERSION == 13
     assert repeated.from_version == repeated.to_version == CURRENT_SCHEMA_VERSION
     assert repeated.applied == ()
     with sqlite3.connect(db_path) as conn:

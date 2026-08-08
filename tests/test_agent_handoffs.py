@@ -222,8 +222,8 @@ def test_migration_10_is_incremental_idempotent_and_immutable(tmp_path):
         )
     upgraded = run_migrations(db_path)
     repeated = run_migrations(db_path)
-    assert [item.version for item in upgraded.applied] == [10, 11, 12]
-    assert repeated.from_version == repeated.to_version == 12
+    assert [item.version for item in upgraded.applied] == [10, 11, 12, 13]
+    assert repeated.from_version == repeated.to_version == 13
     with sqlite3.connect(db_path) as conn:
         tables = {
             row[0]

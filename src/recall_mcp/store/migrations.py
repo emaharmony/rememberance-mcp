@@ -1945,6 +1945,372 @@ def _migration_memory_chunks(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_fk_cascade_repair(conn: sqlite3.Connection) -> None:
+    """Correct memory-referencing foreign keys that lacked ON DELETE behavior.
+
+    Migrations 7 (retrieval_utility) and 8 (context_pack_v2) added several
+    tables with a bare ``FOREIGN KEY (memory_id) REFERENCES memories(id)`` —
+    no ON DELETE clause, which SQLite treats as NO ACTION (effectively
+    RESTRICT) once ``PRAGMA foreign_keys=ON``. Any memory ever surfaced by a
+    search, packed into a context pack, scored, or lifecycle-transitioned
+    became permanently undeletable: ``MemoryStore.delete()`` raised
+    ``sqlite3.IntegrityError: FOREIGN KEY constraint failed``.
+
+    Decisions (see FK audit in the PR/commit description for full table):
+
+    - ``retrieval_results.memory_id``, ``context_pack_items.memory_id``,
+      ``context_usage.memory_id`` -> ON DELETE CASCADE. Each row's entire
+      reason for existing is describing one specific memory's participation
+      in one retrieval/pack/usage event; once that memory is gone the row
+      carries no independent meaning. This mirrors the sibling
+      ``retrieval_run_id`` / ``context_pack_id`` CASCADE already declared on
+      the same tables.
+    - ``context_pack_references.memory_id`` -> ON DELETE SET NULL. The
+      column was already nullable (a reference can point at non-memory
+      content per its ``type`` column); preserve the reference row itself
+      and just sever the dangling pointer.
+    - ``utility_history.memory_id`` and ``memory_lifecycle_audit.memory_id``
+      -> ON DELETE SET NULL (loosened from NOT NULL to nullable). These are
+      genuine audit/history ledgers — utility scoring decisions and
+      lifecycle-state transitions — whose analytical value outlives the
+      memory they describe, matching the existing
+      raw_captures/ingest_events precedent (migration 4) of preserving the
+      record and nulling the dangling foreign key.
+    - ``memory_chunks.memory_id`` and ``memory_entities.memory_id`` already
+      declare ON DELETE CASCADE correctly (migrations 3 and 12) — no schema
+      change needed there. Their orphans came from a different bug (the
+      dream-cycle purge phase deleting through a connection that never
+      enabled ``PRAGMA foreign_keys=ON``, so the existing cascade never
+      fired); that is fixed in ``dream/cycle.py``, not here.
+    - Scope/audit tables with no delete path anywhere in the codebase today
+      (tasks, sessions, agents, workspaces, projects, repositories,
+      handoffs, skills, context_packs, retrieval_runs, cag_cache_entries,
+      ...) are deliberately left at the default NO ACTION/RESTRICT. Several
+      of them (session_events, session_checkpoints, handoff_versions,
+      handoff_events, handoff_completions, handoff_references) are already
+      immutable/append-only via explicit triggers; if a delete/archival API
+      is ever added for these entities it should be a deliberate soft-
+      delete workflow, not an implicit cascade through the audit graph.
+
+    SQLite cannot ALTER a column's FOREIGN KEY/ON DELETE clause, so each
+    affected table is rebuilt with the rename -> create -> copy -> drop
+    pattern already used by migration 10 (agent_handoffs) for
+    session_events/session_checkpoints. ``PRAGMA defer_foreign_keys=ON`` is
+    used instead of toggling ``PRAGMA foreign_keys`` because
+    ``run_migrations`` wraps every migration in ``BEGIN IMMEDIATE``, and
+    ``foreign_keys`` is a documented no-op when toggled inside an already-
+    open transaction; ``defer_foreign_keys`` correctly defers constraint
+    checking until COMMIT and resets itself automatically afterward — this
+    is exactly what migration 10 relies on.
+
+    This migration also purges pre-existing orphan rows created by the old
+    broken behavior (both the RESTRICT gap here and the dream-cycle purge
+    bug), since real databases already contain them.
+    """
+    orphan_counts: dict[str, int] = {
+        "retrieval_results": conn.execute(
+            """
+            SELECT COUNT(*) FROM retrieval_results
+            WHERE memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+        "context_pack_items": conn.execute(
+            """
+            SELECT COUNT(*) FROM context_pack_items
+            WHERE memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+        "context_pack_references": conn.execute(
+            """
+            SELECT COUNT(*) FROM context_pack_references
+            WHERE memory_id IS NOT NULL
+              AND memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+        "context_usage": conn.execute(
+            """
+            SELECT COUNT(*) FROM context_usage
+            WHERE memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+        "utility_history": conn.execute(
+            """
+            SELECT COUNT(*) FROM utility_history
+            WHERE memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+        "memory_lifecycle_audit": conn.execute(
+            """
+            SELECT COUNT(*) FROM memory_lifecycle_audit
+            WHERE memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+        "memory_chunks": conn.execute(
+            """
+            SELECT COUNT(*) FROM memory_chunks
+            WHERE memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+        "memory_entities": conn.execute(
+            """
+            SELECT COUNT(*) FROM memory_entities
+            WHERE memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+        "raw_captures": conn.execute(
+            """
+            SELECT COUNT(*) FROM raw_captures
+            WHERE memory_id IS NOT NULL
+              AND memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+        "ingest_events": conn.execute(
+            """
+            SELECT COUNT(*) FROM ingest_events
+            WHERE memory_id IS NOT NULL
+              AND memory_id NOT IN (SELECT id FROM memories)
+            """
+        ).fetchone()[0],
+    }
+    if any(orphan_counts.values()):
+        logger.warning(
+            "Migration 13 (fk_cascade_repair) removing pre-existing orphan "
+            "rows by class: %s",
+            orphan_counts,
+        )
+
+    conn.execute("PRAGMA defer_foreign_keys=ON")
+    _execute_statements(
+        conn,
+        """
+        DROP INDEX IF EXISTS idx_retrieval_results_memory;
+        ALTER TABLE retrieval_results RENAME TO retrieval_results_v12;
+
+        CREATE TABLE retrieval_results (
+            retrieval_run_id TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            rank INTEGER NOT NULL CHECK(rank >= 1),
+            shadow_rank INTEGER CHECK(shadow_rank >= 1),
+            keyword_score REAL,
+            vector_score REAL,
+            graph_score REAL,
+            tier_boost REAL,
+            utility_score REAL NOT NULL,
+            final_score REAL NOT NULL,
+            shadow_score REAL NOT NULL,
+            selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0, 1)),
+            injected INTEGER NOT NULL DEFAULT 0 CHECK(injected IN (0, 1)),
+            used INTEGER NOT NULL DEFAULT 0 CHECK(used IN (0, 1)),
+            scoring_policy_version TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (retrieval_run_id, memory_id),
+            UNIQUE(retrieval_run_id, rank),
+            FOREIGN KEY (retrieval_run_id) REFERENCES retrieval_runs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+                ON DELETE CASCADE
+        );
+        INSERT INTO retrieval_results
+        SELECT * FROM retrieval_results_v12
+        WHERE memory_id IN (SELECT id FROM memories);
+        DROP TABLE retrieval_results_v12;
+        CREATE INDEX idx_retrieval_results_memory
+        ON retrieval_results(memory_id, created_at);
+
+        DROP INDEX IF EXISTS idx_context_pack_items_disposition;
+        ALTER TABLE context_pack_items RENAME TO context_pack_items_v12;
+
+        CREATE TABLE context_pack_items (
+            context_pack_id TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            disposition TEXT NOT NULL CHECK(disposition IN (
+                'inline', 'summary', 'reference', 'omitted'
+            )),
+            position INTEGER NOT NULL CHECK(position >= 1),
+            estimated_tokens INTEGER NOT NULL CHECK(estimated_tokens >= 0),
+            reason_json TEXT NOT NULL DEFAULT '[]',
+            trust_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (context_pack_id, memory_id),
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+                ON DELETE CASCADE
+        );
+        INSERT INTO context_pack_items
+        SELECT * FROM context_pack_items_v12
+        WHERE memory_id IN (SELECT id FROM memories);
+        DROP TABLE context_pack_items_v12;
+        CREATE INDEX idx_context_pack_items_disposition
+        ON context_pack_items(context_pack_id, disposition, position);
+
+        DROP INDEX IF EXISTS idx_context_pack_references_pack;
+        ALTER TABLE context_pack_references
+            RENAME TO context_pack_references_v12;
+
+        CREATE TABLE context_pack_references (
+            id TEXT NOT NULL,
+            context_pack_id TEXT NOT NULL,
+            memory_id TEXT,
+            type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            estimated_tokens INTEGER NOT NULL CHECK(estimated_tokens >= 0),
+            expandable INTEGER NOT NULL DEFAULT 1 CHECK(expandable IN (0, 1)),
+            source_json TEXT NOT NULL DEFAULT '{}',
+            trust_json TEXT NOT NULL DEFAULT '{}',
+            freshness_json TEXT NOT NULL DEFAULT '{}',
+            content_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            PRIMARY KEY(context_pack_id, id),
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+                ON DELETE SET NULL
+        );
+        INSERT INTO context_pack_references (
+            id, context_pack_id, memory_id, type, title, summary,
+            estimated_tokens, expandable, source_json, trust_json,
+            freshness_json, content_json, created_at
+        )
+        SELECT
+            id, context_pack_id,
+            CASE
+                WHEN memory_id IS NOT NULL
+                     AND memory_id NOT IN (SELECT id FROM memories)
+                THEN NULL
+                ELSE memory_id
+            END,
+            type, title, summary, estimated_tokens, expandable,
+            source_json, trust_json, freshness_json, content_json, created_at
+        FROM context_pack_references_v12;
+        DROP TABLE context_pack_references_v12;
+        CREATE INDEX idx_context_pack_references_pack
+        ON context_pack_references(context_pack_id, id);
+
+        DROP INDEX IF EXISTS idx_context_usage_idempotency;
+        DROP INDEX IF EXISTS idx_context_usage_memory_type;
+        ALTER TABLE context_usage RENAME TO context_usage_v12;
+
+        CREATE TABLE context_usage (
+            id TEXT PRIMARY KEY,
+            context_pack_id TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            agent_id TEXT,
+            usage_type TEXT NOT NULL CHECK(usage_type IN (
+                'returned', 'selected', 'injected', 'expanded', 'used',
+                'ignored', 'corrected', 'rejected'
+            )),
+            created_at REAL NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT,
+            FOREIGN KEY (context_pack_id) REFERENCES context_packs(id),
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+        );
+        INSERT INTO context_usage
+        SELECT * FROM context_usage_v12
+        WHERE memory_id IN (SELECT id FROM memories);
+        DROP TABLE context_usage_v12;
+        CREATE UNIQUE INDEX idx_context_usage_idempotency
+        ON context_usage(context_pack_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+        CREATE INDEX idx_context_usage_memory_type
+        ON context_usage(memory_id, usage_type, created_at);
+
+        DROP INDEX IF EXISTS idx_utility_history_memory;
+        ALTER TABLE utility_history RENAME TO utility_history_v12;
+
+        CREATE TABLE utility_history (
+            id TEXT PRIMARY KEY,
+            memory_id TEXT,
+            previous_score REAL NOT NULL,
+            new_score REAL NOT NULL,
+            reason TEXT NOT NULL,
+            components_json TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+                ON DELETE SET NULL
+        );
+        INSERT INTO utility_history (
+            id, memory_id, previous_score, new_score, reason,
+            components_json, policy_version, created_at
+        )
+        SELECT
+            id,
+            CASE
+                WHEN memory_id NOT IN (SELECT id FROM memories) THEN NULL
+                ELSE memory_id
+            END,
+            previous_score, new_score, reason, components_json,
+            policy_version, created_at
+        FROM utility_history_v12;
+        DROP TABLE utility_history_v12;
+        CREATE INDEX idx_utility_history_memory
+        ON utility_history(memory_id, created_at);
+
+        DROP INDEX IF EXISTS idx_lifecycle_audit_memory;
+        ALTER TABLE memory_lifecycle_audit
+            RENAME TO memory_lifecycle_audit_v12;
+
+        CREATE TABLE memory_lifecycle_audit (
+            id TEXT PRIMARY KEY,
+            memory_id TEXT,
+            previous_state TEXT NOT NULL,
+            new_state TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            actor_id TEXT,
+            policy_version TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (memory_id) REFERENCES memories(id)
+                ON DELETE SET NULL,
+            FOREIGN KEY (actor_id) REFERENCES agents(id)
+        );
+        INSERT INTO memory_lifecycle_audit (
+            id, memory_id, previous_state, new_state, reason, actor_id,
+            policy_version, created_at
+        )
+        SELECT
+            id,
+            CASE
+                WHEN memory_id NOT IN (SELECT id FROM memories) THEN NULL
+                ELSE memory_id
+            END,
+            previous_state, new_state, reason, actor_id, policy_version,
+            created_at
+        FROM memory_lifecycle_audit_v12;
+        DROP TABLE memory_lifecycle_audit_v12;
+        CREATE INDEX idx_lifecycle_audit_memory
+        ON memory_lifecycle_audit(memory_id, created_at);
+
+        DELETE FROM memory_chunks
+        WHERE memory_id NOT IN (SELECT id FROM memories);
+
+        DELETE FROM memory_entities
+        WHERE memory_id NOT IN (SELECT id FROM memories);
+
+        UPDATE raw_captures SET memory_id = NULL
+        WHERE memory_id IS NOT NULL
+          AND memory_id NOT IN (SELECT id FROM memories);
+
+        UPDATE ingest_events SET memory_id = NULL
+        WHERE memory_id IS NOT NULL
+          AND memory_id NOT IN (SELECT id FROM memories);
+        """,
+    )
+    for table, columns in {
+        "retrieval_results": {"retrieval_run_id", "memory_id", "rank"},
+        "context_pack_items": {"context_pack_id", "memory_id", "disposition"},
+        "context_pack_references": {"context_pack_id", "id", "memory_id"},
+        "context_usage": {"id", "context_pack_id", "memory_id"},
+        "utility_history": {"id", "memory_id", "policy_version"},
+        "memory_lifecycle_audit": {"id", "memory_id", "policy_version"},
+    }.items():
+        _require_columns(conn, table, columns)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_memory", _migration_core_memory),
     Migration(2, "memory_v2", _migration_memory_v2),
@@ -1958,6 +2324,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(10, "agent_handoffs", _migration_agent_handoffs),
     Migration(11, "cag_context_cache", _migration_cag_context_cache),
     Migration(12, "memory_chunks", _migration_memory_chunks),
+    Migration(13, "fk_cascade_repair", _migration_fk_cascade_repair),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
 
