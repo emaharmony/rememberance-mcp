@@ -1,5 +1,15 @@
 # PROGRESS
 
+**Merge note (revall-v2):** this file records the autonomous loop's work on the
+pre-rename `remembrance_mcp` codebase (Phases 0-4). That codebase has since been
+reconciled with `recall_mcp`'s independent rewrite: `recall_mcp` already had its
+own (more mature) memory-level vector search, so it won every conflict, and the
+package reorg described below (`gate/`, `server/`) did not survive. The
+chunking work (Phase 4) also did not carry over as-is — it depended on modules
+only present on the old codebase — and is pending re-implementation against
+`recall_mcp`, with a reference implementation preserved out-of-tree for that
+follow-up. The rest of this file is kept as a historical record of that loop run.
+
 Shared state for the autonomous loop (see `docs/autonomous-loop.md`).
 Each session: read this + git, do exactly one task, keep tests green, commit,
 update this file. Only Phases 0–4 are in scope for the loop.
@@ -27,13 +37,15 @@ deferred product decision or 3 failed approaches. User reviews all work later.
 - **Tests MUST run via the venv:** `.venv/Scripts/python.exe -m pytest -q`.
   Bare `python` on this machine is Python 3.14 core with NO pytest installed.
 - Repo work happens on the `autonomous-loop` branch.
-- **Package layout (reorganized 2026-07-02):** gate backends live in
-  `gate/backends.py` + `gate/registry.py`; runtime entry points live in
-  `server/` (`server/mcp.py` = MCP server, `server/serve.py` = REST launcher,
-  `server/nats_sub.py`). `config.py`/`pipeline.py` stay at the package root.
-  `python -m remembrance_mcp` (MCP stdio) still works; REST is now
-  `python -m remembrance_mcp.server.serve`. Top-level `remembrance_mcp` re-exports
-  are unchanged (public API stable).
+- **Package layout (reorganized 2026-07-02, superseded by the revall-v2 merge):**
+  at the time, gate backends lived in `gate/backends.py` + `gate/registry.py`;
+  runtime entry points lived in `server/` (`server/mcp.py` = MCP server,
+  `server/serve.py` = REST launcher, `server/nats_sub.py`). This did not survive
+  reconciling with `recall_mcp`, which independently kept a flat layout
+  (`gate_backends.py`, `registry.py`, `serve.py`, `server.py`, `nats_sub.py` all
+  at the package root). `python -m remembrance_mcp` (MCP stdio) still works as a
+  deprecated back-compat shim; the real implementation and REST entry point now
+  live under `recall_mcp` (`python -m recall_mcp.serve`).
 
 ## Design docs
 - `docs/roadmap.md` — phase sequence + dependency graph

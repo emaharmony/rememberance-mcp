@@ -4,6 +4,16 @@
 **Scope:** Complete the retrieval ("R") capability with provider-agnostic vector search, designed to grow into a shared, networked, multi-user memory server.
 **Supersedes:** the initial single-user 384-dim draft.
 
+**Merge note (revall-v2):** memory-level vector search (§5.1–5.3) already shipped
+independently in `recall_mcp` via `embeddings.py` + `search/hybrid.py` — that part
+of this design is done, just not via the code this doc originally described.
+Chunk-level retrieval (§5.4 chunking, §5.5 chunk backfill) did **not** carry over:
+it depended on modules (`chunk/chunk.py`, `embed/embed.py`) that only existed on
+the pre-rename `remembrance_mcp` codebase and were removed as part of reconciling
+with `recall_mcp`'s independent rewrite. Chunking is still pending re-implementation
+against `recall_mcp`; a reference implementation was preserved out-of-tree for that
+follow-up work.
+
 ---
 
 ## 1. Summary
@@ -87,7 +97,7 @@ BaseEmbedBackend (ABC): embed(text)->bytes ; dim:int ; model_id:str
 OllamaEmbedBackend    : POST /api/embeddings ; model+host from config
 OpenAIEmbedBackend    : text-embedding-3-* ; api key from config
 HashEmbedBackend      : dependency-free deterministic fallback (offline tests)
-EmbedFallbackChain    : ordered, first success wins ; env REMEMBRANCE_EMBED_BACKENDS
+EmbedFallbackChain    : ordered, first success wins ; env RECALL_EMBED_BACKENDS
   public: embed_text(text)->(bytes, dim, model_id)
 ```
 
@@ -95,9 +105,9 @@ Fallback caveat (must be in README): the hash backend produces correctly-shaped 
 
 ### 5.3 Config
 
-- `REMEMBRANCE_EMBED_BACKENDS` (default `"hash"`; opt into `"ollama,hash"` or `"openai,hash"`).
-- `REMEMBRANCE_EMBED_MODEL`, `REMEMBRANCE_EMBED_HOST`/key as relevant.
-- No `REMEMBRANCE_EMBED_DIM` needed — dimension is discovered from the model and stored per row.
+- `RECALL_EMBED_BACKENDS` (default `"hash"`; opt into `"ollama,hash"` or `"openai,hash"`).
+- `RECALL_EMBED_MODEL`, `RECALL_EMBED_HOST`/key as relevant.
+- No `RECALL_EMBED_DIM` needed — dimension is discovered from the model and stored per row.
 
 ### 5.4 Chunking (makes "all context sizes" real)
 

@@ -3,7 +3,7 @@
 ## The prompt (save as `LOOP_PROMPT.md` in repo root)
 
 ```markdown
-You are working autonomously on the remembrance-mcp repository. You get ONE
+You are working autonomously on the recall-mcp repository. You get ONE
 bounded work session. Other sessions ran before you and will run after you.
 Your ONLY shared memory is the files listed below. Follow this protocol exactly.
 

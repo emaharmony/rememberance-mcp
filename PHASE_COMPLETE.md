@@ -1,5 +1,16 @@
 # ALL PHASES COMPLETE — Phases 0–4
 
+**Merge note (revall-v2):** this describes work done on the pre-rename
+`remembrance_mcp` codebase. Reconciling with `recall_mcp`'s independent rewrite
+superseded most of it: `recall_mcp` already shipped its own memory-level vector
+search (Phases 1–3 territory) via `embeddings.py` + `search/hybrid.py`, so its
+version won every merge conflict, and the Phase 0 package reorg (`gate/`,
+`server/`) did not survive. **Phase 4 (chunking) is pending re-implementation**
+against `recall_mcp` — it depended on modules (`chunk/chunk.py`, `embed/embed.py`)
+that were removed as part of the reconciliation; a reference implementation was
+preserved out-of-tree for that follow-up work. The rest of this file is kept as
+a historical record of that loop run.
+
 The autonomous loop finished **all of Phases 0–4** (semantic-retrieval roadmap)
 per the run-all-phases override. **Stopped for human review.** Nothing is pushed;
 everything is on the `autonomous-loop` branch.
@@ -51,13 +62,13 @@ everything is on the `autonomous-loop` branch.
 3. **Semantic quality is untested end-to-end** — the whole run used the offline
    **hash** embedding backend (deterministic, NO semantic meaning). It proves the
    *plumbing* (write→chunk→embed→store→chunk-search→fuse→backfill), not retrieval
-   *quality*. Real quality needs a run with Ollama/OpenAI (`REMEMBRANCE_EMBED_BACKENDS=ollama,hash`).
+   *quality*. Real quality needs a run with Ollama/OpenAI (`RECALL_EMBED_BACKENDS=ollama,hash`).
 
 ## Decisions I made provisionally (please confirm or change)
 - **Chunk sizing** (roadmap defers this to you): I did NOT hard-block; I used
   conventional, **env-configurable** defaults — 512 target / 64 overlap / 512
   single-chunk-threshold tokens (token≈4 chars), via
-  `REMEMBRANCE_CHUNK_{TARGET,OVERLAP,SINGLE_THRESHOLD}_TOKENS`. Change freely.
+  `RECALL_CHUNK_{TARGET,OVERLAP,SINGLE_THRESHOLD}_TOKENS`. Change freely.
 - **Coverage floor 60%** (roadmap said ~80%): set as a ratchet floor since actual
   was 64%; now 69%. Raise toward 80% when ready.
 - **Redundant embed on short capture**: a short memory is embedded once for the

@@ -35,10 +35,10 @@ One PR per tier, Tier 1 first. Add a regression test per data-integrity block pr
 
 ## Concern B: Type-hint coverage + type checker
 
-20 of 32 files have return hints. Real targets (excluding empty `__init__.py` files, which have nothing to type):
-- `src/remembrance_mcp/server/mcp.py`
-- `src/remembrance_mcp/server/serve.py`
-- `src/remembrance_mcp/__main__.py`
+20 of 32 files have return hints. Real targets (excluding empty `__init__.py` files, which have nothing to type). Note: this list was written against the pre-merge `remembrance_mcp` package layout; `server/mcp.py` and `server/serve.py` did not survive the revall-v2 merge (that reorg lost to `recall_mcp`'s independent flat layout) — the equivalent modules are now:
+- `src/recall_mcp/server.py`
+- `src/recall_mcp/serve.py`
+- `src/remembrance_mcp/__main__.py` (now the trivial back-compat shim entry point)
 
 ### Plan
 1. Add return + parameter hints to the three modules above and any partially-typed functions elsewhere.
