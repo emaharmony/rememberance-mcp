@@ -7,6 +7,7 @@
 - Environment-backed validated production settings and secure non-loopback startup checks.
 - Bearer authentication, token rotation overlap, request/rate limits, exact CORS, readiness, metrics, context POST, and memory deletion.
 - Ollama embedding provider, embedding provenance, real vector/balanced retrieval, scoped search, and stale-vector repair.
+- Per-chunk embeddings for long memories: overlapping-chunk splitter (`chunking.py`), a `memory_chunks` schema migration, chunk-on-write, chunk-level vector search merged additively into vector/balanced retrieval, and a dream-cycle `chunk_backfill` phase for pre-existing memories — gated behind `RECALL_CHUNKING_ENABLED` (default off).
 - Raw-first capture processing, structured fact extraction, access counters, ingestion event IDs, foreign-key cleanup, and operational statistics.
 - Durable NATS JetStream consumer with explicit post-commit acknowledgements, retries, and dead-letter handling.
 - `recall-admin` initialization, doctor, migration, model, NATS, token, backup, restore, integrity, re-embedding, and version commands.

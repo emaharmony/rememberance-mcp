@@ -189,7 +189,7 @@ def test_migration_11_is_incremental_and_idempotent(tmp_path):
     run_migrations(db_path, MIGRATIONS[:10])
     result = run_migrations(db_path)
     repeated = run_migrations(db_path)
-    assert [item.version for item in result.applied] == [11]
+    assert [item.version for item in result.applied] == [11, 12]
     assert repeated.applied == ()
     with sqlite3.connect(db_path) as conn:
         tables = {

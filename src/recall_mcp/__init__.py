@@ -52,6 +52,7 @@ from recall_mcp.extract import (
 )
 
 from recall_mcp.store import MemoryStore, Memory
+from recall_mcp.chunking import chunk_text
 from recall_mcp.pipeline import MemoryPipeline
 from recall_mcp.server import create_server
 from recall_mcp.registry import (
@@ -94,6 +95,7 @@ __all__ = [
     "ExtractionResult",
     "MemoryStore",
     "Memory",
+    "chunk_text",
     "MemoryPipeline",
     "create_server",
     "main",

@@ -1,18 +1,18 @@
 # Schema migrations
 
-The current schema is version 10. Migration 9 added immutable, manually
-approved Recall Skills. Migration 10 adds scope-constrained `handoffs`,
-immutable `handoff_versions`, append-only `handoff_events`, immutable structured
-`handoff_completions`, and expandable `handoff_references`.
+The current schema is version 12. Migration 11 added disposable CAG cache
+metadata and immutable delivery telemetry. Migration 12 adds `memory_chunks`
+for per-chunk embeddings, used by chunk-on-write and chunk-level vector search
+(both gated behind `RECALL_CHUNKING_ENABLED`, default off).
 
-Supported checks are clean `0 -> 10`, incremental `9 -> 10`, and idempotent
-`10 -> 10`. Existing memories, sessions, retrieval/utility telemetry, Context
-Pack V2 rows, and approved skills are not rewritten. Rollback remains restore
-from a verified backup and run the prior application artifact; down migrations
-are intentionally unsupported.
+Supported checks are clean `0 -> 12`, incremental `11 -> 12`, and idempotent
+`12 -> 12`. Existing memories, sessions, retrieval/utility telemetry, Context
+Pack V2 rows, approved skills, handoffs, and CAG cache rows are not rewritten.
+Rollback remains restore from a verified backup and run the prior application
+artifact; down migrations are intentionally unsupported.
 
 Recall uses ordered, forward-only SQLite migrations for canonical schema
-changes. The current schema version is `9`.
+changes.
 
 ## Migration ledger
 
@@ -37,10 +37,16 @@ Current migrations are:
 | 9 | `versioned_skills` | Scope-aware skills, immutable versions and sources, exact-version review audit, usage feedback, and Context Pack linkage |
 | 10 | `agent_handoffs` | Immutable target-agent handoffs, lifecycle audit, structured completion, references, and session updates |
 | 11 | `cag_context_cache` | Disposable scoped cache metadata and dependencies, immutable CAG deliveries and feedback, and invalidation audit |
+| 12 | `memory_chunks` | Per-chunk embeddings for long-memory vector search: chunk content, embedding, model, and dimensionality, cascade-deleted with their parent memory |
 
 Migration 11 cache rows are rebuildable optimization metadata. Delivery records
 remain an audit of what was sent, but neither cache table becomes canonical
 task, memory, session, skill, or handoff truth.
+
+Migration 12 `memory_chunks` rows are also rebuildable derived state (from
+`memories.content`, via the dream `chunk_backfill` phase or chunk-on-write) —
+not independent canonical truth, and they carry no scope columns of their own;
+they inherit scope from their parent `memories` row through `memory_id`.
 
 FTS5 tables and triggers are not canonical migration state. They are derived
 indexes that Recall can rebuild from canonical memories.

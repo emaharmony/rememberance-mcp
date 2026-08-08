@@ -5,10 +5,13 @@ pre-rename `remembrance_mcp` codebase (Phases 0-4). That codebase has since been
 reconciled with `recall_mcp`'s independent rewrite: `recall_mcp` already had its
 own (more mature) memory-level vector search, so it won every conflict, and the
 package reorg described below (`gate/`, `server/`) did not survive. The
-chunking work (Phase 4) also did not carry over as-is — it depended on modules
-only present on the old codebase — and is pending re-implementation against
-`recall_mcp`, with a reference implementation preserved out-of-tree for that
-follow-up. The rest of this file is kept as a historical record of that loop run.
+chunking work (Phase 4) did not carry over as-is — it depended on modules only
+present on the old codebase — but has since been re-implemented against
+`recall_mcp` (`chunking.py`, migration 12 `memory_chunks`, chunk-on-write,
+`search_chunks_with_embedding`, and the `chunk_backfill` dream phase, gated
+behind `RECALL_CHUNKING_ENABLED`, default off — see CHANGELOG.md and
+docs/semantic-retrieval.md). The rest of this file is kept as a historical
+record of that loop run.
 
 Shared state for the autonomous loop (see `docs/autonomous-loop.md`).
 Each session: read this + git, do exactly one task, keep tests green, commit,

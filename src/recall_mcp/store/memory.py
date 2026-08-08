@@ -83,6 +83,72 @@ class MemoryStoreV2:
                     exc,
                 )
 
+    # ── Chunk storage (semantic-retrieval.md §5.4) ─────────────
+
+    def store_chunks(self, memory_id: str, chunks: list[dict]) -> int:
+        """Replace the stored chunks for a memory.
+
+        ``chunks`` is an ordered list of dicts with a required ``content``
+        key and optional ``embedding`` (bytes), ``embedding_dimensions``
+        (int), ``embedding_model`` (str). Existing chunks for ``memory_id``
+        are deleted first, so this is idempotent and safe to re-run (e.g.
+        from the dream-cycle chunk backfill or a manual re-chunk). Returns
+        the number of chunk rows written.
+        """
+        now = time.time()
+        with self.store._connect() as conn:
+            conn.execute("DELETE FROM memory_chunks WHERE memory_id = ?", (memory_id,))
+            written = 0
+            for index, chunk in enumerate(chunks):
+                content = chunk.get("content")
+                if not content:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO memory_chunks
+                        (chunk_id, memory_id, chunk_index, content,
+                         embedding, embedding_model, embedding_dimensions, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"{memory_id}::chunk::{index}",
+                        memory_id,
+                        index,
+                        content,
+                        chunk.get("embedding"),
+                        chunk.get("embedding_model", ""),
+                        chunk.get("embedding_dimensions"),
+                        now,
+                    ),
+                )
+                written += 1
+        return written
+
+    def stale_chunk_memories(self, model: str, limit: int = 100) -> list[dict]:
+        """Return memories lacking any embedded chunk for ``model``.
+
+        Covers legacy memories captured before chunking existed and memories
+        left with old-model chunks after a model swap; both are invisible to
+        chunk-level vector search until re-chunked.
+        """
+        with self.store._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, content FROM memories
+                WHERE content IS NOT NULL AND content != ''
+                AND NOT EXISTS (
+                    SELECT 1 FROM memory_chunks c
+                    WHERE c.memory_id = memories.id
+                    AND c.embedding_model = ? AND c.embedding IS NOT NULL
+                )
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (model, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     # FTS5 search
 
     def search_fts(

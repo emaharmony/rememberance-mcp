@@ -1892,6 +1892,59 @@ def _migration_cag_context_cache(conn: sqlite3.Connection) -> None:
         _require_columns(conn, table, columns)
 
 
+def _migration_memory_chunks(conn: sqlite3.Connection) -> None:
+    """Add per-chunk embeddings for long-memory vector search (semantic-retrieval.md §5.4).
+
+    A long memory is split into several overlapping chunks (`chunking.py`);
+    a short memory collapses to a single chunk. Each chunk carries its own
+    embedding, model, and dimensionality so search can compare within one
+    model and resolve back to its parent memory (best-chunk-per-memory).
+    Chunks are derived state: they are fully rebuildable from `memories`
+    (see the dream-cycle `chunk_backfill` phase), so they cascade-delete with
+    their parent rather than carrying independent scope columns — the parent
+    `memories` row already carries the full formal-scope identity.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_chunks (
+            chunk_id TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL CHECK(chunk_index >= 0),
+            content TEXT NOT NULL,
+            embedding BLOB,
+            embedding_model TEXT NOT NULL DEFAULT '',
+            embedding_dimensions INTEGER,
+            created_at REAL NOT NULL,
+            UNIQUE(memory_id, chunk_index),
+            FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_chunks_memory ON memory_chunks(memory_id)"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_chunks_model
+        ON memory_chunks(embedding_model) WHERE embedding IS NOT NULL
+        """
+    )
+    _require_columns(
+        conn,
+        "memory_chunks",
+        {
+            "chunk_id",
+            "memory_id",
+            "chunk_index",
+            "content",
+            "embedding",
+            "embedding_model",
+            "embedding_dimensions",
+            "created_at",
+        },
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_memory", _migration_core_memory),
     Migration(2, "memory_v2", _migration_memory_v2),
@@ -1904,6 +1957,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(9, "versioned_skills", _migration_versioned_skills),
     Migration(10, "agent_handoffs", _migration_agent_handoffs),
     Migration(11, "cag_context_cache", _migration_cag_context_cache),
+    Migration(12, "memory_chunks", _migration_memory_chunks),
 )
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version
 

@@ -5,11 +5,17 @@
 superseded most of it: `recall_mcp` already shipped its own memory-level vector
 search (Phases 1–3 territory) via `embeddings.py` + `search/hybrid.py`, so its
 version won every merge conflict, and the Phase 0 package reorg (`gate/`,
-`server/`) did not survive. **Phase 4 (chunking) is pending re-implementation**
-against `recall_mcp` — it depended on modules (`chunk/chunk.py`, `embed/embed.py`)
-that were removed as part of the reconciliation; a reference implementation was
-preserved out-of-tree for that follow-up work. The rest of this file is kept as
-a historical record of that loop run.
+`server/`) did not survive. **Phase 4 (chunking) has since been re-implemented**
+against `recall_mcp` — the original depended on modules (`chunk/chunk.py`,
+`embed/embed.py`) that were removed as part of the reconciliation, so it was
+rebuilt on `recall_mcp`'s own abstractions: `chunking.py` (`chunk_text`),
+migration 12 (`memory_chunks`), `MemoryStoreV2.store_chunks`/
+`stale_chunk_memories`, `HybridSearch.search_chunks_with_embedding` (merged
+additively into `_search_vector`/`_search_balanced`), chunk-on-write in
+`pipeline.py`, and a `chunk_backfill` dream phase — all gated behind
+`RECALL_CHUNKING_ENABLED` (default off; see CHANGELOG.md and
+docs/semantic-retrieval.md). The rest of this file is kept as a historical
+record of that loop run.
 
 The autonomous loop finished **all of Phases 0–4** (semantic-retrieval roadmap)
 per the run-all-phases override. **Stopped for human review.** Nothing is pushed;

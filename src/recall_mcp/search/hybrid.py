@@ -382,8 +382,9 @@ class HybridSearch:
                 formal_scope,
                 include_cold,
             )
-        return self.search_with_embedding(
-            embedded.to_bytes(),
+        query_bytes = embedded.to_bytes()
+        whole_results = self.search_with_embedding(
+            query_bytes,
             category=category,
             tier=tier,
             project=project,
@@ -392,6 +393,33 @@ class HybridSearch:
             include_cold=include_cold,
             limit=limit,
         )
+        # Chunk-level matches (§5.4) surface memories whose best semantic hit
+        # lives in one chunk of a longer document, not the whole-memory
+        # average. Additive by construction: when no memory has been chunked
+        # yet (chunking disabled, or backfill pending) this returns [] and
+        # `whole_results` is returned unchanged — no behavior change for
+        # installs that don't use chunking.
+        chunk_results = self.search_chunks_with_embedding(
+            query_bytes,
+            category=category,
+            tier=tier,
+            project=project,
+            agent=agent,
+            formal_scope=formal_scope,
+            include_cold=include_cold,
+            limit=limit,
+            model=embedded.model,
+        )
+        if not chunk_results:
+            return whole_results
+
+        merged: dict[str, dict] = {r["id"]: r for r in whole_results}
+        for result in chunk_results:
+            existing = merged.get(result["id"])
+            if existing is None or result["score"] > existing["score"]:
+                merged[result["id"]] = result
+        ranked = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
+        return ranked[:limit]
 
     def search_with_embedding(
         self,
@@ -509,6 +537,108 @@ class HybridSearch:
 
         candidates.sort(key=lambda x: x["score"], reverse=True)
         return candidates[:limit]
+
+    def search_chunks_with_embedding(
+        self,
+        query_embedding: bytes,
+        category: Optional[str] = None,
+        limit: int = 10,
+        model: Optional[str] = None,
+        tier: Optional[str] = None,
+        project: Optional[str] = None,
+        agent: Optional[str] = None,
+        formal_scope: Optional[dict[str, str]] = None,
+        include_cold: bool = False,
+    ) -> list[dict]:
+        """Chunk-level vector search resolved to parent memories (§5.4/§5.5).
+
+        Cosine-ranks the query against ``memory_chunks``, keeping only chunks
+        embedded by ``model`` (different embedding models produce
+        incompatible vector spaces, so cosine across them is meaningless),
+        then resolves to parent memories keeping the BEST-scoring chunk per
+        ``memory_id`` (dedup). Parents are joined back for content/tier/etc.
+        and filtered by the same category/tier/project/agent/formal-scope/
+        eligibility rules as the rest of hybrid search; the tier boost is
+        applied to the best chunk score. Returns ``[]`` when there are no
+        embedded chunks yet (chunking disabled, or backfill still pending) —
+        callers treat that as "no chunk-level contribution", not an error.
+        """
+        query_vec = self._bytes_to_vector(query_embedding)
+        if not query_vec:
+            return []
+
+        best_by_memory: dict[str, float] = {}
+        with _connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            scope_columns = self._scope_columns(conn)
+            sql = "SELECT memory_id, embedding FROM memory_chunks WHERE embedding IS NOT NULL"
+            params: list[object] = []
+            if model is not None:
+                sql += " AND embedding_model = ?"
+                params.append(model)
+            sql += " ORDER BY created_at DESC LIMIT 2000"
+            for row in conn.execute(sql, params).fetchall():
+                chunk_vec = self._bytes_to_vector(row["embedding"])
+                if not chunk_vec:
+                    continue
+                similarity = self._cosine_similarity(query_vec, chunk_vec)
+                memory_id = row["memory_id"]
+                # Keep only the best-scoring chunk per parent memory (dedup).
+                if (
+                    memory_id not in best_by_memory
+                    or similarity > best_by_memory[memory_id]
+                ):
+                    best_by_memory[memory_id] = similarity
+
+            if not best_by_memory:
+                return []
+
+            placeholders = ",".join("?" for _ in best_by_memory)
+            memory_sql = f"""
+                SELECT * FROM memories
+                WHERE id IN ({placeholders})
+            """
+            memory_params: list[object] = list(best_by_memory.keys())
+            if category:
+                memory_sql += " AND category = ?"
+                memory_params.append(category)
+            if tier:
+                memory_sql += " AND tier = ?"
+                memory_params.append(tier)
+            if project and "project" in scope_columns:
+                memory_sql += " AND (project = ? OR project = '')"
+                memory_params.append(project)
+            if agent and "agent" in scope_columns:
+                memory_sql += " AND (agent = ? OR agent = '')"
+                memory_params.append(agent)
+            memory_sql = self._append_scope_sql(
+                memory_sql, memory_params, formal_scope or {}
+            )
+            memory_sql = self._append_eligibility_sql(
+                memory_sql, memory_params, scope_columns, include_cold=include_cold
+            )
+            memory_rows = conn.execute(memory_sql, memory_params).fetchall()
+
+        results = []
+        for row in memory_rows:
+            similarity = best_by_memory[row["id"]]
+            tier_boost = TIER_BOOST.get(row["tier"], 1.0)
+            results.append(
+                {
+                    "id": row["id"],
+                    "content": row["content"],
+                    "compiled_truth": row["compiled_truth"] or "",
+                    "summary": row["summary"] or "",
+                    "category": row["category"],
+                    "tier": row["tier"],
+                    "score": similarity * tier_boost,
+                    "vector_score": similarity,
+                    "tier_boost": tier_boost,
+                    "sources": ["vector"],
+                }
+            )
+        results.sort(key=lambda item: item["score"], reverse=True)
+        return results[:limit]
 
     def _search_deep(
         self,

@@ -35,6 +35,7 @@ from typing import Optional
 
 from recall_mcp.config import Settings
 from recall_mcp.cag import CAGDeliveryService, CAGRequest
+from recall_mcp.chunking import chunk_text
 from recall_mcp.continuity import (
     ContinuityError,
     ContinuityStore,
@@ -207,6 +208,7 @@ class MemoryPipeline:
             embedding_provider=self.embedding_provider,
             ollama_base_url=self.settings.OLLAMA_BASE_URL,
             fact_store=self.fact_store,
+            chunking_enabled=self.settings.CHUNKING_ENABLED,
         )
 
         # ── V2: Markdown Sync ────────────────────────────────
@@ -420,6 +422,8 @@ class MemoryPipeline:
             if not self._embed_memory(mem_id, job.content):
                 raise EmbeddingError(f"embedding failed for {mem_id}")
             embedding_status = "complete"
+            if self.settings.CHUNKING_ENABLED:
+                self._chunk_memory(mem_id, job.content)
         else:
             self.store.update_enrichment(
                 mem_id,
@@ -517,6 +521,44 @@ class MemoryPipeline:
         except EmbeddingError as exc:
             logger.warning("Embedding failed for %s: %s", mem_id, exc)
             self.store.mark_embedding_error(mem_id, str(exc))
+            return False
+
+    def _chunk_memory(self, mem_id: str, text: str) -> bool:
+        """Split, embed, and persist per-chunk vectors (chunk-on-write, §5.4).
+
+        Unlike whole-memory embedding, a chunking failure never fails the
+        outbox job: chunk-level search is an enhancement over the primary
+        whole-memory vector already written by `_embed_memory`, so a partial
+        or total chunking failure is logged and the memory is left with
+        whatever chunks (if any) it already had.
+        """
+        if self.embedding_provider is None:
+            return False
+        try:
+            contents = chunk_text(text)
+        except Exception as exc:
+            logger.warning("Chunking failed for %s (non-blocking): %s", mem_id, exc)
+            return False
+
+        chunk_rows: list[dict[str, object]] = []
+        for content in contents:
+            row: dict[str, object] = {"content": content}
+            try:
+                embedded = self.embedding_provider.embed(content)
+                row["embedding"] = embedded.to_bytes()
+                row["embedding_model"] = embedded.model
+                row["embedding_dimensions"] = embedded.dimensions
+            except EmbeddingError as exc:
+                logger.warning(
+                    "Chunk embed failed for %s (stored without vector): %s", mem_id, exc
+                )
+            chunk_rows.append(row)
+
+        try:
+            self.store_v2.store_chunks(mem_id, chunk_rows)
+            return True
+        except Exception as exc:
+            logger.warning("Chunk store failed for %s (non-blocking): %s", mem_id, exc)
             return False
 
     def search(

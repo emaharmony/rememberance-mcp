@@ -39,6 +39,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from recall_mcp.chunking import chunk_text
 from recall_mcp.store.edges import EntityStore
 from recall_mcp.store.memory import MemoryStoreV2
 from recall_mcp.store.store import MemoryStore
@@ -60,6 +61,7 @@ ALL_PHASES = [
     "fact_resolve",
     "orphan_detect",
     "embed_stale",
+    "chunk_backfill",
     "purge",
 ]
 
@@ -83,11 +85,16 @@ class DreamCycle:
         fact_store: FactStore | None = None,
         memory_store: MemoryStore | None = None,
         embedding_provider: EmbeddingProvider | None = None,
+        chunking_enabled: bool = False,
     ):
         self.entity_store = entity_store
         self.memory_v2 = memory_v2
         self.fact_store = fact_store
         self.ollama_base_url = ollama_base_url
+        # Independent of `embedding_provider`: EMBEDDINGS_ENABLED alone must
+        # not trigger chunk_backfill for installs that haven't opted into
+        # chunking (RECALL_CHUNKING_ENABLED, default off — see runtime.py).
+        self.chunking_enabled = chunking_enabled
         self.memory_store = memory_store
         self.embedding_provider = embedding_provider
         self.wiring = GraphWiring(entity_store)
@@ -210,6 +217,8 @@ class DreamCycle:
             return self._phase_orphan_detect(dry_run)
         elif phase == "embed_stale":
             return self._phase_embed_stale(dry_run)
+        elif phase == "chunk_backfill":
+            return self._phase_chunk_backfill(dry_run)
         elif phase == "purge":
             return self._phase_purge(dry_run)
         else:
@@ -455,6 +464,72 @@ class DreamCycle:
             "status": "ok" if failed == 0 else "partial",
             "embeddings_refreshed": refreshed,
             "embeddings_failed": failed,
+        }
+
+    def _phase_chunk_backfill(self, dry_run: bool = False) -> dict:
+        """
+        Backfill per-chunk embeddings for existing memories (semantic-retrieval.md §5.4/§5.5).
+
+        Chunk-level search only finds memories that have a current-model
+        embedded chunk. Legacy memories captured before chunking existed —
+        or memories left with old-model chunks after a model swap — have
+        none, so they're invisible to chunk-level vector search until
+        re-chunked. This re-runs chunk_text -> embed -> store_chunks (which
+        replaces stale chunks) for such memories, bounded per run.
+        """
+        if not self.chunking_enabled or self.embedding_provider is None:
+            return {
+                "status": "skipped",
+                "memories_chunked": 0,
+                "chunks_written": 0,
+                "reason": "chunking is disabled",
+            }
+
+        candidates = self.memory_v2.stale_chunk_memories(
+            self.embedding_provider.model, limit=100
+        )
+        if dry_run:
+            return {
+                "status": "ok",
+                "memories_chunked": 0,
+                "chunks_written": 0,
+                "stale_found": len(candidates),
+                "dry_run": True,
+            }
+
+        memories_chunked = 0
+        chunks_written = 0
+        failed = 0
+        for memory in candidates:
+            try:
+                chunk_rows = []
+                for content in chunk_text(memory["content"]):
+                    row: dict[str, object] = {"content": content}
+                    try:
+                        embedded = self.embedding_provider.embed(content)
+                        row["embedding"] = embedded.to_bytes()
+                        row["embedding_model"] = embedded.model
+                        row["embedding_dimensions"] = embedded.dimensions
+                    except EmbeddingError as exc:
+                        logger.warning(
+                            "chunk_backfill: embed failed for %s chunk: %s",
+                            memory["id"],
+                            exc,
+                        )
+                    chunk_rows.append(row)
+                chunks_written += self.memory_v2.store_chunks(memory["id"], chunk_rows)
+                memories_chunked += 1
+            except Exception as exc:
+                # Non-blocking: skip this memory, keep draining the rest.
+                logger.warning("chunk_backfill: failed for %s: %s", memory["id"], exc)
+                failed += 1
+
+        return {
+            "status": "ok" if failed == 0 else "partial",
+            "memories_chunked": memories_chunked,
+            "chunks_written": chunks_written,
+            "stale_found": len(candidates),
+            "model": self.embedding_provider.model,
         }
 
     def _phase_purge(self, dry_run: bool = False) -> dict:

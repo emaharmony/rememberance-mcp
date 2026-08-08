@@ -148,6 +148,69 @@ def test_migration_8_preserves_phase_2_context_pack_and_is_idempotent(tmp_path):
     assert outbox_parents == {"raw_captures"}
 
 
+def test_migration_12_adds_memory_chunks_and_is_idempotent(tmp_path):
+    db_path = tmp_path / "phase-11.db"
+    run_migrations(db_path, MIGRATIONS[:11])
+    now = time.time()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO memories (
+                id, content, summary, category, tier, key_topics, source,
+                created_at, accessed_at
+            ) VALUES ('mem-legacy', 'preserve me', 's', 'project', 'active', '[]', 'test', ?, ?)
+            """,
+            (now, now),
+        )
+
+    upgraded = run_migrations(db_path, MIGRATIONS[:12])
+    repeated = run_migrations(db_path, MIGRATIONS[:12])
+
+    assert [migration.version for migration in upgraded.applied] == [12]
+    assert repeated.from_version == repeated.to_version == 12
+    assert repeated.applied == ()
+    assert "memory_chunks" in _objects(db_path, "table")
+    assert {
+        "chunk_id",
+        "memory_id",
+        "chunk_index",
+        "content",
+        "embedding",
+        "embedding_model",
+        "embedding_dimensions",
+        "created_at",
+    }.issubset(_columns(db_path, "memory_chunks"))
+
+    with sqlite3.connect(db_path) as conn:
+        preserved = conn.execute(
+            "SELECT content FROM memories WHERE id = 'mem-legacy'"
+        ).fetchone()
+        assert preserved == ("preserve me",)
+        conn.execute(
+            """
+            INSERT INTO memory_chunks (
+                chunk_id, memory_id, chunk_index, content, created_at
+            ) VALUES ('mem-legacy::chunk::0', 'mem-legacy', 0, 'preserve me', ?)
+            """,
+            (now,),
+        )
+        conn.commit()
+        chunk_parents = {
+            row[2] for row in conn.execute("PRAGMA foreign_key_list(memory_chunks)")
+        }
+    assert chunk_parents == {"memories"}
+
+    # Chunks are derived state: removing the parent memory cascades.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("DELETE FROM memories WHERE id = 'mem-legacy'")
+        conn.commit()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE memory_id = 'mem-legacy'"
+        ).fetchone()[0]
+    assert remaining == 0
+
+
 def test_unversioned_legacy_database_preserves_rows(tmp_path):
     db_path = tmp_path / "legacy.db"
     created_at = time.time()

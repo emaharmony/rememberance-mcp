@@ -22,6 +22,10 @@ All settings use the `RECALL_` prefix. Legacy `REMEMBRANCE_` names remain tempor
 | RECALL_EXTRACT_MODEL | nemotron-3-nano:4b | Extraction model |
 | RECALL_EMBED_MODEL | embeddinggemma | Embedding model |
 | RECALL_EMBEDDINGS_ENABLED | false | Enable capture/query embeddings; production sets true |
+| RECALL_CHUNKING_ENABLED | false | Enable chunk-on-write, chunk-level vector search, and the dream `chunk_backfill` phase; requires RECALL_EMBEDDINGS_ENABLED to have any effect |
+| RECALL_CHUNK_TARGET_TOKENS | 512 | Approximate chunk size (tokens, ~4 chars/token heuristic) |
+| RECALL_CHUNK_OVERLAP_TOKENS | 64 | Approximate overlap between consecutive chunks (tokens) |
+| RECALL_CHUNK_SINGLE_THRESHOLD_TOKENS | 512 | Content at/below this size stays a single chunk |
 | RECALL_OLLAMA_MAX_CONCURRENCY | 2 | Ollama worker limit |
 | RECALL_NATS_URL | nats://127.0.0.1:4222 | NATS connection |
 | RECALL_NATS_CREDS_FILE | unset | NATS user credentials file |

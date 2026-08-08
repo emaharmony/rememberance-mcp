@@ -98,6 +98,7 @@ def test_migration_backfills_only_pending_raw_captures(tmp_path):
         9,
         10,
         11,
+        12,
     ]
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT raw_capture_id, status FROM outbox_jobs").fetchall()
