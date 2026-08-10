@@ -115,6 +115,29 @@ class MemoryPipeline:
             self.extractor = StubExtractor()
         self.embedding_provider = None
         if self.settings.EMBEDDINGS_ENABLED:
+            # Guard: refuse to start if existing DB has embeddings from a
+            # different model than the configured one. Mixing embedding models
+            # produces silently wrong search results.
+            try:
+                import sqlite3 as _sqlite3
+                _conn = _sqlite3.connect(str(self.settings.DB_PATH))
+                _existing = _conn.execute(
+                    "SELECT DISTINCT embedding_model FROM memories "
+                    "WHERE embedding_model IS NOT NULL AND embedding_model != ''"
+                ).fetchall()
+                _conn.close()
+                _models = {row[0] for row in _existing}
+                if _models and self.settings.EMBED_MODEL not in _models:
+                    raise RuntimeError(
+                        f"Embedding model mismatch: DB has embeddings from "
+                        f"{', '.join(sorted(_models))} but config has "
+                        f"'{self.settings.EMBED_MODEL}'. "
+                        f"Set RECALL_EMBED_MODEL to match, or re-embed from scratch."
+                    )
+            except RuntimeError:
+                raise
+            except Exception:
+                pass  # DB might not exist yet (fresh install)
             self.embedding_provider = OllamaEmbeddingProvider(
                 base_url=self.settings.OLLAMA_BASE_URL,
                 model=self.settings.EMBED_MODEL,

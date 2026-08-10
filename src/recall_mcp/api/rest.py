@@ -1034,6 +1034,7 @@ class RecallHandler(BaseHTTPRequestHandler):
                     maximum=self.pipeline.settings.MAX_RESULTS,
                     name="limit",
                 )
+                fields_param = params.get("fields", [None])[0]
 
                 if not query:
                     self._json_response(
@@ -1060,6 +1061,8 @@ class RecallHandler(BaseHTTPRequestHandler):
                     in {"1", "true", "yes"},
                     retrieval_idempotency_key=params.get("idempotency_key", [None])[0],
                 )
+                # Apply field projection.
+                results = self._project_fields(results, fields_param)
                 self._json_response({"results": results, "count": len(results)})
 
             elif path.startswith("/memory/"):
@@ -1070,9 +1073,12 @@ class RecallHandler(BaseHTTPRequestHandler):
                         {"error": f"Memory {mem_id} not found"}, status=404
                     )
                     return
+                fields_param = params.get("fields", [None])[0]
                 # Also include entities
                 entities = self.pipeline.entity_store.get_memory_entities(mem_id)
                 memory["entities"] = entities
+                # Apply field projection.
+                memory = self._project_fields_single(memory, fields_param)
                 self._json_response(memory)
 
             elif path.startswith("/entity/"):
@@ -1167,6 +1173,11 @@ class RecallHandler(BaseHTTPRequestHandler):
                     in {"1", "true", "yes"},
                     retrieval_idempotency_key=params.get("idempotency_key", [None])[0],
                 )
+                # Strip embedding blobs from memories in context response.
+                if isinstance(context.get("memories"), list):
+                    context["memories"] = self._strip_blob_fields(
+                        context["memories"], self._DEFAULT_STRIP_FIELDS
+                    )
                 self._json_response(context)
 
             else:
@@ -1812,6 +1823,10 @@ class RecallHandler(BaseHTTPRequestHandler):
                     include_cold=bool(body.get("include_cold", False)),
                     retrieval_idempotency_key=body.get("idempotency_key"),
                 )
+                if isinstance(context.get("memories"), list):
+                    context["memories"] = self._strip_blob_fields(
+                        context["memories"], self._DEFAULT_STRIP_FIELDS
+                    )
                 self._json_response(context)
             elif path in ("/dream", "/v1/dream"):
                 phases = body.get("phases")
@@ -2014,6 +2029,67 @@ class RecallHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    # Fields that are stripped from REST responses by default because they
+    # are large binary blobs or internal-only columns that bloat JSON payloads.
+    # Callers can opt-in via ?fields=embedding to include them.
+    _EMBEDDING_FIELDS = frozenset({"embedding"})
+    _DEFAULT_STRIP_FIELDS = frozenset({"embedding"})
+
+    @staticmethod
+    def _strip_blob_fields(items, fields: frozenset[str]) -> list[dict]:
+        """Remove large binary/internal fields from each result dict."""
+        if not fields:
+            return items
+        stripped = []
+        for item in items:
+            if isinstance(item, dict):
+                stripped.append({k: v for k, v in item.items() if k not in fields})
+            else:
+                stripped.append(item)
+        return stripped
+
+    @classmethod
+    def _project_fields(
+        cls, items: list[dict], fields_param: str | None
+    ) -> list[dict]:
+        """Apply ?fields= projection to a list of result dicts.
+
+        When *fields_param* is None, strip only the default strip fields
+        (embedding).  When it is a comma-separated list, keep only those
+        fields in each result.
+        """
+        if fields_param is None:
+            return cls._strip_blob_fields(items, cls._DEFAULT_STRIP_FIELDS)
+        keep = {f.strip() for f in fields_param.split(",") if f.strip()}
+        if not keep:
+            return cls._strip_blob_fields(items, cls._DEFAULT_STRIP_FIELDS)
+        return [
+            {k: v for k, v in item.items() if k in keep}
+            if isinstance(item, dict)
+            else item
+            for item in items
+        ]
+
+    @classmethod
+    def _project_fields_single(
+        cls, item: dict, fields_param: str | None
+    ) -> dict:
+        """Apply ?fields= projection to a single result dict."""
+        if fields_param is None:
+            return {
+                k: v
+                for k, v in item.items()
+                if k not in cls._DEFAULT_STRIP_FIELDS
+            }
+        keep = {f.strip() for f in fields_param.split(",") if f.strip()}
+        if not keep:
+            return {
+                k: v
+                for k, v in item.items()
+                if k not in cls._DEFAULT_STRIP_FIELDS
+            }
+        return {k: v for k, v in item.items() if k in keep}
 
     def _json_response(self, data: dict, status: int = 200):
         """Send a bounded JSON response with secure defaults."""

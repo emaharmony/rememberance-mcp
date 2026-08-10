@@ -118,7 +118,7 @@ class Settings:
         default_factory=lambda: _integer("OLLAMA_MAX_CONCURRENCY", 2)
     )
     EMBEDDINGS_ENABLED: bool = field(
-        default_factory=lambda: _boolean("EMBEDDINGS_ENABLED", False)
+        default_factory=lambda: _boolean("EMBEDDINGS_ENABLED", True)
     )
     # Per-chunk embeddings (chunk-on-write, chunk-level vector search, and the
     # dream-cycle chunk_backfill phase — semantic-retrieval.md §5.4/§5.5).
@@ -127,7 +127,7 @@ class Settings:
     # into vector/balanced search) and queues a one-time backfill workload
     # for every pre-existing memory on installs that opt in later.
     CHUNKING_ENABLED: bool = field(
-        default_factory=lambda: _boolean("CHUNKING_ENABLED", False)
+        default_factory=lambda: _boolean("CHUNKING_ENABLED", True)
     )
     SEARCH_MODEL: str = field(
         default_factory=lambda: _text("SEARCH_MODEL", "embeddinggemma")

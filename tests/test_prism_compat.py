@@ -44,7 +44,7 @@ def server():
     from recall_mcp.pipeline import MemoryPipeline
     from recall_mcp.api.rest import RecallHandler
 
-    pipeline = MemoryPipeline(settings=Settings())
+    pipeline = MemoryPipeline(settings=Settings(EMBEDDINGS_ENABLED=False))
     pipeline.extractor = StubExtractor()
     RecallHandler.pipeline = pipeline
 

@@ -22,6 +22,7 @@ def pipeline():
             DB_PATH=db_path,
             OLLAMA_BASE_URL="http://localhost:11434",
             GATE_MODEL_PATH=None,
+            EMBEDDINGS_ENABLED=False,
         )
         pipe = MemoryPipeline(settings=settings)
         # Override gate to heuristic-only for fast tests (no Ollama/DilBERT calls)
