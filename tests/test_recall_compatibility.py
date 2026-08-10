@@ -226,7 +226,7 @@ def test_legacy_database_remains_visible_without_a_competing_database(monkeypatc
         Settings._instance = None
         _reset_warning_state()
         with pytest.warns(RecallCompatibilityWarning, match="existing Remembrance"):
-            recall_settings = Settings()
+            recall_settings = Settings(EMBEDDINGS_ENABLED=False)
         recall = MemoryPipeline(settings=recall_settings)
 
         assert recall.settings.DB_PATH == legacy.settings.DB_PATH

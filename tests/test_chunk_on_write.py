@@ -181,9 +181,9 @@ def test_store_chunks_replaces_not_appends(pipeline):
     assert [c["content"] for c in _chunks(pipeline, mem_id)] == ["only"]
 
 
-def test_chunking_disabled_by_default(tmp_path):
+def test_chunking_enabled_by_default(tmp_path):
     settings = Settings(DB_PATH=tmp_path / "memory.db", BASE_DIR=tmp_path)
-    assert settings.CHUNKING_ENABLED is False
+    assert settings.CHUNKING_ENABLED is True
 
 
 def test_capture_skips_chunking_when_disabled(tmp_path):

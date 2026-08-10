@@ -37,6 +37,7 @@ def api_server():
             DB_PATH=db_path,
             OLLAMA_BASE_URL="http://localhost:11434",
             GATE_MODEL_PATH=None,
+            EMBEDDINGS_ENABLED=False,
         )
         pipeline = MemoryPipeline(settings=settings)
         pipeline.gate_chain = GateFallbackChain([HeuristicBackend()])
