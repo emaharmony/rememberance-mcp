@@ -927,6 +927,217 @@ def test_claude_cli_present_used_when_config_path_is_default(monkeypatch, tmp_pa
 
 
 # ---------------------------------------------------------------------------
+# Codex MCP: per-tool config.toml sub-tables must survive a rename
+#
+# Regression coverage for a real observed bug: `codex mcp add`/`remove` only
+# know about the top-level [mcp_servers.<name>] table (command/args/env), so
+# a naive remove-then-add migration silently drops any hand-added
+# [mcp_servers.<name>.tools.<tool>] sub-table (e.g. a per-tool
+# approval_mode). The fake CLI below intentionally reproduces the one
+# behavior this bug hinges on -- verified against a real Codex install --
+# that `codex mcp remove <name>` deletes that name's entire dotted table
+# family, sub-tables included.
+# ---------------------------------------------------------------------------
+
+
+_FAKE_CODEX_CLI_SCRIPT = r'''
+import json
+import re
+import sys
+from pathlib import Path
+
+CONFIG = Path(r"__CONFIG_TOML_PATH__")
+
+
+def _read():
+    return CONFIG.read_text(encoding="utf-8") if CONFIG.exists() else ""
+
+
+def _write(text):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG.write_text(text, encoding="utf-8")
+
+
+def _top_level_servers(text):
+    servers = {}
+    for m in re.finditer(r"(?m)^\[mcp_servers\.([A-Za-z0-9_-]+)\]\s*$", text):
+        name = m.group(1)
+        nxt = re.search(r"(?m)^\[", text[m.end():])
+        block = text[m.end():m.end() + nxt.start()] if nxt else text[m.end():]
+        cmd_m = re.search(r'(?m)^command\s*=\s*"([^"]*)"', block)
+        args_m = re.search(r"(?m)^args\s*=\s*(\[[^\]]*\])", block)
+        command = cmd_m.group(1) if cmd_m else None
+        args = json.loads(args_m.group(1)) if args_m else []
+        servers[name] = (command, args)
+    return servers
+
+
+argv = sys.argv[1:]
+
+if len(argv) >= 2 and argv[0] == "mcp" and argv[1] == "list":
+    servers = _top_level_servers(_read())
+    out = [
+        {"name": name, "transport": {"command": command, "args": args}}
+        for name, (command, args) in servers.items()
+    ]
+    print(json.dumps(out))
+    sys.exit(0)
+
+if len(argv) >= 3 and argv[0] == "mcp" and argv[1] == "remove":
+    name = argv[2]
+    text = _read()
+    pattern = re.compile(r"(?m)^\[mcp_servers\." + re.escape(name) + r"(\.[^\]]+)?\]\s*$")
+    kept = []
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        if pattern.match(line.rstrip("\r\n")):
+            skipping = True
+            continue
+        if skipping and re.match(r"^\s*\[", line):
+            skipping = False
+        if not skipping:
+            kept.append(line)
+    _write("".join(kept))
+    sys.exit(0)
+
+if len(argv) >= 3 and argv[0] == "mcp" and argv[1] == "add":
+    name = argv[2]
+    dd = argv.index("--")
+    rest = argv[dd + 1:]
+    command, args = rest[0], rest[1:]
+    text = _read()
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if text:
+        text += "\n"
+    text += "[mcp_servers.%s]\ncommand = %s\nargs = %s\n" % (
+        name,
+        json.dumps(command),
+        json.dumps(args),
+    )
+    _write(text)
+    sys.exit(0)
+
+sys.exit(1)
+'''
+
+
+def _write_fake_codex_cli(tmp_path: Path, config_toml_path: Path) -> Path:
+    script = _FAKE_CODEX_CLI_SCRIPT.replace(
+        "__CONFIG_TOML_PATH__", str(config_toml_path)
+    )
+    return _write_fake_cli(tmp_path, "codex", script)
+
+
+def _run_codex_mcp(monkeypatch, tmp_path, config_toml_path, *, dry_run=False):
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(ih.Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    stub = _write_fake_codex_cli(tmp_path, config_toml_path)
+    monkeypatch.setattr(
+        ih.shutil, "which", lambda name: str(stub) if name == "codex" else None
+    )
+    return ih.run_install_hooks(
+        agents=["codex"],
+        dry_run=dry_run,
+        scope="user",
+        force=False,
+        skip_mcp=False,
+        skip_hooks=True,
+        config_path=None,
+        settings_path=None,
+    )
+
+
+def test_codex_migrates_stale_remembrance_preserving_tool_subtables(
+    monkeypatch, tmp_path
+):
+    """Fails without the fix: a plain remove+add migration would leave
+    config.toml with a 'recall' entry and no 'tools.*' sub-tables at all."""
+
+    config_toml_path = tmp_path / "home" / ".codex" / "config.toml"
+    config_toml_path.parent.mkdir(parents=True)
+    config_toml_path.write_text(
+        '[mcp_servers.remembrance]\n'
+        'command = "remembrance-mcp"\n'
+        "args = []\n"
+        "\n"
+        "[mcp_servers.remembrance.tools.memory_context_build]\n"
+        'approval_mode = "approve"\n'
+        "\n"
+        "[mcp_servers.remembrance.tools.memory_capture]\n"
+        'approval_mode = "approve"\n',
+        encoding="utf-8",
+    )
+
+    result = _run_codex_mcp(monkeypatch, tmp_path, config_toml_path)
+
+    final_text = config_toml_path.read_text(encoding="utf-8")
+    assert "[mcp_servers.recall]" in final_text
+    assert "[mcp_servers.remembrance]" not in final_text
+    assert "[mcp_servers.remembrance.tools" not in final_text
+    assert "[mcp_servers.recall.tools.memory_context_build]" in final_text
+    assert "[mcp_servers.recall.tools.memory_capture]" in final_text
+    assert final_text.count('approval_mode = "approve"') == 2
+
+    agent_result = result["agents"][0]
+    assert agent_result["mcp"]["status"] == "updated"
+    assert "preserved" in agent_result["mcp"]["detail"]
+
+    backups = list(config_toml_path.parent.glob("config.toml.bak-*"))
+    assert len(backups) == 1
+
+
+def test_codex_migration_dry_run_preserves_subtables_reports_without_writing(
+    monkeypatch, tmp_path
+):
+    config_toml_path = tmp_path / "home" / ".codex" / "config.toml"
+    config_toml_path.parent.mkdir(parents=True)
+    original_text = (
+        '[mcp_servers.remembrance]\n'
+        'command = "remembrance-mcp"\n'
+        "args = []\n"
+        "\n"
+        "[mcp_servers.remembrance.tools.memory_capture]\n"
+        'approval_mode = "approve"\n'
+    )
+    config_toml_path.write_text(original_text, encoding="utf-8")
+
+    result = _run_codex_mcp(monkeypatch, tmp_path, config_toml_path, dry_run=True)
+
+    assert config_toml_path.read_text(encoding="utf-8") == original_text
+    assert list(config_toml_path.parent.glob("config.toml.bak-*")) == []
+    agent_result = result["agents"][0]
+    assert agent_result["mcp"]["status"] == "dry_run"
+    assert "mcp_servers.recall.tools.memory_capture" in agent_result["mcp"]["detail"]
+
+
+def test_codex_migration_with_subtables_idempotent_across_two_runs(
+    monkeypatch, tmp_path
+):
+    config_toml_path = tmp_path / "home" / ".codex" / "config.toml"
+    config_toml_path.parent.mkdir(parents=True)
+    config_toml_path.write_text(
+        '[mcp_servers.remembrance]\n'
+        'command = "remembrance-mcp"\n'
+        "args = []\n"
+        "\n"
+        "[mcp_servers.remembrance.tools.memory_capture]\n"
+        'approval_mode = "approve"\n',
+        encoding="utf-8",
+    )
+
+    first = _run_codex_mcp(monkeypatch, tmp_path, config_toml_path)
+    assert first["agents"][0]["mcp"]["status"] == "updated"
+
+    second = _run_codex_mcp(monkeypatch, tmp_path, config_toml_path)
+    assert second["agents"][0]["mcp"]["status"] == "no_op"
+
+    final_text = config_toml_path.read_text(encoding="utf-8")
+    assert final_text.count("[mcp_servers.recall.tools.memory_capture]") == 1
+
+
+# ---------------------------------------------------------------------------
 # Command string migration helper (unit-level)
 # ---------------------------------------------------------------------------
 

@@ -37,6 +37,7 @@ to test this module's write paths with `tmp_path` while a real `claude`/
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -569,11 +570,21 @@ def install_claude_mcp(
     backed_up = False
     if not migrated_via_cli:
         backed_up = backup_if_needed(backed_up)
-        new_entry: dict[str, Any] = {"type": entry_type, "command": new_command}
+        # Start from a copy of the old entry (not a fresh 4-field dict) so any
+        # extra key beyond type/command/args/env -- present or future --
+        # survives the migration instead of being silently dropped. This is
+        # the same class of bug as the Codex per-tool sub-table loss this
+        # module's Codex path now guards against, just with no known
+        # exploitable field on Claude Code's mcpServers schema today.
+        new_entry: dict[str, Any] = dict(old_entry)
+        new_entry["type"] = entry_type
+        new_entry["command"] = new_command
         if new_args:
             new_entry["args"] = new_args
-        if old_entry.get("env"):
-            new_entry["env"] = old_entry["env"]
+        else:
+            new_entry.pop("args", None)
+        if not old_entry.get("env"):
+            new_entry.pop("env", None)
         del servers["remembrance"]
         servers["recall"] = new_entry
         _set_nested(root, segments, servers)
@@ -823,7 +834,173 @@ def install_codex_hooks(*, hooks_path: Path, dry_run: bool) -> StepResult:
 
 
 # ---------------------------------------------------------------------------
-# Codex: MCP registration (CLI-only -- see module docstring / report)
+# Codex: preserving per-tool config.toml sub-tables across a rename
+# ---------------------------------------------------------------------------
+#
+# `codex mcp add`/`codex mcp remove` only know about the top-level
+# `[mcp_servers.<name>]` table (command/args/env) -- verified against a real
+# `codex mcp add --help`/`codex mcp remove --help`, neither of which has any
+# flag for per-tool settings, and `-c key=value` is a runtime override for
+# that invocation only, not something that gets persisted to config.toml (
+# verified experimentally: `codex mcp add ... -c 'model="x"'` does not write
+# `model` into the resulting config.toml at all). So a hand-customized
+# `[mcp_servers.<name>.tools.<tool>]` sub-table (e.g. a per-tool
+# `approval_mode`) has no CLI-expressible equivalent, and `codex mcp remove`
+# deletes the entire dotted table -- sub-tables included -- out from under a
+# `remembrance` -> `recall` rename.
+#
+# Recovering from that without a TOML *writer* dependency (the Python
+# standard library has none, and this project doesn't otherwise need one --
+# see the historical note this replaced) is possible because we don't need
+# to interpret or reformat the sub-tables at all: we only need to carry
+# their raw text across the rename with the parent table name swapped. This
+# is a narrow, line-based text transform -- not a general TOML parser -- and
+# is why it doesn't require `tomli`/`tomllib`/`tomlkit`/`tomli-w`.
+#
+# `install_codex_mcp` still goes through the `codex` CLI only for
+# command/args/env (the part it *can* express); this module only ever reads
+# config.toml directly to snapshot old sub-tables before a `remove`, and
+# appends their renamed copies back after a successful `add`. Hooks (a real
+# JSON file) are unaffected and still get the full merge/backup treatment in
+# `install_codex_hooks`.
+
+
+def _codex_config_toml_path() -> Path:
+    """Resolve the same config.toml the `codex` CLI itself reads/writes.
+
+    Mirrors the CLI's own resolution (verified experimentally against a real
+    `codex` install via `CODEX_HOME`): `$CODEX_HOME/config.toml` when that
+    env var is set, else `~/.codex/config.toml`.
+    """
+
+    codex_home = os.environ.get("CODEX_HOME")
+    base = Path(codex_home).expanduser() if codex_home else (Path.home() / ".codex")
+    return base / "config.toml"
+
+
+_TOML_TABLE_HEADER_RE = re.compile(r"^\s*\[([^\[\]]+)\]\s*$")
+
+
+def _extract_toml_subtables(text: str, parent_key: str) -> list[tuple[str, str]]:
+    """Return ``[(suffix, raw_block_text), ...]`` for every plain
+    ``[parent_key.suffix]`` table in ``text``, in file order.
+
+    Deliberately not a general TOML parser: it only recognizes non-array
+    table headers (``[[...]]`` is ignored) whose dotted path starts with
+    ``parent_key.``, and captures each table's body byte-for-byte -- key
+    order, comments, blank lines, quoting style and all -- from its header
+    line up to the next ``[...]`` header (of *any* table, not just
+    ``parent_key``'s) or end of file. ``parent_key`` itself (no suffix) is
+    never matched, since that's the top-level entry `install_codex_mcp`
+    already manages through the `codex` CLI.
+    """
+
+    prefix = parent_key + "."
+    lines = text.splitlines(keepends=True)
+    headers: list[tuple[int, str]] = []
+    for idx, raw_line in enumerate(lines):
+        match = _TOML_TABLE_HEADER_RE.match(raw_line.rstrip("\r\n"))
+        if match:
+            headers.append((idx, match.group(1).strip()))
+
+    blocks: list[tuple[str, str]] = []
+    for pos, (start_idx, key) in enumerate(headers):
+        if not key.startswith(prefix):
+            continue
+        suffix = key[len(prefix) :]
+        end_idx = headers[pos + 1][0] if pos + 1 < len(headers) else len(lines)
+        blocks.append((suffix, "".join(lines[start_idx:end_idx])))
+    return blocks
+
+
+def _codex_toml_has_table(text: str, key: str) -> bool:
+    for raw_line in text.splitlines():
+        match = _TOML_TABLE_HEADER_RE.match(raw_line.rstrip("\r\n"))
+        if match and match.group(1).strip() == key:
+            return True
+    return False
+
+
+def _reapply_codex_subtables(
+    config_toml_path: Path,
+    subtables: list[tuple[str, str]],
+    *,
+    old_server: str,
+    new_server: str,
+) -> list[str]:
+    """Append captured ``[mcp_servers.<old_server>.<suffix>]`` blocks back as
+    ``[mcp_servers.<new_server>.<suffix>]``, skipping any that already exist
+    under ``new_server`` (idempotency -- a re-run after a manual or prior
+    partial fix must not duplicate a table). Returns the list of suffixes
+    actually written; empty if there was nothing to do.
+
+    Called *after* `codex mcp add` has already rewritten config.toml with
+    the new top-level entry, so this only ever appends -- it never touches
+    anything the CLI itself just wrote.
+    """
+
+    if not subtables:
+        return []
+    if not config_toml_path.exists():
+        _warn(
+            f"'{config_toml_path}' is missing after the codex CLI ran; cannot "
+            "re-apply preserved per-tool sub-table(s). Re-add them manually."
+        )
+        return []
+    try:
+        current_text = config_toml_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        _warn(
+            f"Could not read '{config_toml_path}' to re-apply preserved per-tool "
+            f"sub-table(s): {exc}. Re-add them manually."
+        )
+        return []
+
+    pieces = [current_text]
+    if current_text and not current_text.endswith("\n"):
+        pieces.append("\n")
+    appended: list[str] = []
+    for suffix, block_text in subtables:
+        new_key = f"mcp_servers.{new_server}.{suffix}"
+        if _codex_toml_has_table(current_text, new_key):
+            continue
+        body_lines = block_text.splitlines(keepends=True)[1:]
+        pieces.append(f"\n[{new_key}]\n" + "".join(body_lines))
+        appended.append(suffix)
+
+    if not appended:
+        return []
+
+    _backup_file(config_toml_path)
+    config_toml_path.write_text("".join(pieces), encoding="utf-8")
+    return appended
+
+
+def _capture_codex_subtables_to_preserve(old_server: str) -> list[tuple[str, str]]:
+    """Best-effort snapshot of ``[mcp_servers.<old_server>.*]`` sub-tables,
+    taken before a `codex mcp remove` that would otherwise silently delete
+    them. Returns ``[]`` (never raises) if config.toml doesn't exist or
+    can't be read -- that's the same as there being nothing to preserve, and
+    migration must not be blocked by it.
+    """
+
+    config_toml_path = _codex_config_toml_path()
+    if not config_toml_path.exists():
+        return []
+    try:
+        text = config_toml_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        _warn(
+            f"Could not read '{config_toml_path}' to check for per-tool "
+            f"sub-tables to preserve: {exc}"
+        )
+        return []
+    return _extract_toml_subtables(text, f"mcp_servers.{old_server}")
+
+
+# ---------------------------------------------------------------------------
+# Codex: MCP registration (CLI-first for command/args/env -- see the
+# preservation helpers above for the one thing the CLI can't express)
 # ---------------------------------------------------------------------------
 
 
@@ -837,16 +1014,23 @@ def install_codex_mcp(
 
     Codex stores MCP server registrations in ``~/.codex/config.toml`` (a
     ``[mcp_servers.<name>]`` table), verified directly against a real
-    Codex installation -- not in a JSON file, unlike ``hooks.json``. The
-    Python standard library has no TOML *writer*, and hand-patching a TOML
-    table well enough to satisfy this project's "validate before writing,
-    never partially write" bar would mean either taking on a new
-    dependency or writing a bespoke TOML mutator neither asked for nor
-    justified by this task. So: MCP registration for Codex goes through
-    the ``codex`` CLI only. When it is unavailable, this step is skipped
-    with a clear warning rather than risking a corrupt config.toml -- hooks
-    (a real JSON file) are unaffected and still get the full merge/backup
-    treatment in `install_codex_hooks`.
+    Codex installation -- not in a JSON file, unlike ``hooks.json``. Command/
+    args/env go through the ``codex`` CLI only -- the Python standard
+    library has no TOML *writer*, and hand-patching the *main* entry table
+    well enough to satisfy this project's "validate before writing, never
+    partially write" bar would mean taking on a new dependency or writing a
+    bespoke TOML mutator neither asked for nor justified by that alone. When
+    the CLI is unavailable, MCP registration is skipped with a clear warning
+    rather than risking a corrupt config.toml -- hooks (a real JSON file)
+    are unaffected and still get the full merge/backup treatment in
+    `install_codex_hooks`.
+
+    Per-tool ``[mcp_servers.<name>.tools.<tool>]`` sub-tables are a
+    different story: the CLI has no way to express them at all (see the
+    module section above this function), so a `remove` + `add` rename would
+    silently drop them. Those are preserved with a narrow, format-preserving
+    text transform on config.toml itself -- see `_capture_codex_subtables_to_preserve`
+    / `_reapply_codex_subtables`.
     """
 
     if not codex_cli:
@@ -926,7 +1110,16 @@ def install_codex_mcp(
         _plan(
             "Remove superseded 'remembrance' MCP entry from Codex (recall already canonical)"
         )
+        config_toml_path = _codex_config_toml_path()
+        preserved = _capture_codex_subtables_to_preserve("remembrance")
         if dry_run:
+            if preserved:
+                names = ", ".join(f"mcp_servers.recall.{suffix}" for suffix, _ in preserved)
+                return StepResult(
+                    "dry_run",
+                    "would remove superseded 'remembrance' entry "
+                    f"(would preserve per-tool sub-table(s) as: {names})",
+                )
             return StepResult("dry_run", "would remove superseded 'remembrance' entry")
         result = _run_cli([codex_cli, "mcp", "remove", "remembrance"])
         if result is not None:
@@ -935,8 +1128,19 @@ def install_codex_mcp(
             message = "codex mcp remove failed for the superseded 'remembrance' entry; remove it manually."
             _warn(message)
             return StepResult("skipped", message)
+        reapplied = _reapply_codex_subtables(
+            config_toml_path, preserved, old_server="remembrance", new_server="recall"
+        )
+        if reapplied:
+            _action(
+                f"Preserved {len(reapplied)} per-tool sub-table(s) under 'recall': "
+                + ", ".join(reapplied)
+            )
         _action("Removed superseded 'remembrance' MCP entry from Codex")
-        return StepResult("updated", "removed superseded 'remembrance' entry")
+        detail = "removed superseded 'remembrance' entry"
+        if reapplied:
+            detail += f" (preserved per-tool sub-table(s): {', '.join(reapplied)})"
+        return StepResult("updated", detail)
 
     old_entry = servers.get("remembrance", {})
     new_command, new_args, recognized = migrate_command(
@@ -952,7 +1156,16 @@ def install_codex_mcp(
         return StepResult("skipped", message)
 
     _plan("Migrate Codex MCP entry: remembrance -> recall")
+    config_toml_path = _codex_config_toml_path()
+    preserved = _capture_codex_subtables_to_preserve("remembrance")
     if dry_run:
+        if preserved:
+            names = ", ".join(f"mcp_servers.recall.{suffix}" for suffix, _ in preserved)
+            return StepResult(
+                "dry_run",
+                "would migrate 'remembrance' -> 'recall' "
+                f"(would preserve per-tool sub-table(s) as: {names})",
+            )
         return StepResult("dry_run", "would migrate 'remembrance' -> 'recall'")
 
     _run_cli([codex_cli, "mcp", "remove", "remembrance"])
@@ -969,8 +1182,19 @@ def install_codex_mcp(
         )
         _warn(message)
         return StepResult("skipped", message)
+    reapplied = _reapply_codex_subtables(
+        config_toml_path, preserved, old_server="remembrance", new_server="recall"
+    )
+    if reapplied:
+        _action(
+            f"Preserved {len(reapplied)} per-tool sub-table(s) under 'recall': "
+            + ", ".join(reapplied)
+        )
     _action("Migrated Codex MCP entry: remembrance -> recall")
-    return StepResult("updated", "migrated 'remembrance' -> 'recall'")
+    detail = "migrated 'remembrance' -> 'recall'"
+    if reapplied:
+        detail += f" (preserved per-tool sub-table(s): {', '.join(reapplied)})"
+    return StepResult("updated", detail)
 
 
 # ---------------------------------------------------------------------------
