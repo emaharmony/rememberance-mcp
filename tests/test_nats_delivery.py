@@ -68,7 +68,7 @@ class _JetStream:
 
 
 def _subscriber(tmp_path, **pipeline_kwargs):
-    settings = Settings(BASE_DIR=tmp_path, DB_PATH=tmp_path / "memory.db")
+    settings = Settings(BASE_DIR=tmp_path, DB_PATH=tmp_path / "memory.db", EMBEDDINGS_ENABLED=False)
     pipeline = _Pipeline(settings, **pipeline_kwargs)
     return DurableNatsSubscriber(pipeline, settings=settings), pipeline
 

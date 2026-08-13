@@ -564,6 +564,58 @@ def command_outbox(settings: Settings, args: argparse.Namespace) -> int:
     return 0 if retried else 1
 
 
+def command_dead_letters(settings: Settings, args: argparse.Namespace) -> int:
+    """List dead-lettered outbox jobs and optionally replay them."""
+    store = MemoryStore(settings.DB_PATH)
+    with sqlite3.connect(str(settings.DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        if args.job_id:
+            rows = conn.execute(
+                "SELECT id, raw_capture_id, status, attempts, last_error, created_at "
+                "FROM outbox_jobs WHERE id = ? AND status = 'dead'",
+                (args.job_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, raw_capture_id, status, attempts, last_error, created_at "
+                "FROM outbox_jobs WHERE status = 'dead' ORDER BY created_at DESC"
+            ).fetchall()
+
+    if not rows:
+        print(json.dumps({"dead_letters": [], "count": 0}))
+        return 0
+
+    entries = [
+        {
+            "job_id": row["id"],
+            "raw_capture_id": row["raw_capture_id"],
+            "attempts": row["attempts"],
+            "error": row["last_error"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+    replayed = 0
+    if args.replay:
+        for entry in entries:
+            ok = store.retry_dead_outbox_job(entry["job_id"])
+            if ok:
+                replayed += 1
+
+    print(
+        json.dumps(
+            {
+                "dead_letters": entries,
+                "count": len(entries),
+                **({"replayed": replayed} if args.replay else {}),
+            },
+            indent=2,
+        )
+    )
+    return 0 if not args.replay or replayed == len(entries) else 1
+
+
 def command_install_hooks(_settings: Settings, args: argparse.Namespace) -> int:
     """Wire up an agent's MCP registration and hooks with no hand-editing."""
     from recall_mcp.install_hooks import run_install_hooks
@@ -1174,6 +1226,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Import at most N source memory rows (does not limit salvage).",
     )
+    dead = subparsers.add_parser("dead-letters")
+    dead.add_argument("--replay", action="store_true", help="Reset dead jobs back to pending for retry.")
+    dead.add_argument("--job-id", help="Replay only this specific job ID (optional).")
     subparsers.add_parser("version")
     return parser
 
@@ -1206,6 +1261,8 @@ def main() -> None:
         code = command_token_rotate(settings, args)
     elif args.command == "outbox":
         code = command_outbox(settings, args)
+    elif args.command == "dead-letters":
+        code = command_dead_letters(settings, args)
     elif args.command == "utility":
         code = command_utility(settings, args)
     elif args.command == "context":

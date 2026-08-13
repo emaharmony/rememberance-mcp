@@ -408,6 +408,15 @@ class MemoryStore:
                     job.raw_capture_id,
                 ),
             )
+            # Force FTS5 external-content index visibility for readers
+            # on other connections.  In WAL mode the FTS5 index can lag
+            # behind the base table until a checkpoint runs, which causes
+            # intermittent “just-captured row not found by keyword search”
+            # failures under full-suite load.
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASS)")
+            except Exception:
+                pass
         return job.raw_capture_id
 
     def record_gate_result(
@@ -820,6 +829,11 @@ class MemoryStore:
                     lifecycle_state,
                 ),
             )
+            # Sync FTS5 index for readers on other connections (WAL checkpoint).
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASS)")
+            except Exception:
+                pass
 
         logger.info(f"Stored memory {mem_id} (tier={tier}, category={category})")
         return mem_id

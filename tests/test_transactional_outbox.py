@@ -39,6 +39,7 @@ def _pipeline(tmp_path, **overrides) -> MemoryPipeline:
         "BASE_DIR": tmp_path,
         "DB_PATH": tmp_path / "memory.db",
         "EMBEDDINGS_ENABLED": False,
+        "CHUNKING_ENABLED": False,
         "CAPTURE_PROCESSING_TIMEOUT": 2.0,
         "OUTBOX_POLL_INTERVAL": 0.01,
         "OUTBOX_RETRY_BASE_SECONDS": 0.01,

@@ -37,6 +37,7 @@ def api_server():
             DB_PATH=db_path,
             OLLAMA_BASE_URL="http://localhost:11434",
             GATE_MODEL_PATH=None,
+            EMBEDDINGS_ENABLED=False,
         )
         pipeline = MemoryPipeline(settings=settings)
         pipeline.gate_chain = GateFallbackChain([HeuristicBackend()])
@@ -814,6 +815,111 @@ class TestDreamEndpoint:
         data = json.loads(resp.read())
         assert "status" in data
         assert data["status"] in ("ok", "partial")
+
+
+class TestFieldsProjection:
+    """Tests for the ?fields= projection parameter on /search and /memory/:id."""
+
+    def test_search_default_strips_embedding(self, api_server):
+        # Capture a memory first
+        body = json.dumps(
+            {"text": "Projection test default strip", "source": "test"}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{api_server['base_url']}/capture",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req)
+
+        resp = urllib.request.urlopen(
+            f"{api_server['base_url']}/search?q=Projection&mode=keyword"
+        )
+        data = json.loads(resp.read())
+        assert data["count"] >= 1
+        for item in data["results"]:
+            assert "embedding" not in item
+            assert "content" in item
+
+    def test_search_fields_param_selects_columns(self, api_server):
+        body = json.dumps(
+            {"text": "Projection test fields param select", "source": "test"}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{api_server['base_url']}/capture",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req)
+
+        resp = urllib.request.urlopen(
+            f"{api_server['base_url']}/search?q=Projection&mode=keyword&fields=content,category,tier"
+        )
+        data = json.loads(resp.read())
+        assert data["count"] >= 1
+        for item in data["results"]:
+            assert set(item.keys()) <= {"content", "category", "tier"}
+            assert "content" in item
+
+    def test_search_fields_param_single_field(self, api_server):
+        body = json.dumps(
+            {"text": "Projection test single field", "source": "test"}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{api_server['base_url']}/capture",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req)
+
+        resp = urllib.request.urlopen(
+            f"{api_server['base_url']}/search?q=Projection&mode=keyword&fields=content"
+        )
+        data = json.loads(resp.read())
+        assert data["count"] >= 1
+        for item in data["results"]:
+            assert set(item.keys()) == {"content"}
+
+    def test_memory_by_id_default_strips_embedding(self, api_server):
+        body = json.dumps(
+            {"text": "Projection test memory by id", "source": "test"}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{api_server['base_url']}/capture",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        resp = urllib.request.urlopen(req)
+        capture_data = json.loads(resp.read())
+        mem_id = capture_data["id"]
+
+        resp = urllib.request.urlopen(
+            f"{api_server['base_url']}/memory/{mem_id}"
+        )
+        data = json.loads(resp.read())
+        assert "embedding" not in data
+        assert "content" in data
+        assert "entities" in data
+
+    def test_memory_by_id_fields_param_selects_columns(self, api_server):
+        body = json.dumps(
+            {"text": "Projection test memory fields", "source": "test"}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{api_server['base_url']}/capture",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        resp = urllib.request.urlopen(req)
+        capture_data = json.loads(resp.read())
+        mem_id = capture_data["id"]
+
+        resp = urllib.request.urlopen(
+            f"{api_server['base_url']}/memory/{mem_id}?fields=content,category,tier"
+        )
+        data = json.loads(resp.read())
+        assert set(data.keys()) <= {"content", "category", "tier"}
+        assert "content" in data
 
 
 class TestNotFoundEndpoint:
