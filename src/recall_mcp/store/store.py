@@ -128,7 +128,8 @@ class MemoryStore:
         """Open a transactional connection with enforcement enabled."""
         connection = sqlite3.connect(str(self.db_path))
         connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA busy_timeout=30000")  # 30s — prevents hangs during WAL writes
+        connection.execute("PRAGMA journal_mode=WAL")
         try:
             with connection:
                 yield connection
