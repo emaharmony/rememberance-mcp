@@ -46,7 +46,8 @@ def _connect(db_path: Path):
     """Open a SQLite connection that commits/rolls back and closes on Windows."""
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")  # 30s — prevents hangs during WAL writes
+    conn.execute("PRAGMA journal_mode=WAL")  # Explicit WAL for concurrent read/write
     try:
         with conn:
             yield conn
